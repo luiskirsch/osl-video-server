@@ -314,16 +314,53 @@ function buildDiscordAuthorizeUrl({ uid, next = "/painel.html" }) {
   return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
-async function discordTokenFetch(bodyParams) {
-async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function discordTokenFetch(bodyParams) {
+  const body = new URLSearchParams(bodyParams);
+
+  const response = await fetch("https://discord.com/api/v10/oauth2/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+      "User-Agent": "O-SextoLugar/1.0"
+    },
+    body: body.toString()
+  });
+
+  const rawText = await response.text();
+
+  let data;
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = { raw: rawText };
+  }
+
+  console.log("Discord token request body:", {
+    client_id: bodyParams.client_id,
+    grant_type: bodyParams.grant_type,
+    redirect_uri: bodyParams.redirect_uri,
+    code_length: String(bodyParams.code || "").length
+  });
+  console.log("Discord token status:", response.status);
+  console.log(
+    "Discord token headers retry-after:",
+    response.headers.get("retry-after")
+  );
+  console.log(
+    "Discord token headers x-ratelimit-reset-after:",
+    response.headers.get("x-ratelimit-reset-after")
+  );
+  console.log("Discord token body:", data);
+  console.log("Discord token raw body:", rawText);
+
+  return { response, data, rawText };
+}
+
   const body = new URLSearchParams(bodyParams);
 
   const response = await fetch("https://discord.com/api/v10/oauth2/token", {
@@ -2158,5 +2195,5 @@ app.get("/token", requireGameAccess, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server rodando na porta ${PORT}`);
+  console.log("Server rodando na porta ${PORT}");
 });
