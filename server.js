@@ -21,10 +21,6 @@ const ACCESS_TOKEN_SECRET =
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-console.log("Servidor rodando na porta " + PORT);
-});
-
 const BACKEND_BASE_URL =
   process.env.BACKEND_BASE_URL || "https://osl-video-server.onrender.com";
 const FRONTEND_BASE_URL =
@@ -323,6 +319,10 @@ async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function discordTokenFetch(bodyParams) {
   const body = new URLSearchParams(bodyParams);
 
@@ -330,7 +330,7 @@ async function discordTokenFetch(bodyParams) {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
-      "Accept": "application/json",
+      Accept: "application/json",
       "User-Agent": "O-SextoLugar/1.0"
     },
     body: body.toString()
