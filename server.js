@@ -2211,9 +2211,30 @@ app.get(
 ========================= */
 
 app.use((req, res) => {
-  return sendError(res, 404, "ROTA_NAO_ENCONTRADA");
+  return res.status(404).json({
+    ok: false,
+    error: "ROTA_NAO_ENCONTRADA",
+    requestId: req.requestId || null
+  });
 });
 
+app.use((err, req, res, next) => {
+  logError("express_error_middleware", err, {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.originalUrl
+  });
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  return res.status(500).json({
+    ok: false,
+    error: "ERRO_INTERNO",
+    requestId: req.requestId
+  });
+});
 /* =========================
    START
 ========================= */
