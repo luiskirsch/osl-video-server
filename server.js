@@ -1251,9 +1251,9 @@ app.get("/logs/stream", (req, res) => {
   });
 
   const sendEvent = (event, data) => {
-    res.write("event: " + event + "\n");
-    res.write("data: " + data + "\n\n");
-  };
+  res.write("event: " + event + "\n");
+  res.write("data: " + data + "\n\n");
+};
 
   const sendLogLine = (line) => {
     if (!line || !String(line).trim()) return;
