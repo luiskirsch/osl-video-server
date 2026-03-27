@@ -9,7 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.get("/", (req, res) => {
-  res.send("OK - servidor vivo");
+  res.status(200).send("Servidor online");
 });
 
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
