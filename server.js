@@ -16,13 +16,16 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
-app.get("/", (req, res) => {
-  res.status(200).send("Servidor do O SextoLugar está online");
-});
 
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
+/* =========================
+   CONFIG
+========================= */
+
+const PORT = Number(process.env.PORT || 3000);
+
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "";
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
+const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 
 const LICENSE_SECRET =
   process.env.LICENSE_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DA_LICENCA";
@@ -30,10 +33,10 @@ const LICENSE_SECRET =
 const ACCESS_TOKEN_SECRET =
   process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DE_ACESSO";
 
-const PORT = process.env.PORT || 3000;
-
 const BACKEND_BASE_URL =
-  process.env.BACKEND_BASE_URL || "https://osl-video-server.onrender.com";
+  process.env.BACKEND_BASE_URL ||
+  "https://osl-video-server-production.up.railway.app";
+
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "https://preludiojogos.com.br";
 
@@ -53,7 +56,7 @@ const REFERRAL_COMMISSION_PERCENT = 0.31;
 const pagamentosAprovados = new Map();
 
 /* =========================
-   DISCORD
+   DISCORD CONFIG
 ========================= */
 
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || "";
@@ -65,7 +68,6 @@ const DISCORD_REDIRECT_URI =
 
 const DISCORD_ROLE_BUYER_ID = process.env.DISCORD_ROLE_BUYER_ID || "";
 const DISCORD_ROLE_AFFILIATE_ID = process.env.DISCORD_ROLE_AFFILIATE_ID || "";
-
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
 /* =========================
@@ -116,12 +118,30 @@ try {
 }
 
 /* =========================
-   HELPERS
+   GENERIC HELPERS
 ========================= */
+
+function asyncHandler(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch((error) => {
+      console.error("Erro não tratado em rota:", error);
+      if (res.headersSent) return;
+      return res.status(500).json({ error: "ERRO_INTERNO" });
+    });
+  };
+}
+
+function sendError(res, status, error, extra = {}) {
+  return res.status(status).json({
+    ok: false,
+    error,
+    ...extra
+  });
+}
 
 function ensureDb(res) {
   if (!db) {
-    res.status(500).json({ error: "FIREBASE_ADMIN_NAO_CONFIGURADO" });
+    sendError(res, 500, "FIREBASE_ADMIN_NAO_CONFIGURADO");
     return false;
   }
   return true;
@@ -135,11 +155,46 @@ function ensureDiscordConfigured(res) {
     !DISCORD_GUILD_ID ||
     !DISCORD_REDIRECT_URI
   ) {
-    res.status(500).json({ error: "DISCORD_NAO_CONFIGURADO" });
+    sendError(res, 500, "DISCORD_NAO_CONFIGURADO");
     return false;
   }
   return true;
 }
+
+function normalizeUid(value) {
+  return String(value || "").trim();
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function sanitizeNextPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw.startsWith("/")) return "/painel.html";
+  if (raw.startsWith("//")) return "/painel.html";
+  return raw;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatFirestoreDate(value) {
+  try {
+    if (!value) return null;
+    if (typeof value.toDate === "function") return value.toDate().toISOString();
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === "string") return value;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/* =========================
+   TOKEN HELPERS
+========================= */
 
 function base64urlEncode(input) {
   return Buffer.from(input)
@@ -202,6 +257,41 @@ function verifySignedToken(token, secret) {
   return { valid: true, payload };
 }
 
+function getBearerToken(req) {
+  const auth = req.headers.authorization || "";
+  if (!auth.startsWith("Bearer ")) return null;
+  return auth.slice(7).trim();
+}
+
+function requireGameAccess(req, res, next) {
+  const accessToken = getBearerToken(req);
+
+  if (!accessToken) {
+    return sendError(res, 401, "ACESSO_NAO_INFORMADO");
+  }
+
+  const verification = verifySignedToken(accessToken, ACCESS_TOKEN_SECRET);
+
+  if (!verification.valid) {
+    return sendError(res, 401, "ACESSO_INVALIDO", {
+      detail: verification.error || null
+    });
+  }
+
+  const payload = verification.payload;
+
+  if (payload.token_type !== "game_access" || payload.product !== PRODUCT_ID) {
+    return sendError(res, 401, "ACESSO_NEGADO");
+  }
+
+  req.gameAccess = payload;
+  next();
+}
+
+/* =========================
+   BUSINESS HELPERS
+========================= */
+
 function generateExternalReference() {
   return `OSL-${Date.now()}-${crypto
     .randomBytes(5)
@@ -219,76 +309,6 @@ function generateLicenseCode(paymentId, externalReference, email) {
   )}-${hash.slice(12, 16)}-${hash.slice(16, 20)}`;
 }
 
-async function mercadoPagoFetch(url, options = {}) {
-  if (!MP_ACCESS_TOKEN) {
-    throw new Error("MP_ACCESS_TOKEN_NAO_CONFIGURADO");
-  }
-
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
-      ...(options.headers || {})
-    }
-  });
-
-  const data = await response.json().catch(() => ({}));
-  return { response, data };
-}
-
-function getBearerToken(req) {
-  const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Bearer ")) return null;
-  return auth.slice(7).trim();
-}
-
-function requireGameAccess(req, res, next) {
-  const accessToken = getBearerToken(req);
-
-  if (!accessToken) {
-    return res.status(401).json({ error: "ACESSO_NAO_INFORMADO" });
-  }
-
-  const verification = verifySignedToken(accessToken, ACCESS_TOKEN_SECRET);
-
-  if (!verification.valid) {
-    return res.status(401).json({
-      error: "ACESSO_INVALIDO",
-      detail: verification.error || null
-    });
-  }
-
-  const payload = verification.payload;
-
-  if (payload.token_type !== "game_access" || payload.product !== PRODUCT_ID) {
-    return res.status(401).json({ error: "ACESSO_NEGADO" });
-  }
-
-  req.gameAccess = payload;
-  next();
-}
-
-function normalizeUid(value) {
-  return String(value || "").trim();
-}
-
-function normalizeEmail(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function formatFirestoreDate(value) {
-  try {
-    if (!value) return null;
-    if (typeof value.toDate === "function") return value.toDate().toISOString();
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === "string") return value;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function buildDiscordState(payload) {
   return signPayload(
     {
@@ -298,13 +318,6 @@ function buildDiscordState(payload) {
     },
     ACCESS_TOKEN_SECRET
   );
-}
-
-function sanitizeNextPath(value) {
-  const raw = String(value || "").trim();
-  if (!raw.startsWith("/")) return "/painel.html";
-  if (raw.startsWith("//")) return "/painel.html";
-  return raw;
 }
 
 function buildDiscordAuthorizeUrl({ uid, next = "/painel.html" }) {
@@ -325,8 +338,48 @@ function buildDiscordAuthorizeUrl({ uid, next = "/painel.html" }) {
   return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function buildDiscordAvatarUrl(discordUser) {
+  const userId = String(discordUser?.id || "").trim();
+  const avatar = String(discordUser?.avatar || "").trim();
+
+  if (!userId || !avatar) return "";
+  return `https://cdn.discordapp.com/avatars/${userId}/${avatar}.png`;
+}
+
+/* =========================
+   HTTP CLIENTS
+========================= */
+
+async function mercadoPagoFetch(url, options = {}) {
+  if (!MP_ACCESS_TOKEN) {
+    throw new Error("MP_ACCESS_TOKEN_NAO_CONFIGURADO");
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${MP_ACCESS_TOKEN}`,
+      ...(options.headers || {})
+    }
+  });
+
+  const data = await response.json().catch(() => ({}));
+  return { response, data };
+}
+
+async function discordApiFetch(url, options = {}) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text || null;
+  }
+
+  return { response, data };
 }
 
 async function discordTokenFetch(bodyParams) {
@@ -357,7 +410,6 @@ async function discordTokenFetch(bodyParams) {
     redirect_uri: bodyParams.redirect_uri,
     code_length: String(bodyParams.code || "").length
   });
-
   console.log("Discord token status:", response.status);
   console.log(
     "Discord token headers retry-after:",
@@ -372,6 +424,10 @@ async function discordTokenFetch(bodyParams) {
 
   return { response, data, rawText };
 }
+
+/* =========================
+   DISCORD SERVICE
+========================= */
 
 async function exchangeDiscordCode(code) {
   const payload = {
@@ -467,19 +523,11 @@ async function getDiscordGuildMember(discordUserId) {
   );
 }
 
-function buildDiscordAvatarUrl(discordUser) {
-  const userId = String(discordUser?.id || "").trim();
-  const avatar = String(discordUser?.avatar || "").trim();
+/* =========================
+   FIRESTORE SERVICE
+========================= */
 
-  if (!userId || !avatar) return "";
-  return `https://cdn.discordapp.com/avatars/${userId}/${avatar}.png`;
-}
-
-async function saveDiscordLinkToUser({
-  uid,
-  discordUser,
-  discordAccessToken
-}) {
+async function saveDiscordLinkToUser({ uid, discordUser, discordAccessToken }) {
   const userRef = db.collection("users").doc(uid);
 
   await userRef.set(
@@ -509,81 +557,6 @@ async function getAffiliateProfileByUid(uid) {
   const snap = await db.collection("affiliates").doc(uid).get();
   return snap.exists ? snap.data() : null;
 }
-
-async function syncDiscordRolesForUid(uid) {
-  const normalizedUid = normalizeUid(uid);
-  if (!normalizedUid) {
-    return {
-      ok: false,
-      error: "UID_OBRIGATORIO"
-    };
-  }
-
-  const userProfile = await getUserProfileByUid(normalizedUid);
-  if (!userProfile?.discordUserId) {
-    return {
-      ok: false,
-      error: "DISCORD_NAO_VINCULADO"
-    };
-  }
-
-  const affiliate = await getAffiliateProfileByUid(normalizedUid);
-  const discordUserId = String(userProfile.discordUserId || "").trim();
-
-  const shouldHaveBuyerRole =
-    !!userProfile.licenseLinked || !!userProfile?.access?.active;
-
-  const shouldHaveAffiliateRole = !!affiliate;
-
-  const guildMemberRes = await getDiscordGuildMember(discordUserId);
-
-  if (!guildMemberRes.response.ok) {
-    return {
-      ok: false,
-      error: "MEMBRO_DISCORD_NAO_ENCONTRADO",
-      details: guildMemberRes.data || null
-    };
-  }
-
-  if (DISCORD_ROLE_BUYER_ID) {
-    if (shouldHaveBuyerRole) {
-      await addDiscordRoleToMember({
-        discordUserId,
-        roleId: DISCORD_ROLE_BUYER_ID
-      });
-    } else {
-      await removeDiscordRoleFromMember({
-        discordUserId,
-        roleId: DISCORD_ROLE_BUYER_ID
-      });
-    }
-  }
-
-  if (DISCORD_ROLE_AFFILIATE_ID) {
-    if (shouldHaveAffiliateRole) {
-      await addDiscordRoleToMember({
-        discordUserId,
-        roleId: DISCORD_ROLE_AFFILIATE_ID
-      });
-    } else {
-      await removeDiscordRoleFromMember({
-        discordUserId,
-        roleId: DISCORD_ROLE_AFFILIATE_ID
-      });
-    }
-  }
-
-  return {
-    ok: true,
-    discordUserId,
-    buyerRoleApplied: !!shouldHaveBuyerRole,
-    affiliateRoleApplied: !!shouldHaveAffiliateRole
-  };
-}
-
-/* =========================
-   LICENÇAS
-========================= */
 
 async function saveLicenseRecord(record) {
   const ref = db.collection("licenses").doc(record.licenseCode);
@@ -625,7 +598,7 @@ async function claimOrValidateLicenseOwnership({ licenseCode, uid, email }) {
 
   const ref = db.collection("licenses").doc(licenseCode);
 
-  const result = await db.runTransaction(async (tx) => {
+  return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
 
     if (!snap.exists) {
@@ -709,13 +682,7 @@ async function claimOrValidateLicenseOwnership({ licenseCode, uid, email }) {
       error: "LICENCA_JA_VINCULADA_A_OUTRA_CONTA"
     };
   });
-
-  return result;
 }
-
-/* =========================
-   AFILIADOS / INDICAÇÃO
-========================= */
 
 function generateReferralCodeFromUid(uid) {
   const clean = String(uid || "")
@@ -958,39 +925,117 @@ async function approveReferralRewardFromPayment(payment) {
   });
 }
 
+async function syncDiscordRolesForUid(uid) {
+  const normalizedUid = normalizeUid(uid);
+  if (!normalizedUid) {
+    return {
+      ok: false,
+      error: "UID_OBRIGATORIO"
+    };
+  }
+
+  const userProfile = await getUserProfileByUid(normalizedUid);
+  if (!userProfile?.discordUserId) {
+    return {
+      ok: false,
+      error: "DISCORD_NAO_VINCULADO"
+    };
+  }
+
+  const affiliate = await getAffiliateProfileByUid(normalizedUid);
+  const discordUserId = String(userProfile.discordUserId || "").trim();
+
+  const shouldHaveBuyerRole =
+    !!userProfile.licenseLinked || !!userProfile?.access?.active;
+  const shouldHaveAffiliateRole = !!affiliate;
+
+  const guildMemberRes = await getDiscordGuildMember(discordUserId);
+
+  if (!guildMemberRes.response.ok) {
+    return {
+      ok: false,
+      error: "MEMBRO_DISCORD_NAO_ENCONTRADO",
+      details: guildMemberRes.data || null
+    };
+  }
+
+  if (DISCORD_ROLE_BUYER_ID) {
+    if (shouldHaveBuyerRole) {
+      await addDiscordRoleToMember({
+        discordUserId,
+        roleId: DISCORD_ROLE_BUYER_ID
+      });
+    } else {
+      await removeDiscordRoleFromMember({
+        discordUserId,
+        roleId: DISCORD_ROLE_BUYER_ID
+      });
+    }
+  }
+
+  if (DISCORD_ROLE_AFFILIATE_ID) {
+    if (shouldHaveAffiliateRole) {
+      await addDiscordRoleToMember({
+        discordUserId,
+        roleId: DISCORD_ROLE_AFFILIATE_ID
+      });
+    } else {
+      await removeDiscordRoleFromMember({
+        discordUserId,
+        roleId: DISCORD_ROLE_AFFILIATE_ID
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    discordUserId,
+    buyerRoleApplied: !!shouldHaveBuyerRole,
+    affiliateRoleApplied: !!shouldHaveAffiliateRole
+  };
+}
+
 /* =========================
-   ROTAS BÁSICAS
+   HEALTH / ROOT
 ========================= */
 
 app.get("/", (req, res) => {
-  res.send("Servidor do O SextoLugar está online.");
+  return res.status(200).send("Servidor do O SextoLugar está online.");
+});
+
+app.get("/health", (req, res) => {
+  return res.status(200).json({
+    ok: true,
+    service: "osl-video-server",
+    uptime: Math.round(process.uptime()),
+    firebase: !!db
+  });
 });
 
 /* =========================
-   DISCORD
+   DISCORD ROUTES
 ========================= */
 
-app.get("/discord/connect", async (req, res) => {
-  try {
+app.get(
+  "/discord/connect",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res) || !ensureDiscordConfigured(res)) return;
 
     const uid = normalizeUid(req.query.uid);
     const next = sanitizeNextPath(req.query.next || "/painel.html");
 
     if (!uid) {
-      return res.status(400).json({ ok: false, error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const authUrl = buildDiscordAuthorizeUrl({ uid, next });
     return res.redirect(302, authUrl);
-  } catch (error) {
-    console.error("Erro em /discord/connect:", error);
-    return res.status(500).json({ ok: false, error: "ERRO_DISCORD_CONNECT" });
-  }
-});
+  })
+);
 
-app.get("/discord/callback", async (req, res) => {
-  try {
+app.get(
+  "/discord/callback",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res) || !ensureDiscordConfigured(res)) return;
 
     const code = String(req.query.code || "").trim();
@@ -1018,23 +1063,23 @@ app.get("/discord/callback", async (req, res) => {
     const tokenRes = await exchangeDiscordCode(code);
 
     if (!tokenRes.response.ok || !tokenRes.data?.access_token) {
-  console.error("Falha token Discord:", {
-    status: tokenRes.response.status,
-    data: tokenRes.data,
-    raw: tokenRes.rawText || null,
-    redirectUri: DISCORD_REDIRECT_URI
-  });
+      console.error("Falha token Discord:", {
+        status: tokenRes.response.status,
+        data: tokenRes.data,
+        raw: tokenRes.rawText || null,
+        redirectUri: DISCORD_REDIRECT_URI
+      });
 
-  if (tokenRes.response.status === 429) {
-    return res
-      .status(429)
-      .send("Discord bloqueou temporariamente a autenticação. Aguarde e tente novamente.");
-  }
+      if (tokenRes.response.status === 429) {
+        return res
+          .status(429)
+          .send("Discord bloqueou temporariamente a autenticação. Aguarde e tente novamente.");
+      }
 
-  return res
-    .status(500)
-    .send("Não foi possível autenticar com o Discord. Verifique os logs do servidor.");
-}
+      return res
+        .status(500)
+        .send("Não foi possível autenticar com o Discord. Verifique os logs do servidor.");
+    }
 
     const discordAccessToken = String(tokenRes.data.access_token || "").trim();
 
@@ -1069,19 +1114,17 @@ app.get("/discord/callback", async (req, res) => {
       `${FRONTEND_BASE_URL}${sanitizeNextPath(next)}?discord=connected`;
 
     return res.redirect(302, redirectTarget);
-  } catch (error) {
-    console.error("Erro em /discord/callback:", error);
-    return res.status(500).send("Erro interno na integração com Discord.");
-  }
-});
+  })
+);
 
-app.get("/discord/status/:uid", async (req, res) => {
-  try {
+app.get(
+  "/discord/status/:uid",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.params.uid);
     if (!uid) {
-      return res.status(400).json({ ok: false, error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const userProfile = await getUserProfileByUid(uid);
@@ -1094,44 +1137,40 @@ app.get("/discord/status/:uid", async (req, res) => {
       discordGlobalName: userProfile?.discordGlobalName || "",
       discordAvatar: userProfile?.discordAvatar || ""
     });
-  } catch (error) {
-    console.error("Erro em /discord/status/:uid:", error);
-    return res.status(500).json({ ok: false, error: "ERRO_DISCORD_STATUS" });
-  }
-});
+  })
+);
 
-app.post("/discord/sync/:uid", async (req, res) => {
-  try {
+app.post(
+  "/discord/sync/:uid",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res) || !ensureDiscordConfigured(res)) return;
 
     const uid = normalizeUid(req.params.uid);
 
     if (!uid) {
-      return res.status(400).json({ ok: false, error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const result = await syncDiscordRolesForUid(uid);
 
     if (!result.ok) {
-      return res.status(400).json(result);
+      return sendError(res, 400, result.error, { details: result.details || null });
     }
 
     return res.json({
       ok: true,
       ...result
     });
-  } catch (error) {
-    console.error("Erro em /discord/sync/:uid:", error);
-    return res.status(500).json({ ok: false, error: "ERRO_DISCORD_SYNC" });
-  }
-});
+  })
+);
 
 /* =========================
-   PAGAMENTO
+   PAYMENT ROUTES
 ========================= */
 
-app.post("/criar-pagamento", async (req, res) => {
-  try {
+app.post(
+  "/criar-pagamento",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const nome = String(req.body?.nome || "").trim().slice(0, 80);
@@ -1140,16 +1179,14 @@ app.post("/criar-pagamento", async (req, res) => {
       .toLowerCase()
       .slice(0, 160);
 
-    const refCodeInput = String(req.body?.refCode || "")
-      .trim()
-      .toUpperCase();
+    const refCodeInput = String(req.body?.refCode || "").trim().toUpperCase();
 
     if (!nome) {
-      return res.status(400).json({ error: "NOME_OBRIGATORIO" });
+      return sendError(res, 400, "NOME_OBRIGATORIO");
     }
 
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: "EMAIL_INVALIDO" });
+      return sendError(res, 400, "EMAIL_INVALIDO");
     }
 
     let referralData = null;
@@ -1158,11 +1195,11 @@ app.post("/criar-pagamento", async (req, res) => {
       referralData = await getAffiliateByCode(refCodeInput);
 
       if (!referralData) {
-        return res.status(400).json({ error: "CODIGO_INDICACAO_INVALIDO" });
+        return sendError(res, 400, "CODIGO_INDICACAO_INVALIDO");
       }
 
       if (normalizeEmail(referralData.data.email) === email) {
-        return res.status(400).json({ error: "AUTOINDICACAO_NAO_PERMITIDA" });
+        return sendError(res, 400, "AUTOINDICACAO_NAO_PERMITIDA");
       }
     }
 
@@ -1218,6 +1255,7 @@ app.post("/criar-pagamento", async (req, res) => {
       );
 
       return res.status(500).json({
+        ok: false,
         error: "ERRO_MP_CRIAR_PAGAMENTO",
         details: data,
         message:
@@ -1248,18 +1286,15 @@ app.post("/criar-pagamento", async (req, res) => {
       ref: externalReference,
       referralApplied: !!referralData
     });
-  } catch (error) {
-    console.error("Erro ao criar pagamento:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_CRIAR_PAGAMENTO" });
-  }
-});
+  })
+);
 
 app.get("/status-pagamento/:ref", (req, res) => {
   try {
     const ref = String(req.params.ref || "").trim();
 
     if (!ref) {
-      return res.status(400).json({ error: "REF_OBRIGATORIA" });
+      return sendError(res, 400, "REF_OBRIGATORIA");
     }
 
     const pagamento = pagamentosAprovados.get(ref);
@@ -1282,22 +1317,23 @@ app.get("/status-pagamento/:ref", (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao consultar status do pagamento:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_STATUS_PAGAMENTO" });
+    return sendError(res, 500, "ERRO_INTERNO_STATUS_PAGAMENTO");
   }
 });
 
 /* =========================
-   LICENÇA / ACESSO
+   LICENSE / ACCESS ROUTES
 ========================= */
 
-app.post("/emitir-licenca", async (req, res) => {
-  try {
+app.post(
+  "/emitir-licenca",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const paymentId = String(req.body?.paymentId || "").trim();
 
     if (!paymentId) {
-      return res.status(400).json({ error: "PAYMENT_ID_OBRIGATORIO" });
+      return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");
     }
 
     const { response, data: payment } = await mercadoPagoFetch(
@@ -1308,15 +1344,15 @@ app.post("/emitir-licenca", async (req, res) => {
     if (!response.ok) {
       console.error("Erro Mercado Pago /emitir-licenca:", payment);
       return res.status(500).json({
+        ok: false,
         error: "ERRO_MP_CONSULTAR_PAGAMENTO",
         details: payment
       });
     }
 
     if (payment.status !== "approved") {
-      return res.status(400).json({
-        error: "PAGAMENTO_NAO_APROVADO",
-        status: payment.status || null
+      return sendError(res, 400, "PAGAMENTO_NAO_APROVADO", {
+        statusAtual: payment.status || null
       });
     }
 
@@ -1324,8 +1360,7 @@ app.post("/emitir-licenca", async (req, res) => {
 
     const transactionAmount = Number(payment.transaction_amount || 0);
     if (Math.abs(transactionAmount - PRODUCT_PRICE) > 0.01) {
-      return res.status(400).json({
-        error: "VALOR_DIVERGENTE",
+      return sendError(res, 400, "VALOR_DIVERGENTE", {
         valor_recebido: transactionAmount
       });
     }
@@ -1345,9 +1380,7 @@ app.post("/emitir-licenca", async (req, res) => {
     const externalReference = String(payment.external_reference || "").trim();
 
     if (!email || !externalReference) {
-      return res.status(400).json({
-        error: "DADOS_INSUFICIENTES_PARA_LICENCA"
-      });
+      return sendError(res, 400, "DADOS_INSUFICIENTES_PARA_LICENCA");
     }
 
     const licenseCode = generateLicenseCode(
@@ -1393,38 +1426,27 @@ app.post("/emitir-licenca", async (req, res) => {
       email,
       ref: externalReference
     });
-  } catch (error) {
-    console.error("Erro ao emitir licença:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_EMITIR_LICENCA" });
-  }
-});
+  })
+);
 
 app.post("/verificar-licenca", (req, res) => {
   try {
     const licenseToken = String(req.body?.licenseToken || "").trim();
 
     if (!licenseToken) {
-      return res.status(400).json({ error: "LICENCA_OBRIGATORIA" });
+      return sendError(res, 400, "LICENCA_OBRIGATORIA");
     }
 
     const verification = verifySignedToken(licenseToken, LICENSE_SECRET);
 
     if (!verification.valid) {
-      return res.status(401).json({
-        ok: false,
-        valid: false,
-        error: verification.error || "LICENCA_INVALIDA"
-      });
+      return sendError(res, 401, verification.error || "LICENCA_INVALIDA");
     }
 
     const payload = verification.payload;
 
     if (payload.token_type !== "license" || payload.product !== PRODUCT_ID) {
-      return res.status(401).json({
-        ok: false,
-        valid: false,
-        error: "LICENCA_NAO_AUTORIZADA"
-      });
+      return sendError(res, 401, "LICENCA_NAO_AUTORIZADA");
     }
 
     return res.json({
@@ -1437,27 +1459,21 @@ app.post("/verificar-licenca", (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao verificar licença:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_VERIFICAR_LICENCA" });
+    return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_LICENCA");
   }
 });
 
-app.post("/validar-codigo-licenca", async (req, res) => {
-  try {
+app.post(
+  "/validar-codigo-licenca",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
-    const licenseCode = String(req.body?.licenseCode || "")
-      .trim()
-      .toUpperCase();
-
+    const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
     const uid = normalizeUid(req.body?.uid);
     const email = normalizeEmail(req.body?.email);
 
     if (!licenseCode) {
-      return res.status(400).json({
-        ok: false,
-        valid: false,
-        error: "CODIGO_OBRIGATORIO"
-      });
+      return sendError(res, 400, "CODIGO_OBRIGATORIO");
     }
 
     const ownership = await claimOrValidateLicenseOwnership({
@@ -1467,11 +1483,7 @@ app.post("/validar-codigo-licenca", async (req, res) => {
     });
 
     if (!ownership.ok) {
-      return res.status(ownership.status).json({
-        ok: false,
-        valid: false,
-        error: ownership.error
-      });
+      return sendError(res, ownership.status, ownership.error);
     }
 
     const license = ownership.license;
@@ -1487,29 +1499,21 @@ app.post("/validar-codigo-licenca", async (req, res) => {
       boundToUid: license.boundToUid || "",
       boundToEmail: license.boundToEmail || ""
     });
-  } catch (error) {
-    console.error("Erro ao validar código da licença:", error);
-    return res.status(500).json({
-      ok: false,
-      valid: false,
-      error: "ERRO_INTERNO_VALIDAR_CODIGO"
-    });
-  }
-});
+  })
+);
 
 app.post("/emitir-acesso", (req, res) => {
   try {
     const licenseToken = String(req.body?.licenseToken || "").trim();
 
     if (!licenseToken) {
-      return res.status(400).json({ error: "LICENCA_OBRIGATORIA" });
+      return sendError(res, 400, "LICENCA_OBRIGATORIA");
     }
 
     const verification = verifySignedToken(licenseToken, LICENSE_SECRET);
 
     if (!verification.valid) {
-      return res.status(401).json({
-        error: "LICENCA_INVALIDA",
+      return sendError(res, 401, "LICENCA_INVALIDA", {
         detail: verification.error || null
       });
     }
@@ -1517,7 +1521,7 @@ app.post("/emitir-acesso", (req, res) => {
     const license = verification.payload;
 
     if (license.token_type !== "license" || license.product !== PRODUCT_ID) {
-      return res.status(401).json({ error: "LICENCA_NAO_AUTORIZADA" });
+      return sendError(res, 401, "LICENCA_NAO_AUTORIZADA");
     }
 
     const accessPayload = {
@@ -1540,23 +1544,21 @@ app.post("/emitir-acesso", (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao emitir acesso:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_EMITIR_ACESSO" });
+    return sendError(res, 500, "ERRO_INTERNO_EMITIR_ACESSO");
   }
 });
 
-app.post("/emitir-acesso-por-codigo", async (req, res) => {
-  try {
+app.post(
+  "/emitir-acesso-por-codigo",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
-    const licenseCode = String(req.body?.licenseCode || "")
-      .trim()
-      .toUpperCase();
-
+    const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
     const uid = normalizeUid(req.body?.uid);
     const email = normalizeEmail(req.body?.email);
 
     if (!licenseCode) {
-      return res.status(400).json({ error: "CODIGO_OBRIGATORIO" });
+      return sendError(res, 400, "CODIGO_OBRIGATORIO");
     }
 
     const ownership = await claimOrValidateLicenseOwnership({
@@ -1566,7 +1568,7 @@ app.post("/emitir-acesso-por-codigo", async (req, res) => {
     });
 
     if (!ownership.ok) {
-      return res.status(ownership.status).json({ error: ownership.error });
+      return sendError(res, ownership.status, ownership.error);
     }
 
     const license = ownership.license;
@@ -1593,38 +1595,27 @@ app.post("/emitir-acesso-por-codigo", async (req, res) => {
       licenseCode: license.licenseCode,
       claimedNow: ownership.claimedNow
     });
-  } catch (error) {
-    console.error("Erro ao emitir acesso por código:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_EMITIR_ACESSO_CODIGO" });
-  }
-});
+  })
+);
 
 app.post("/verificar-acesso", (req, res) => {
   try {
     const accessToken = String(req.body?.accessToken || "").trim();
 
     if (!accessToken) {
-      return res.status(400).json({ error: "ACESSO_OBRIGATORIO" });
+      return sendError(res, 400, "ACESSO_OBRIGATORIO");
     }
 
     const verification = verifySignedToken(accessToken, ACCESS_TOKEN_SECRET);
 
     if (!verification.valid) {
-      return res.status(401).json({
-        ok: false,
-        liberado: false,
-        error: verification.error || "ACESSO_INVALIDO"
-      });
+      return sendError(res, 401, verification.error || "ACESSO_INVALIDO");
     }
 
     const payload = verification.payload;
 
     if (payload.token_type !== "game_access" || payload.product !== PRODUCT_ID) {
-      return res.status(401).json({
-        ok: false,
-        liberado: false,
-        error: "ACESSO_NEGADO"
-      });
+      return sendError(res, 401, "ACESSO_NEGADO");
     }
 
     return res.json({
@@ -1637,16 +1628,17 @@ app.post("/verificar-acesso", (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao verificar acesso:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_VERIFICAR_ACESSO" });
+    return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_ACESSO");
   }
 });
 
 /* =========================
-   AFILIADOS
+   AFFILIATE ROUTES
 ========================= */
 
-app.post("/afiliado/garantir", async (req, res) => {
-  try {
+app.post(
+  "/afiliado/garantir",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.body?.uid);
@@ -1654,7 +1646,7 @@ app.post("/afiliado/garantir", async (req, res) => {
     const nome = String(req.body?.nome || "").trim().slice(0, 80);
 
     if (!uid) {
-      return res.status(400).json({ error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const affiliate = await ensureAffiliateProfile({ uid, email, nome });
@@ -1676,27 +1668,25 @@ app.post("/afiliado/garantir", async (req, res) => {
         pixKey: affiliate.pixKey || ""
       }
     });
-  } catch (error) {
-    console.error("Erro ao garantir afiliado:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_AFILIADO_GARANTIR" });
-  }
-});
+  })
+);
 
-app.get("/afiliado/perfil/:uid", async (req, res) => {
-  try {
+app.get(
+  "/afiliado/perfil/:uid",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.params.uid);
 
     if (!uid) {
-      return res.status(400).json({ error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const ref = db.collection("affiliates").doc(uid);
     const snap = await ref.get();
 
     if (!snap.exists) {
-      return res.status(404).json({ error: "AFILIADO_NAO_ENCONTRADO" });
+      return sendError(res, 404, "AFILIADO_NAO_ENCONTRADO");
     }
 
     const affiliate = snap.data();
@@ -1718,20 +1708,18 @@ app.get("/afiliado/perfil/:uid", async (req, res) => {
         pixKey: affiliate.pixKey || ""
       }
     });
-  } catch (error) {
-    console.error("Erro ao buscar perfil afiliado:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_AFILIADO_PERFIL" });
-  }
-});
+  })
+);
 
-app.get("/afiliado/historico/:uid", async (req, res) => {
-  try {
+app.get(
+  "/afiliado/historico/:uid",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.params.uid);
 
     if (!uid) {
-      return res.status(400).json({ ok: false, error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const referralsSnap = await db
@@ -1754,13 +1742,17 @@ app.get("/afiliado/historico/:uid", async (req, res) => {
       const data = docSnap.data();
       history.push({
         id: docSnap.id,
-        type: data.status === "approved" ? "indicação aprovada" : "indicação pendente",
+        type:
+          data.status === "approved"
+            ? "indicação aprovada"
+            : "indicação pendente",
         status: data.status || "pending",
         buyerEmail: data.buyerEmail || "",
         buyerName: data.buyerName || "",
         coinsAwarded: Number(data.coinsAwarded || 0),
         commissionAmount: Number(data.commissionAmount || 0),
-        externalReference: data.externalReference || data.referralId || docSnap.id,
+        externalReference:
+          data.externalReference || data.referralId || docSnap.id,
         createdAt: formatFirestoreDate(data.approvedAt || data.createdAt)
       });
     });
@@ -1790,23 +1782,18 @@ app.get("/afiliado/historico/:uid", async (req, res) => {
       ok: true,
       history: history.slice(0, 100)
     });
-  } catch (error) {
-    console.error("Erro ao buscar histórico do afiliado:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "ERRO_INTERNO_AFILIADO_HISTORICO"
-    });
-  }
-});
+  })
+);
 
-app.get("/afiliado/saques/:uid", async (req, res) => {
-  try {
+app.get(
+  "/afiliado/saques/:uid",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.params.uid);
 
     if (!uid) {
-      return res.status(400).json({ error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const snap = await db
@@ -1837,25 +1824,23 @@ app.get("/afiliado/saques/:uid", async (req, res) => {
       ok: true,
       withdrawals
     });
-  } catch (error) {
-    console.error("Erro ao buscar saques do afiliado:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_AFILIADO_SAQUES" });
-  }
-});
+  })
+);
 
-app.post("/afiliado/pix", async (req, res) => {
-  try {
+app.post(
+  "/afiliado/pix",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.body?.uid);
     const pixKey = String(req.body?.pixKey || "").trim().slice(0, 160);
 
     if (!uid) {
-      return res.status(400).json({ error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     if (!pixKey) {
-      return res.status(400).json({ error: "PIX_OBRIGATORIO" });
+      return sendError(res, 400, "PIX_OBRIGATORIO");
     }
 
     await db.collection("affiliates").doc(uid).set(
@@ -1870,27 +1855,25 @@ app.post("/afiliado/pix", async (req, res) => {
       ok: true,
       pixKey
     });
-  } catch (error) {
-    console.error("Erro ao salvar chave PIX:", error);
-    return res.status(500).json({ error: "ERRO_INTERNO_SALVAR_PIX" });
-  }
-});
+  })
+);
 
-app.post("/afiliado/solicitar-saque", async (req, res) => {
-  try {
+app.post(
+  "/afiliado/solicitar-saque",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const uid = normalizeUid(req.body?.uid);
 
     if (!uid) {
-      return res.status(400).json({ error: "UID_OBRIGATORIO" });
+      return sendError(res, 400, "UID_OBRIGATORIO");
     }
 
     const affiliateRef = db.collection("affiliates").doc(uid);
     const snap = await affiliateRef.get();
 
     if (!snap.exists) {
-      return res.status(404).json({ error: "AFILIADO_NAO_ENCONTRADO" });
+      return sendError(res, 404, "AFILIADO_NAO_ENCONTRADO");
     }
 
     const affiliate = snap.data();
@@ -1898,12 +1881,11 @@ app.post("/afiliado/solicitar-saque", async (req, res) => {
     const pixKey = String(affiliate.pixKey || "").trim();
 
     if (!pixKey) {
-      return res.status(400).json({ error: "PIX_NAO_CADASTRADO" });
+      return sendError(res, 400, "PIX_NAO_CADASTRADO");
     }
 
     if (withdrawableCoins < REFERRAL_MIN_WITHDRAW_COINS) {
-      return res.status(400).json({
-        error: "SALDO_INSUFICIENTE",
+      return sendError(res, 400, "SALDO_INSUFICIENTE", {
         minCoins: REFERRAL_MIN_WITHDRAW_COINS
       });
     }
@@ -1952,23 +1934,16 @@ app.post("/afiliado/solicitar-saque", async (req, res) => {
       amountBRL: REFERRAL_WITHDRAW_PIX_VALUE,
       coinsUsed: REFERRAL_MIN_WITHDRAW_COINS
     });
-  } catch (error) {
-    console.error("Erro ao solicitar saque:", error);
-
-    if (error.message === "SALDO_INSUFICIENTE") {
-      return res.status(400).json({ error: "SALDO_INSUFICIENTE" });
-    }
-
-    return res.status(500).json({ error: "ERRO_INTERNO_SOLICITAR_SAQUE" });
-  }
-});
+  })
+);
 
 /* =========================
-   WEBHOOK / TESTES
+   WEBHOOK / TEST ROUTES
 ========================= */
 
-app.post("/webhook", async (req, res) => {
-  try {
+app.post(
+  "/webhook",
+  asyncHandler(async (req, res) => {
     console.log("Webhook Mercado Pago recebido:", JSON.stringify(req.body, null, 2));
 
     const body = req.body || {};
@@ -2024,18 +1999,16 @@ app.post("/webhook", async (req, res) => {
     }
 
     return res.sendStatus(200);
-  } catch (error) {
-    console.error("Erro no webhook:", error);
-    return res.sendStatus(500);
-  }
-});
+  })
+);
 
-app.get("/teste-pagamento/:paymentId", async (req, res) => {
-  try {
+app.get(
+  "/teste-pagamento/:paymentId",
+  asyncHandler(async (req, res) => {
     const paymentId = String(req.params.paymentId || "").trim();
 
     if (!paymentId) {
-      return res.status(400).json({ ok: false, error: "PAYMENT_ID_OBRIGATORIO" });
+      return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");
     }
 
     const { response, data } = await mercadoPagoFetch(
@@ -2055,20 +2028,18 @@ app.get("/teste-pagamento/:paymentId", async (req, res) => {
       ok: true,
       data
     });
-  } catch (error) {
-    console.error("Erro em /teste-pagamento:", error);
-    return res.status(500).json({ ok: false, error: "ERRO_INTERNO_TESTE_PAGAMENTO" });
-  }
-});
+  })
+);
 
-app.get("/forcar-afiliado/:paymentId", async (req, res) => {
-  try {
+app.get(
+  "/forcar-afiliado/:paymentId",
+  asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
 
     const paymentId = String(req.params.paymentId || "").trim();
 
     if (!paymentId) {
-      return res.status(400).json({ ok: false, error: "PAYMENT_ID_OBRIGATORIO" });
+      return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");
     }
 
     const { response, data: payment } = await mercadoPagoFetch(
@@ -2085,10 +2056,8 @@ app.get("/forcar-afiliado/:paymentId", async (req, res) => {
     }
 
     if (String(payment.status || "").trim() !== "approved") {
-      return res.status(400).json({
-        ok: false,
-        error: "PAGAMENTO_NAO_APROVADO",
-        status: payment.status || null
+      return sendError(res, 400, "PAGAMENTO_NAO_APROVADO", {
+        statusAtual: payment.status || null
       });
     }
 
@@ -2098,32 +2067,26 @@ app.get("/forcar-afiliado/:paymentId", async (req, res) => {
       ok: true,
       message: "Afiliado aprovado manualmente"
     });
-  } catch (error) {
-    console.error("Erro ao forçar aprovação do afiliado:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "ERRO_INTERNO_FORCAR_AFILIADO"
-    });
-  }
-});
+  })
+);
 
 /* =========================
-   LIVEKIT
+   LIVEKIT ROUTES
 ========================= */
 
-app.get("/token", requireGameAccess, async (req, res) => {
-  try {
+app.get(
+  "/token",
+  requireGameAccess,
+  asyncHandler(async (req, res) => {
     const room = req.query.room;
     const user = req.query.user;
 
     if (!room || !user) {
-      return res.status(400).json({ error: "room e user são obrigatórios" });
+      return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
     }
 
     if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
-      return res.status(500).json({
-        error: "LIVEKIT_API_KEY ou LIVEKIT_API_SECRET não configurados."
-      });
+      return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
     }
 
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
@@ -2144,11 +2107,20 @@ app.get("/token", requireGameAccess, async (req, res) => {
       ok: true,
       token
     });
-  } catch (error) {
-    console.error("Erro ao gerar token:", error);
-    return res.status(500).json({ error: "Falha ao gerar token" });
-  }
+  })
+);
+
+/* =========================
+   FALLBACKS
+========================= */
+
+app.use((req, res) => {
+  return sendError(res, 404, "ROTA_NAO_ENCONTRADA");
 });
+
+/* =========================
+   START
+========================= */
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server rodando na porta ${PORT}`);
