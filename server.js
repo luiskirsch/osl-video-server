@@ -1232,11 +1232,12 @@ app.get("/panel", (req, res) => {
   `);
 });
 
-app.get("/logs", (req, res) => {
+app.get('/logs', (req, res) => {
   try {
-    const data = fs.readFileSync("server.log", "utf-8");
-    const lines = data.split("\n").filter(Boolean);
-    res.json(lines.slice(-100));
+    const fs = require('fs');
+    const data = fs.readFileSync('server.log', 'utf-8');
+    const lines = data.split('\n');
+    res.json(lines);
   } catch {
     res.json([]);
   }
