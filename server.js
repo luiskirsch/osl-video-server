@@ -281,6 +281,12 @@ function formatFirestoreDate(value) {
   }
 }
 
+function maskToken(value) {
+  const str = String(value || "");
+  if (str.length <= 8) return "***";
+  return `${str.slice(0, 4)}***${str.slice(-4)}`;
+}
+
 /* =========================
    TOKEN HELPERS
 ========================= */
