@@ -206,12 +206,17 @@ try {
 ========================= */
 
 function asyncHandler(fn) {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch((error) => {
-      console.error("Erro não tratado em rota:", error);
-      if (res.headersSent) return;
-      return res.status(500).json({ error: "ERRO_INTERNO" });
-    });
+  return async (req, res, next) => {
+    try {
+      await fn(req, res, next);
+    } catch (error) {
+      logError("route_error", error, {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl
+      });
+      next(error);
+    }
   };
 }
 
