@@ -1098,11 +1098,12 @@ app.get("/", (req, res) => {
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
-    message: "Servidor do O SextoLugar está online."
+    message: "Servidor do O SextoLugar está online.",
+    port: PORT
   });
 });
 
-app.get('/panel', (req, res) => {
+app.get("/panel", (req, res) => {
   res.send(`
   <!DOCTYPE html>
   <html>
@@ -1141,14 +1142,6 @@ app.get('/panel', (req, res) => {
 
       .log {
         margin-bottom: 5px;
-      }
-
-      .online {
-        color: #82d996;
-      }
-
-      .offline {
-        color: #ff6b6b;
       }
     </style>
   </head>
@@ -1199,6 +1192,16 @@ app.get('/panel', (req, res) => {
   </body>
   </html>
   `);
+});
+
+app.get("/logs", (req, res) => {
+  try {
+    const data = fs.readFileSync("server.log", "utf-8");
+    const lines = data.split("\n");
+    res.json(lines);
+  } catch {
+    res.json([]);
+  }
 });
 
 app.get("/health", (req, res) => {
