@@ -1089,15 +1089,22 @@ async function syncDiscordRolesForUid(uid) {
 ========================= */
 
 app.get("/", (req, res) => {
-  return res.status(200).send("Servidor do O SextoLugar está online.");
+  return res.status(200).json({
+    ok: true,
+    service: "osl-video-server",
+    message: "Servidor do O SextoLugar está online."
+  });
 });
 
 app.get("/health", (req, res) => {
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
-    uptime: Math.round(process.uptime()),
-    firebase: !!db
+    uptimeSec: Math.round(process.uptime()),
+    startedAt: new Date(APP_START_TIME).toISOString(),
+    now: new Date().toISOString(),
+    firebaseConfigured: !!db,
+    environment: process.env.NODE_ENV || "development"
   });
 });
 
