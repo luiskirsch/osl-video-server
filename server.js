@@ -1102,6 +1102,105 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get('/panel', (req, res) => {
+  res.send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>OSL Server</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      body {
+        margin: 0;
+        background: #050507;
+        color: #e6c07b;
+        font-family: monospace;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+
+      .header {
+        padding: 20px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        font-size: 18px;
+      }
+
+      .status {
+        padding: 20px;
+        color: #82d996;
+      }
+
+      .logs {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        font-size: 12px;
+        color: #ccc;
+      }
+
+      .log {
+        margin-bottom: 5px;
+      }
+
+      .online {
+        color: #82d996;
+      }
+
+      .offline {
+        color: #ff6b6b;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="header">OSL VIDEO SERVER</div>
+    <div class="status" id="status">Conectando...</div>
+    <div class="logs" id="logs"></div>
+
+    <script>
+      async function updateStatus() {
+        try {
+          const res = await fetch('/');
+          const data = await res.json();
+          document.getElementById('status').innerHTML =
+            '🟢 ONLINE - Porta ' + data.port;
+        } catch (e) {
+          document.getElementById('status').innerHTML =
+            '🔴 OFFLINE';
+        }
+      }
+
+      async function loadLogs() {
+        try {
+          const res = await fetch('/logs');
+          const logs = await res.json();
+
+          const container = document.getElementById('logs');
+          container.innerHTML = '';
+
+          logs.slice(-50).forEach(l => {
+            const div = document.createElement('div');
+            div.className = 'log';
+            div.textContent = l;
+            container.appendChild(div);
+          });
+
+          container.scrollTop = container.scrollHeight;
+        } catch (e) {}
+      }
+
+      setInterval(updateStatus, 2000);
+      setInterval(loadLogs, 2000);
+
+      updateStatus();
+      loadLogs();
+    </script>
+  </body>
+  </html>
+  `);
+});
+
 app.get("/health", (req, res) => {
   return res.status(200).json({
     ok: true,
