@@ -1,9 +1,9 @@
 process.on("uncaughtException", (err) => {
-  console.error("Erro não tratado:", err);
+  logError("uncaughtException", err);
 });
 
-process.on("unhandledRejection", (err) => {
-  console.error("Promise rejeitada:", err);
+process.on("unhandledRejection", (reason) => {
+  logError("unhandledRejection", reason instanceof Error ? reason : new Error(String(reason)));
 });
 
 const express = require("express");
