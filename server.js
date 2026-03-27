@@ -13,6 +13,7 @@ const { AccessToken } = require("livekit-server-sdk");
 const admin = require("firebase-admin");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const fs = require("fs");
 const APP_START_TIME = Date.now();
 
 function createRequestId() {
@@ -1125,11 +1126,13 @@ app.get("/panel", (req, res) => {
         padding: 20px;
         border-bottom: 1px solid rgba(255,255,255,0.1);
         font-size: 18px;
+        letter-spacing: 1px;
       }
 
       .status {
-        padding: 20px;
+        padding: 16px 20px;
         color: #82d996;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
       }
 
       .logs {
@@ -1138,10 +1141,27 @@ app.get("/panel", (req, res) => {
         padding: 20px;
         font-size: 12px;
         color: #ccc;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
 
       .log {
-        margin-bottom: 5px;
+        margin-bottom: 6px;
+        padding: 6px 8px;
+        border-left: 2px solid rgba(230,192,123,0.35);
+        background: rgba(255,255,255,0.02);
+      }
+
+      .muted {
+        color: #8a8a8a;
+      }
+
+      .ok {
+        color: #82d996;
+      }
+
+      .bad {
+        color: #ff6b6b;
       }
     </style>
   </head>
@@ -1152,42 +1172,60 @@ app.get("/panel", (req, res) => {
     <div class="logs" id="logs"></div>
 
     <script>
+      const statusEl = document.getElementById("status");
+      const logsEl = document.getElementById("logs");
+
+      function addLogLine(text) {
+        if (!text || !String(text).trim()) return;
+
+        const div = document.createElement("div");
+        div.className = "log";
+        div.textContent = text;
+        logsEl.appendChild(div);
+
+        while (logsEl.children.length > 300) {
+          logsEl.removeChild(logsEl.firstChild);
+        }
+
+        logsEl.scrollTop = logsEl.scrollHeight;
+      }
+
       async function updateStatus() {
         try {
-          const res = await fetch('/');
+          const res = await fetch("/health");
           const data = await res.json();
-          document.getElementById('status').innerHTML =
-            '🟢 ONLINE - Porta ' + data.port;
+
+          statusEl.innerHTML =
+            '<span class="ok">🟢 ONLINE</span> - Porta ' +
+            ${PORT} +
+            ' - Uptime ' +
+            data.uptimeSec +
+            's';
         } catch (e) {
-          document.getElementById('status').innerHTML =
-            '🔴 OFFLINE';
+          statusEl.innerHTML = '<span class="bad">🔴 OFFLINE</span>';
         }
       }
 
-      async function loadLogs() {
+      const source = new EventSource("/logs/stream");
+
+      source.addEventListener("bootstrap", (event) => {
         try {
-          const res = await fetch('/logs');
-          const logs = await res.json();
-
-          const container = document.getElementById('logs');
-          container.innerHTML = '';
-
-          logs.slice(-50).forEach(l => {
-            const div = document.createElement('div');
-            div.className = 'log';
-            div.textContent = l;
-            container.appendChild(div);
-          });
-
-          container.scrollTop = container.scrollHeight;
+          const lines = JSON.parse(event.data);
+          logsEl.innerHTML = "";
+          lines.forEach(addLogLine);
         } catch (e) {}
-      }
+      });
 
-      setInterval(updateStatus, 2000);
-      setInterval(loadLogs, 2000);
+      source.addEventListener("log", (event) => {
+        addLogLine(event.data);
+      });
+
+      source.onerror = () => {
+        statusEl.innerHTML = '<span class="bad">🔴 CONEXÃO DE LOG INTERROMPIDA</span>';
+      };
 
       updateStatus();
-      loadLogs();
+      setInterval(updateStatus, 3000);
     </script>
   </body>
   </html>
@@ -1197,11 +1235,89 @@ app.get("/panel", (req, res) => {
 app.get("/logs", (req, res) => {
   try {
     const data = fs.readFileSync("server.log", "utf-8");
-    const lines = data.split("\n");
-    res.json(lines);
+    const lines = data.split("\n").filter(Boolean);
+    res.json(lines.slice(-100));
   } catch {
     res.json([]);
   }
+});
+
+app.get("/logs/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+
+  const sendEvent = (event, data) => {
+    res.write(\`event: \${event}\\n\`);
+    res.write(\`data: \${data}\\n\\n\`);
+  };
+
+  const sendLogLine = (line) => {
+    if (!line || !String(line).trim()) return;
+    sendEvent("log", String(line).replace(/\\n/g, " "));
+  };
+
+  let lastSize = 0;
+
+  try {
+    if (fs.existsSync("server.log")) {
+      const initialData = fs.readFileSync("server.log", "utf-8");
+      const initialLines = initialData.split("\\n").filter(Boolean).slice(-100);
+      sendEvent("bootstrap", JSON.stringify(initialLines));
+      lastSize = fs.statSync("server.log").size;
+    } else {
+      sendEvent("bootstrap", JSON.stringify([]));
+    }
+  } catch {
+    sendEvent("bootstrap", JSON.stringify([]));
+  }
+
+  const watcher = (curr, prev) => {
+    try {
+      if (!fs.existsSync("server.log")) return;
+
+      if (curr.size < lastSize) {
+        lastSize = 0;
+      }
+
+      if (curr.size > lastSize) {
+        const stream = fs.createReadStream("server.log", {
+          encoding: "utf-8",
+          start: lastSize,
+          end: curr.size
+        });
+
+        let chunk = "";
+
+        stream.on("data", (data) => {
+          chunk += data;
+        });
+
+        stream.on("end", () => {
+          const lines = chunk.split("\\n").filter(Boolean);
+          lines.forEach(sendLogLine);
+          lastSize = curr.size;
+        });
+
+        stream.on("error", () => {});
+      }
+    } catch {}
+  };
+
+  fs.watchFile("server.log", { interval: 1000 }, watcher);
+
+  const heartbeat = setInterval(() => {
+    res.write(": ping\\n\\n");
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    fs.unwatchFile("server.log", watcher);
+    res.end();
+  });
 });
 
 app.get("/health", (req, res) => {
