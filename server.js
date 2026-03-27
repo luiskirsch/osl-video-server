@@ -2239,6 +2239,31 @@ app.use((err, req, res, next) => {
    START
 ========================= */
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server rodando na porta ${PORT}`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  logInfo("server_started", {
+    port: PORT,
+    backendBaseUrl: BACKEND_BASE_URL
+  });
 });
+
+function shutdown(signal) {
+  logWarn("shutdown_started", { signal });
+
+  server.close((err) => {
+    if (err) {
+      logError("shutdown_error", err, { signal });
+      process.exit(1);
+    }
+
+    logInfo("shutdown_completed", { signal });
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    logWarn("shutdown_forced", { signal });
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
