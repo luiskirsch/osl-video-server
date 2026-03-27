@@ -13,6 +13,49 @@ const { AccessToken } = require("livekit-server-sdk");
 const admin = require("firebase-admin");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const APP_START_TIME = Date.now();
+
+function createRequestId() {
+  return crypto.randomBytes(8).toString("hex");
+}
+
+function logInfo(message, meta = {}) {
+  console.log(
+    JSON.stringify({
+      level: "info",
+      time: new Date().toISOString(),
+      message,
+      ...meta
+    })
+  );
+}
+
+function logWarn(message, meta = {}) {
+  console.warn(
+    JSON.stringify({
+      level: "warn",
+      time: new Date().toISOString(),
+      message,
+      ...meta
+    })
+  );
+}
+
+function logError(message, error, meta = {}) {
+  console.error(
+    JSON.stringify({
+      level: "error",
+      time: new Date().toISOString(),
+      message,
+      error: {
+        name: error?.name || "Error",
+        message: error?.message || String(error),
+        stack: error?.stack || null
+      },
+      ...meta
+    })
+  );
+}
 const app = express();
 
 app.use(cors());
