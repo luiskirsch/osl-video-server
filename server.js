@@ -1,3 +1,11 @@
+process.on("uncaughtException", (err) => {
+  console.error("Erro não tratado:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("Promise rejeitada:", err);
+});
+
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -9,7 +17,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.get("/", (req, res) => {
-  res.status(200).send("Servidor online");
+  res.status(200).send("Servidor do O SextoLugar está online");
 });
 
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
@@ -351,7 +359,16 @@ async function discordTokenFetch(bodyParams) {
   });
 
   console.log("Discord token status:", response.status);
+  console.log(
+    "Discord token headers retry-after:",
+    response.headers.get("retry-after")
+  );
+  console.log(
+    "Discord token headers x-ratelimit-reset-after:",
+    response.headers.get("x-ratelimit-reset-after")
+  );
   console.log("Discord token body:", data);
+  console.log("Discord token raw body:", rawText);
 
   return { response, data, rawText };
 }
@@ -2133,6 +2150,6 @@ app.get("/token", requireGameAccess, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server rodando na porta ${PORT}`);
 });
