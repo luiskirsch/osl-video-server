@@ -1251,13 +1251,13 @@ app.get("/logs/stream", (req, res) => {
   });
 
   const sendEvent = (event, data) => {
-    res.write(\`event: \${event}\\n\`);
-    res.write(\`data: \${data}\\n\\n\`);
+    res.write("event: " + event + "\n");
+    res.write("data: " + data + "\n\n");
   };
 
   const sendLogLine = (line) => {
     if (!line || !String(line).trim()) return;
-    sendEvent("log", String(line).replace(/\\n/g, " "));
+    sendEvent("log", String(line).replace(/\n/g, " "));
   };
 
   let lastSize = 0;
@@ -1265,7 +1265,7 @@ app.get("/logs/stream", (req, res) => {
   try {
     if (fs.existsSync("server.log")) {
       const initialData = fs.readFileSync("server.log", "utf-8");
-      const initialLines = initialData.split("\\n").filter(Boolean).slice(-100);
+      const initialLines = initialData.split("\n").filter(Boolean).slice(-100);
       sendEvent("bootstrap", JSON.stringify(initialLines));
       lastSize = fs.statSync("server.log").size;
     } else {
@@ -1297,7 +1297,7 @@ app.get("/logs/stream", (req, res) => {
         });
 
         stream.on("end", () => {
-          const lines = chunk.split("\\n").filter(Boolean);
+          const lines = chunk.split("\n").filter(Boolean);
           lines.forEach(sendLogLine);
           lastSize = curr.size;
         });
@@ -1310,7 +1310,7 @@ app.get("/logs/stream", (req, res) => {
   fs.watchFile("server.log", { interval: 1000 }, watcher);
 
   const heartbeat = setInterval(() => {
-    res.write(": ping\\n\\n");
+    res.write(": ping\n\n");
   }, 15000);
 
   req.on("close", () => {
