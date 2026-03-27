@@ -2131,5 +2131,5 @@ app.get("/token", requireGameAccess, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log("Server rodando na porta ${PORT}");
+  console.log(`Server rodando na porta ${PORT}`);
 });
