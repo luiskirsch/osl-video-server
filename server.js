@@ -17,47 +17,44 @@ const admin = require("firebase-admin");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const fs = require("fs");
-const path = require("path");
 
 const APP_START_TIME = Date.now();
-const LOG_FILE_PATH = path.join(process.cwd(), "server.log");
+const LOG_FILE = "server.log";
+
+function writeToFile(line) {
+  try {
+    fs.appendFileSync(LOG_FILE, line + "\n");
+  } catch (_) {}
+}
 
 function createRequestId() {
   return crypto.randomBytes(8).toString("hex");
 }
 
-function appendLogLine(payload) {
-  try {
-    fs.appendFileSync(LOG_FILE_PATH, JSON.stringify(payload) + "\n", "utf8");
-  } catch (error) {
-    console.error("Falha ao gravar server.log:", error?.message || error);
-  }
-}
-
 function logInfo(message, meta = {}) {
-  const payload = {
+  const line = JSON.stringify({
     level: "info",
     time: new Date().toISOString(),
     message,
     ...meta
-  };
-  console.log(JSON.stringify(payload));
-  appendLogLine(payload);
+  });
+  console.log(line);
+  writeToFile(line);
 }
 
 function logWarn(message, meta = {}) {
-  const payload = {
+  const line = JSON.stringify({
     level: "warn",
     time: new Date().toISOString(),
     message,
     ...meta
-  };
-  console.warn(JSON.stringify(payload));
-  appendLogLine(payload);
+  });
+  console.warn(line);
+  writeToFile(line);
 }
 
 function logError(message, error, meta = {}) {
-  const payload = {
+  const line = JSON.stringify({
     level: "error",
     time: new Date().toISOString(),
     message,
@@ -67,15 +64,23 @@ function logError(message, error, meta = {}) {
       stack: error?.stack || null
     },
     ...meta
-  };
-  console.error(JSON.stringify(payload));
-  appendLogLine(payload);
+  });
+  console.error(line);
+  writeToFile(line);
+}
+
+async function httpFetch(...args) {
+  if (typeof fetch === "function") {
+    return fetch(...args);
+  }
+  const mod = await import("node-fetch");
+  return mod.default(...args);
 }
 
 const app = express();
 
-app.set("trust proxy", true);
 app.disable("x-powered-by");
+app.set("trust proxy", true);
 
 app.use(
   helmet({
@@ -84,8 +89,8 @@ app.use(
 );
 
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 app.use((req, res, next) => {
   req.requestId = createRequestId();
@@ -134,9 +139,7 @@ const ACCESS_TOKEN_SECRET =
 
 const BACKEND_BASE_URL =
   process.env.BACKEND_BASE_URL ||
-  process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-    : "https://osl-video-server-production.up.railway.app";
+  "https://osl-video-server-production.up.railway.app";
 
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "https://preludiojogos.com.br";
@@ -215,7 +218,9 @@ try {
   db = initFirebaseAdmin();
   logInfo("firebase_admin_initialized");
 } catch (error) {
-  console.error("Firebase Admin não configurado:", error.message);
+  logWarn("firebase_admin_not_configured", {
+    detail: error.message
+  });
 }
 
 /* =========================
@@ -461,7 +466,7 @@ async function mercadoPagoFetch(url, options = {}) {
     throw new Error("MP_ACCESS_TOKEN_NAO_CONFIGURADO");
   }
 
-  const response = await fetch(url, {
+  const response = await httpFetch(url, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -475,7 +480,15 @@ async function mercadoPagoFetch(url, options = {}) {
 }
 
 async function discordApiFetch(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await httpFetch(url, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "O-SextoLugar/1.0",
+      ...(options.headers || {})
+    }
+  });
+
   const text = await response.text();
 
   let data = null;
@@ -491,7 +504,7 @@ async function discordApiFetch(url, options = {}) {
 async function discordTokenFetch(bodyParams) {
   const body = new URLSearchParams(bodyParams);
 
-  const response = await fetch("https://discord.com/api/v10/oauth2/token", {
+  const response = await httpFetch("https://discord.com/api/v10/oauth2/token", {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -509,6 +522,12 @@ async function discordTokenFetch(bodyParams) {
   } catch {
     data = { raw: rawText };
   }
+
+  logInfo("discord_token_response", {
+    status: response.status,
+    retryAfter: response.headers.get("retry-after") || null,
+    resetAfter: response.headers.get("x-ratelimit-reset-after") || null
+  });
 
   return { response, data, rawText };
 }
@@ -533,7 +552,9 @@ async function exchangeDiscordCode(code) {
     const retryFromHeader = Number(result.response.headers.get("retry-after") || 0);
     const waitSeconds = Math.max(retryFromJson, retryFromHeader, 30);
 
+    logWarn("discord_rate_limit_wait", { waitSeconds });
     await sleep(waitSeconds * 1000);
+
     result = await discordTokenFetch(payload);
   }
 
@@ -910,6 +931,7 @@ async function approveReferralRewardFromPayment(payment) {
   const referrerUid = String(metadata.referrer_uid || "").trim();
 
   if (!paymentId || !externalReference || !refCode || !referrerUid) {
+    logInfo("payment_without_affiliate_metadata");
     return;
   }
 
@@ -974,6 +996,7 @@ async function approveReferralRewardFromPayment(payment) {
     const referral = referralSnap.data();
 
     if (referral.status === "approved") {
+      logInfo("referral_already_approved", { externalReference });
       return;
     }
 
@@ -1206,14 +1229,25 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/health", (req, res) => {
+  return res.status(200).json({
+    ok: true,
+    service: "osl-video-server",
+    uptimeSec: Math.round(process.uptime()),
+    startedAt: new Date(APP_START_TIME).toISOString(),
+    now: new Date().toISOString(),
+    firebaseConfigured: !!db,
+    environment: process.env.NODE_ENV || "development"
+  });
+});
+
 app.get("/panel", (req, res) => {
   res.send(`
   <!DOCTYPE html>
-  <html lang="pt-BR">
+  <html>
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OSL Server</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
       body {
         margin: 0;
@@ -1262,17 +1296,19 @@ app.get("/panel", (req, res) => {
     <script>
       const statusEl = document.getElementById("status");
       const logsEl = document.getElementById("logs");
-      const PORT_VALUE = ${JSON.stringify(PORT)};
 
       function addLogLine(text) {
         if (!text || !String(text).trim()) return;
+
         const div = document.createElement("div");
         div.className = "log";
         div.textContent = text;
         logsEl.appendChild(div);
+
         while (logsEl.children.length > 300) {
           logsEl.removeChild(logsEl.firstChild);
         }
+
         logsEl.scrollTop = logsEl.scrollHeight;
       }
 
@@ -1280,10 +1316,9 @@ app.get("/panel", (req, res) => {
         try {
           const res = await fetch("/health");
           const data = await res.json();
+
           statusEl.innerHTML =
-            '<span class="ok">🟢 ONLINE</span> - Porta ' +
-            PORT_VALUE +
-            ' - Uptime ' +
+            '<span class="ok">🟢 ONLINE</span> - Porta ${PORT} - Uptime ' +
             data.uptimeSec +
             's';
         } catch (e) {
@@ -1319,11 +1354,10 @@ app.get("/panel", (req, res) => {
 
 app.get("/logs", (req, res) => {
   try {
-    if (!fs.existsSync(LOG_FILE_PATH)) {
+    if (!fs.existsSync(LOG_FILE)) {
       return res.json([]);
     }
-
-    const data = fs.readFileSync(LOG_FILE_PATH, "utf-8");
+    const data = fs.readFileSync(LOG_FILE, "utf-8");
     const lines = data.split("\n").filter(Boolean);
     return res.json(lines);
   } catch {
@@ -1340,23 +1374,23 @@ app.get("/logs/stream", (req, res) => {
   });
 
   const sendEvent = (event, data) => {
-    res.write("event: " + event + "\n");
-    res.write("data: " + data + "\n\n");
+    res.write("event: " + event + "\\n");
+    res.write("data: " + data + "\\n\\n");
   };
 
   const sendLogLine = (line) => {
     if (!line || !String(line).trim()) return;
-    sendEvent("log", String(line).replace(/\n/g, " "));
+    sendEvent("log", String(line).replace(/\\n/g, " "));
   };
 
   let lastSize = 0;
 
   try {
-    if (fs.existsSync(LOG_FILE_PATH)) {
-      const initialData = fs.readFileSync(LOG_FILE_PATH, "utf-8");
-      const initialLines = initialData.split("\n").filter(Boolean).slice(-100);
+    if (fs.existsSync(LOG_FILE)) {
+      const initialData = fs.readFileSync(LOG_FILE, "utf-8");
+      const initialLines = initialData.split("\\n").filter(Boolean).slice(-100);
       sendEvent("bootstrap", JSON.stringify(initialLines));
-      lastSize = fs.statSync(LOG_FILE_PATH).size;
+      lastSize = fs.statSync(LOG_FILE).size;
     } else {
       sendEvent("bootstrap", JSON.stringify([]));
     }
@@ -1366,14 +1400,14 @@ app.get("/logs/stream", (req, res) => {
 
   const watcher = (curr, prev) => {
     try {
-      if (!fs.existsSync(LOG_FILE_PATH)) return;
+      if (!fs.existsSync(LOG_FILE)) return;
 
       if (curr.size < lastSize) {
         lastSize = 0;
       }
 
       if (curr.size > lastSize) {
-        const stream = fs.createReadStream(LOG_FILE_PATH, {
+        const stream = fs.createReadStream(LOG_FILE, {
           encoding: "utf-8",
           start: lastSize,
           end: curr.size
@@ -1386,7 +1420,7 @@ app.get("/logs/stream", (req, res) => {
         });
 
         stream.on("end", () => {
-          const lines = chunk.split("\n").filter(Boolean);
+          const lines = chunk.split("\\n").filter(Boolean);
           lines.forEach(sendLogLine);
           lastSize = curr.size;
         });
@@ -1396,13 +1430,13 @@ app.get("/logs/stream", (req, res) => {
     } catch {}
   };
 
-  if (!fs.existsSync(LOG_FILE_PATH)) {
+  if (!fs.existsSync(LOG_FILE)) {
     try {
-      fs.writeFileSync(LOG_FILE_PATH, "", "utf8");
-    } catch {}
+      fs.writeFileSync(LOG_FILE, "");
+    } catch (_) {}
   }
 
-  fs.watchFile(LOG_FILE_PATH, { interval: 1000 }, watcher);
+  fs.watchFile(LOG_FILE, { interval: 1000 }, watcher);
 
   const heartbeat = setInterval(() => {
     res.write(": ping\\n\\n");
@@ -1410,25 +1444,13 @@ app.get("/logs/stream", (req, res) => {
 
   req.on("close", () => {
     clearInterval(heartbeat);
-    fs.unwatchFile(LOG_FILE_PATH, watcher);
+    fs.unwatchFile(LOG_FILE, watcher);
     res.end();
   });
 });
 
-app.get("/health", (req, res) => {
-  return res.status(200).json({
-    ok: true,
-    service: "osl-video-server",
-    uptimeSec: Math.round(process.uptime()),
-    startedAt: new Date(APP_START_TIME).toISOString(),
-    now: new Date().toISOString(),
-    firebaseConfigured: !!db,
-    environment: process.env.NODE_ENV || "development"
-  });
-});
-
 /* =========================
-   ROTAS DO PAINEL
+   PAINEL ROUTES
 ========================= */
 
 app.post("/game/room/create", (req, res) => {
@@ -1448,9 +1470,7 @@ app.post("/game/room/create", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_room_create_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_room_create_error", error);
     return sendError(res, 500, "ERRO_GAME_ROOM_CREATE");
   }
 });
@@ -1481,9 +1501,7 @@ app.post("/game/player/join", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_player_join_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_player_join_error", error);
     return sendError(res, 500, "ERRO_GAME_PLAYER_JOIN");
   }
 });
@@ -1513,9 +1531,7 @@ app.post("/game/player/leave", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_player_leave_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_player_leave_error", error);
     return sendError(res, 500, "ERRO_GAME_PLAYER_LEAVE");
   }
 });
@@ -1537,9 +1553,7 @@ app.post("/game/session/start", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_session_start_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_session_start_error", error);
     return sendError(res, 500, "ERRO_GAME_SESSION_START");
   }
 });
@@ -1563,9 +1577,7 @@ app.post("/game/session/end", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_session_end_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_session_end_error", error);
     return sendError(res, 500, "ERRO_GAME_SESSION_END");
   }
 });
@@ -1588,9 +1600,7 @@ app.post("/game/video", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_video_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_video_error", error);
     return sendError(res, 500, "ERRO_GAME_VIDEO");
   }
 });
@@ -1613,9 +1623,7 @@ app.post("/game/recording", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_recording_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_recording_error", error);
     return sendError(res, 500, "ERRO_GAME_RECORDING");
   }
 });
@@ -1634,9 +1642,7 @@ app.get("/game/room/:roomId", (req, res) => {
       room: serializePanelRoom(room)
     });
   } catch (error) {
-    logError("game_room_get_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_room_get_error", error);
     return sendError(res, 500, "ERRO_GAME_ROOM_GET");
   }
 });
@@ -1658,9 +1664,7 @@ app.get("/game/rooms", (req, res) => {
       rooms
     });
   } catch (error) {
-    logError("game_rooms_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_rooms_error", error);
     return sendError(res, 500, "ERRO_GAME_ROOMS");
   }
 });
@@ -1673,9 +1677,7 @@ app.post("/game/cleanup", (req, res) => {
       totalRooms: panelRooms.size
     });
   } catch (error) {
-    logError("game_cleanup_error", error, {
-      requestId: req.requestId
-    });
+    logError("game_cleanup_error", error);
     return sendError(res, 500, "ERRO_GAME_CLEANUP");
   }
 });
@@ -1728,6 +1730,12 @@ app.get(
     const tokenRes = await exchangeDiscordCode(code);
 
     if (!tokenRes.response.ok || !tokenRes.data?.access_token) {
+      logError("discord_token_failed", new Error("discord token fail"), {
+        status: tokenRes.response.status,
+        data: tokenRes.data,
+        raw: tokenRes.rawText || null
+      });
+
       if (tokenRes.response.status === 429) {
         return res
           .status(429)
@@ -1740,9 +1748,13 @@ app.get(
     }
 
     const discordAccessToken = String(tokenRes.data.access_token || "").trim();
+
     const meRes = await getDiscordCurrentUser(discordAccessToken);
 
     if (!meRes.response.ok || !meRes.data?.id) {
+      logError("discord_me_failed", new Error("discord me fail"), {
+        data: meRes.data
+      });
       return res.status(500).send("Não foi possível obter os dados do Discord.");
     }
 
@@ -1754,8 +1766,7 @@ app.get(
     });
 
     if (![201, 204].includes(Number(joinRes.response.status))) {
-      logWarn("discord_join_guild_not_ideal_status", {
-        status: joinRes.response.status,
+      logWarn("discord_join_guild_failed", {
         data: joinRes.data
       });
     }
@@ -1766,7 +1777,8 @@ app.get(
       discordAccessToken
     });
 
-    await syncDiscordRolesForUid(normalizeUid(uid));
+    const syncResult = await syncDiscordRolesForUid(normalizeUid(uid));
+    logInfo("discord_sync_result", syncResult);
 
     const redirectTarget =
       `${FRONTEND_BASE_URL}${sanitizeNextPath(next)}?discord=connected`;
@@ -1969,6 +1981,7 @@ app.get("/status-pagamento/:ref", (req, res) => {
       ref: pagamento.ref
     });
   } catch (error) {
+    logError("status_pagamento_error", error);
     return sendError(res, 500, "ERRO_INTERNO_STATUS_PAGAMENTO");
   }
 });
@@ -2109,6 +2122,7 @@ app.post("/verificar-licenca", (req, res) => {
       product: payload.product
     });
   } catch (error) {
+    logError("verificar_licenca_error", error);
     return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_LICENCA");
   }
 });
@@ -2193,6 +2207,7 @@ app.post("/emitir-acesso", (req, res) => {
       expiresAt: accessPayload.exp
     });
   } catch (error) {
+    logError("emitir_acesso_error", error);
     return sendError(res, 500, "ERRO_INTERNO_EMITIR_ACESSO");
   }
 });
@@ -2276,6 +2291,7 @@ app.post("/verificar-acesso", (req, res) => {
       uid: payload.uid || ""
     });
   } catch (error) {
+    logError("verificar_acesso_error", error);
     return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_ACESSO");
   }
 });
@@ -2592,6 +2608,10 @@ app.post(
 app.post(
   "/webhook",
   asyncHandler(async (req, res) => {
+    logInfo("mercado_pago_webhook_received", {
+      body: req.body || {}
+    });
+
     const body = req.body || {};
     const type = body.type || body.topic || null;
     const paymentId =
@@ -2609,6 +2629,7 @@ app.post(
       );
 
       if (!response.ok) {
+        logWarn("mercado_pago_webhook_lookup_failed", { payment });
         return res.sendStatus(200);
       }
 
@@ -2627,13 +2648,19 @@ app.post(
         if (db) {
           try {
             await approveReferralRewardFromPayment(payment);
+            logInfo("affiliate_auto_approved", { ref });
           } catch (refError) {
-            logError("approve_referral_reward_error", refError, {
-              ref,
-              paymentId
-            });
+            logError("affiliate_auto_approve_error", refError, { ref });
           }
         }
+
+        logInfo("payment_approved_in_memory", { ref });
+      } else {
+        logInfo("payment_received_not_approved_yet", {
+          paymentId,
+          status,
+          ref
+        });
       }
     }
 
