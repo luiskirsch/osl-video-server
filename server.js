@@ -84,7 +84,8 @@ app.set("trust proxy", true);
 
 app.use(
   helmet({
-    crossOriginResourcePolicy: false
+    crossOriginResourcePolicy: false,
+    contentSecurityPolicy: false
   })
 );
 
