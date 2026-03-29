@@ -3,7 +3,10 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  logError("unhandledRejection", reason instanceof Error ? reason : new Error(String(reason)));
+  logError(
+    "unhandledRejection",
+    reason instanceof Error ? reason : new Error(String(reason))
+  );
 });
 
 const express = require("express");
@@ -14,51 +17,64 @@ const admin = require("firebase-admin");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const fs = require("fs");
+const path = require("path");
+
 const APP_START_TIME = Date.now();
+const LOG_FILE_PATH = path.join(process.cwd(), "server.log");
 
 function createRequestId() {
   return crypto.randomBytes(8).toString("hex");
 }
 
+function appendLogLine(payload) {
+  try {
+    fs.appendFileSync(LOG_FILE_PATH, JSON.stringify(payload) + "\n", "utf8");
+  } catch (error) {
+    console.error("Falha ao gravar server.log:", error?.message || error);
+  }
+}
+
 function logInfo(message, meta = {}) {
-  console.log(
-    JSON.stringify({
-      level: "info",
-      time: new Date().toISOString(),
-      message,
-      ...meta
-    })
-  );
+  const payload = {
+    level: "info",
+    time: new Date().toISOString(),
+    message,
+    ...meta
+  };
+  console.log(JSON.stringify(payload));
+  appendLogLine(payload);
 }
 
 function logWarn(message, meta = {}) {
-  console.warn(
-    JSON.stringify({
-      level: "warn",
-      time: new Date().toISOString(),
-      message,
-      ...meta
-    })
-  );
+  const payload = {
+    level: "warn",
+    time: new Date().toISOString(),
+    message,
+    ...meta
+  };
+  console.warn(JSON.stringify(payload));
+  appendLogLine(payload);
 }
 
 function logError(message, error, meta = {}) {
-  console.error(
-    JSON.stringify({
-      level: "error",
-      time: new Date().toISOString(),
-      message,
-      error: {
-        name: error?.name || "Error",
-        message: error?.message || String(error),
-        stack: error?.stack || null
-      },
-      ...meta
-    })
-  );
+  const payload = {
+    level: "error",
+    time: new Date().toISOString(),
+    message,
+    error: {
+      name: error?.name || "Error",
+      message: error?.message || String(error),
+      stack: error?.stack || null
+    },
+    ...meta
+  };
+  console.error(JSON.stringify(payload));
+  appendLogLine(payload);
 }
+
 const app = express();
 
+app.set("trust proxy", true);
 app.disable("x-powered-by");
 
 app.use(
@@ -95,12 +111,10 @@ app.use((req, res, next) => {
 
 morgan.token("request-id", (req) => req.requestId || "-");
 app.use(
-  morgan(':method :url :status :response-time ms reqId=:request-id', {
+  morgan(":method :url :status :response-time ms reqId=:request-id", {
     skip: () => process.env.NODE_ENV === "production"
   })
 );
-app.use(cors());
-app.use(express.json());
 
 /* =========================
    CONFIG
@@ -120,7 +134,9 @@ const ACCESS_TOKEN_SECRET =
 
 const BACKEND_BASE_URL =
   process.env.BACKEND_BASE_URL ||
-  "https://osl-video-server-production.up.railway.app";
+  process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : "https://osl-video-server-production.up.railway.app";
 
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "https://preludiojogos.com.br";
@@ -197,7 +213,7 @@ let db = null;
 
 try {
   db = initFirebaseAdmin();
-  console.log("Firebase Admin inicializado com sucesso.");
+  logInfo("firebase_admin_initialized");
 } catch (error) {
   console.error("Firebase Admin não configurado:", error.message);
 }
@@ -280,12 +296,6 @@ function formatFirestoreDate(value) {
   } catch {
     return null;
   }
-}
-
-function maskToken(value) {
-  const str = String(value || "");
-  if (str.length <= 8) return "***";
-  return `${str.slice(0, 4)}***${str.slice(-4)}`;
 }
 
 /* =========================
@@ -500,24 +510,6 @@ async function discordTokenFetch(bodyParams) {
     data = { raw: rawText };
   }
 
-  console.log("Discord token request body:", {
-    client_id: bodyParams.client_id,
-    grant_type: bodyParams.grant_type,
-    redirect_uri: bodyParams.redirect_uri,
-    code_length: String(bodyParams.code || "").length
-  });
-  console.log("Discord token status:", response.status);
-  console.log(
-    "Discord token headers retry-after:",
-    response.headers.get("retry-after")
-  );
-  console.log(
-    "Discord token headers x-ratelimit-reset-after:",
-    response.headers.get("x-ratelimit-reset-after")
-  );
-  console.log("Discord token body:", data);
-  console.log("Discord token raw body:", rawText);
-
   return { response, data, rawText };
 }
 
@@ -541,9 +533,7 @@ async function exchangeDiscordCode(code) {
     const retryFromHeader = Number(result.response.headers.get("retry-after") || 0);
     const waitSeconds = Math.max(retryFromJson, retryFromHeader, 30);
 
-    console.warn(`Discord rate limit. Waiting ${waitSeconds}s before retry...`);
     await sleep(waitSeconds * 1000);
-
     result = await discordTokenFetch(payload);
   }
 
@@ -920,7 +910,6 @@ async function approveReferralRewardFromPayment(payment) {
   const referrerUid = String(metadata.referrer_uid || "").trim();
 
   if (!paymentId || !externalReference || !refCode || !referrerUid) {
-    console.log("Pagamento sem metadados de afiliado. Nada para aprovar.");
     return;
   }
 
@@ -985,7 +974,6 @@ async function approveReferralRewardFromPayment(payment) {
     const referral = referralSnap.data();
 
     if (referral.status === "approved") {
-      console.log("Referral já aprovado anteriormente:", externalReference);
       return;
     }
 
@@ -1092,6 +1080,120 @@ async function syncDiscordRolesForUid(uid) {
 }
 
 /* =========================
+   PAINEL EM TEMPO REAL
+========================= */
+
+const PANEL_ROOM_TTL_MS = 1000 * 60 * 60 * 6;
+const PANEL_PLAYER_TTL_MS = 1000 * 60 * 2;
+const panelRooms = new Map();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeRoomId(value) {
+  return String(value || "").trim();
+}
+
+function normalizePlayerId(value) {
+  return String(value || "").trim();
+}
+
+function normalizePlayerName(value) {
+  return String(value || "").trim().slice(0, 80);
+}
+
+function getOrCreatePanelRoom(roomId, roomName = "", host = "") {
+  const normalizedRoomId = normalizeRoomId(roomId);
+  if (!normalizedRoomId) return null;
+
+  let room = panelRooms.get(normalizedRoomId);
+
+  if (!room) {
+    room = {
+      roomId: normalizedRoomId,
+      name: String(roomName || "").trim(),
+      host: String(host || "").trim(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      sessionActive: false,
+      videoActive: false,
+      recordingActive: false,
+      players: {}
+    };
+    panelRooms.set(normalizedRoomId, room);
+  }
+
+  if (roomName && !room.name) room.name = String(roomName).trim();
+  if (host && !room.host) room.host = String(host).trim();
+
+  room.updatedAt = nowIso();
+  return room;
+}
+
+function cleanupPanelRoomPlayers(room) {
+  if (!room || !room.players) return;
+
+  const now = Date.now();
+
+  for (const [playerId, player] of Object.entries(room.players)) {
+    const lastSeenTime = new Date(
+      player.lastSeen || player.updatedAt || room.updatedAt
+    ).getTime();
+
+    if (!lastSeenTime || now - lastSeenTime > PANEL_PLAYER_TTL_MS) {
+      delete room.players[playerId];
+    }
+  }
+}
+
+function cleanupPanelRooms() {
+  const now = Date.now();
+
+  for (const [roomId, room] of panelRooms.entries()) {
+    cleanupPanelRoomPlayers(room);
+
+    const lastUpdated = new Date(room.updatedAt || room.createdAt).getTime();
+    const playerCount = Object.keys(room.players || {}).length;
+
+    if (
+      (!lastUpdated || now - lastUpdated > PANEL_ROOM_TTL_MS) &&
+      playerCount === 0 &&
+      !room.sessionActive &&
+      !room.videoActive &&
+      !room.recordingActive
+    ) {
+      panelRooms.delete(roomId);
+    }
+  }
+}
+
+function serializePanelRoom(room) {
+  cleanupPanelRoomPlayers(room);
+
+  const players = Object.values(room.players || {}).sort((a, b) => {
+    const t1 = new Date(a.joinedAt || a.updatedAt || 0).getTime();
+    const t2 = new Date(b.joinedAt || b.updatedAt || 0).getTime();
+    return t1 - t2;
+  });
+
+  return {
+    roomId: room.roomId,
+    name: room.name || "",
+    host: room.host || "",
+    createdAt: room.createdAt || null,
+    updatedAt: room.updatedAt || null,
+    sessionActive: !!room.sessionActive,
+    videoActive: !!room.videoActive,
+    recordingActive: !!room.recordingActive,
+    playerCount: players.length,
+    players
+  };
+}
+
+setInterval(cleanupPanelRooms, 30 * 1000).unref();
+
+/* =========================
    HEALTH / ROOT
 ========================= */
 
@@ -1107,10 +1209,11 @@ app.get("/", (req, res) => {
 app.get("/panel", (req, res) => {
   res.send(`
   <!DOCTYPE html>
-  <html>
+  <html lang="pt-BR">
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OSL Server</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
       body {
         margin: 0;
@@ -1121,20 +1224,17 @@ app.get("/panel", (req, res) => {
         flex-direction: column;
         height: 100vh;
       }
-
       .header {
         padding: 20px;
         border-bottom: 1px solid rgba(255,255,255,0.1);
         font-size: 18px;
         letter-spacing: 1px;
       }
-
       .status {
         padding: 16px 20px;
         color: #82d996;
         border-bottom: 1px solid rgba(255,255,255,0.06);
       }
-
       .logs {
         flex: 1;
         overflow-y: auto;
@@ -1144,28 +1244,16 @@ app.get("/panel", (req, res) => {
         white-space: pre-wrap;
         word-break: break-word;
       }
-
       .log {
         margin-bottom: 6px;
         padding: 6px 8px;
         border-left: 2px solid rgba(230,192,123,0.35);
         background: rgba(255,255,255,0.02);
       }
-
-      .muted {
-        color: #8a8a8a;
-      }
-
-      .ok {
-        color: #82d996;
-      }
-
-      .bad {
-        color: #ff6b6b;
-      }
+      .ok { color: #82d996; }
+      .bad { color: #ff6b6b; }
     </style>
   </head>
-
   <body>
     <div class="header">OSL VIDEO SERVER</div>
     <div class="status" id="status">Conectando...</div>
@@ -1174,19 +1262,17 @@ app.get("/panel", (req, res) => {
     <script>
       const statusEl = document.getElementById("status");
       const logsEl = document.getElementById("logs");
+      const PORT_VALUE = ${JSON.stringify(PORT)};
 
       function addLogLine(text) {
         if (!text || !String(text).trim()) return;
-
         const div = document.createElement("div");
         div.className = "log";
         div.textContent = text;
         logsEl.appendChild(div);
-
         while (logsEl.children.length > 300) {
           logsEl.removeChild(logsEl.firstChild);
         }
-
         logsEl.scrollTop = logsEl.scrollHeight;
       }
 
@@ -1194,10 +1280,9 @@ app.get("/panel", (req, res) => {
         try {
           const res = await fetch("/health");
           const data = await res.json();
-
           statusEl.innerHTML =
             '<span class="ok">🟢 ONLINE</span> - Porta ' +
-            ${PORT} +
+            PORT_VALUE +
             ' - Uptime ' +
             data.uptimeSec +
             's';
@@ -1232,14 +1317,17 @@ app.get("/panel", (req, res) => {
   `);
 });
 
-app.get('/logs', (req, res) => {
+app.get("/logs", (req, res) => {
   try {
-    const fs = require('fs');
-    const data = fs.readFileSync('server.log', 'utf-8');
-    const lines = data.split('\n');
-    res.json(lines);
+    if (!fs.existsSync(LOG_FILE_PATH)) {
+      return res.json([]);
+    }
+
+    const data = fs.readFileSync(LOG_FILE_PATH, "utf-8");
+    const lines = data.split("\n").filter(Boolean);
+    return res.json(lines);
   } catch {
-    res.json([]);
+    return res.json([]);
   }
 });
 
@@ -1252,9 +1340,9 @@ app.get("/logs/stream", (req, res) => {
   });
 
   const sendEvent = (event, data) => {
-  res.write("event: " + event + "\n");
-  res.write("data: " + data + "\n\n");
-};
+    res.write("event: " + event + "\n");
+    res.write("data: " + data + "\n\n");
+  };
 
   const sendLogLine = (line) => {
     if (!line || !String(line).trim()) return;
@@ -1264,11 +1352,11 @@ app.get("/logs/stream", (req, res) => {
   let lastSize = 0;
 
   try {
-    if (fs.existsSync("server.log")) {
-      const initialData = fs.readFileSync("server.log", "utf-8");
+    if (fs.existsSync(LOG_FILE_PATH)) {
+      const initialData = fs.readFileSync(LOG_FILE_PATH, "utf-8");
       const initialLines = initialData.split("\n").filter(Boolean).slice(-100);
       sendEvent("bootstrap", JSON.stringify(initialLines));
-      lastSize = fs.statSync("server.log").size;
+      lastSize = fs.statSync(LOG_FILE_PATH).size;
     } else {
       sendEvent("bootstrap", JSON.stringify([]));
     }
@@ -1278,14 +1366,14 @@ app.get("/logs/stream", (req, res) => {
 
   const watcher = (curr, prev) => {
     try {
-      if (!fs.existsSync("server.log")) return;
+      if (!fs.existsSync(LOG_FILE_PATH)) return;
 
       if (curr.size < lastSize) {
         lastSize = 0;
       }
 
       if (curr.size > lastSize) {
-        const stream = fs.createReadStream("server.log", {
+        const stream = fs.createReadStream(LOG_FILE_PATH, {
           encoding: "utf-8",
           start: lastSize,
           end: curr.size
@@ -1308,15 +1396,21 @@ app.get("/logs/stream", (req, res) => {
     } catch {}
   };
 
-  fs.watchFile("server.log", { interval: 1000 }, watcher);
+  if (!fs.existsSync(LOG_FILE_PATH)) {
+    try {
+      fs.writeFileSync(LOG_FILE_PATH, "", "utf8");
+    } catch {}
+  }
+
+  fs.watchFile(LOG_FILE_PATH, { interval: 1000 }, watcher);
 
   const heartbeat = setInterval(() => {
-    res.write(": ping\n\n");
+    res.write(": ping\\n\\n");
   }, 15000);
 
   req.on("close", () => {
     clearInterval(heartbeat);
-    fs.unwatchFile("server.log", watcher);
+    fs.unwatchFile(LOG_FILE_PATH, watcher);
     res.end();
   });
 });
@@ -1331,6 +1425,259 @@ app.get("/health", (req, res) => {
     firebaseConfigured: !!db,
     environment: process.env.NODE_ENV || "development"
   });
+});
+
+/* =========================
+   ROTAS DO PAINEL
+========================= */
+
+app.post("/game/room/create", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const name = String(req.body?.name || "").trim();
+    const host = String(req.body?.host || "").trim();
+
+    if (!roomId) {
+      return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    }
+
+    const room = getOrCreatePanelRoom(roomId, name, host);
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_room_create_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_ROOM_CREATE");
+  }
+});
+
+app.post("/game/player/join", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const playerId = normalizePlayerId(req.body?.playerId);
+    const playerName = normalizePlayerName(req.body?.playerName);
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const room = getOrCreatePanelRoom(roomId);
+
+    room.players[playerId] = {
+      playerId,
+      playerName: playerName || "Jogador",
+      joinedAt: room.players[playerId]?.joinedAt || nowIso(),
+      lastSeen: nowIso()
+    };
+
+    room.updatedAt = nowIso();
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_player_join_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_PLAYER_JOIN");
+  }
+});
+
+app.post("/game/player/leave", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const playerId = normalizePlayerId(req.body?.playerId);
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const room = panelRooms.get(roomId);
+
+    if (!room) {
+      return res.json({ ok: true, room: null });
+    }
+
+    delete room.players[playerId];
+    room.updatedAt = nowIso();
+
+    cleanupPanelRoomPlayers(room);
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_player_leave_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_PLAYER_LEAVE");
+  }
+});
+
+app.post("/game/session/start", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+
+    if (!roomId) {
+      return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    }
+
+    const room = getOrCreatePanelRoom(roomId);
+    room.sessionActive = true;
+    room.updatedAt = nowIso();
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_session_start_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_SESSION_START");
+  }
+});
+
+app.post("/game/session/end", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+
+    if (!roomId) {
+      return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    }
+
+    const room = getOrCreatePanelRoom(roomId);
+    room.sessionActive = false;
+    room.videoActive = false;
+    room.recordingActive = false;
+    room.updatedAt = nowIso();
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_session_end_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_SESSION_END");
+  }
+});
+
+app.post("/game/video", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const active = !!req.body?.active;
+
+    if (!roomId) {
+      return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    }
+
+    const room = getOrCreatePanelRoom(roomId);
+    room.videoActive = active;
+    room.updatedAt = nowIso();
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_video_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_VIDEO");
+  }
+});
+
+app.post("/game/recording", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const active = !!req.body?.active;
+
+    if (!roomId) {
+      return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    }
+
+    const room = getOrCreatePanelRoom(roomId);
+    room.recordingActive = active;
+    room.updatedAt = nowIso();
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_recording_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_RECORDING");
+  }
+});
+
+app.get("/game/room/:roomId", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.params.roomId);
+    const room = panelRooms.get(roomId);
+
+    if (!room) {
+      return sendError(res, 404, "ROOM_NAO_ENCONTRADA");
+    }
+
+    return res.json({
+      ok: true,
+      room: serializePanelRoom(room)
+    });
+  } catch (error) {
+    logError("game_room_get_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_ROOM_GET");
+  }
+});
+
+app.get("/game/rooms", (req, res) => {
+  try {
+    cleanupPanelRooms();
+
+    const rooms = Array.from(panelRooms.values())
+      .map(serializePanelRoom)
+      .sort((a, b) => {
+        const t1 = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const t2 = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        return t2 - t1;
+      });
+
+    return res.json({
+      ok: true,
+      rooms
+    });
+  } catch (error) {
+    logError("game_rooms_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_ROOMS");
+  }
+});
+
+app.post("/game/cleanup", (req, res) => {
+  try {
+    cleanupPanelRooms();
+    return res.json({
+      ok: true,
+      totalRooms: panelRooms.size
+    });
+  } catch (error) {
+    logError("game_cleanup_error", error, {
+      requestId: req.requestId
+    });
+    return sendError(res, 500, "ERRO_GAME_CLEANUP");
+  }
 });
 
 /* =========================
@@ -1378,19 +1725,9 @@ app.get(
       return res.status(400).send("UID inválido no fluxo do Discord.");
     }
 
-    console.log("Discord callback recebido. code?", !!code, "state?", !!state);
-    console.log("Discord redirect uri usada:", DISCORD_REDIRECT_URI);
-
     const tokenRes = await exchangeDiscordCode(code);
 
     if (!tokenRes.response.ok || !tokenRes.data?.access_token) {
-      console.error("Falha token Discord:", {
-        status: tokenRes.response.status,
-        data: tokenRes.data,
-        raw: tokenRes.rawText || null,
-        redirectUri: DISCORD_REDIRECT_URI
-      });
-
       if (tokenRes.response.status === 429) {
         return res
           .status(429)
@@ -1403,11 +1740,9 @@ app.get(
     }
 
     const discordAccessToken = String(tokenRes.data.access_token || "").trim();
-
     const meRes = await getDiscordCurrentUser(discordAccessToken);
 
     if (!meRes.response.ok || !meRes.data?.id) {
-      console.error("Falha /users/@me Discord:", meRes.data);
       return res.status(500).send("Não foi possível obter os dados do Discord.");
     }
 
@@ -1419,7 +1754,10 @@ app.get(
     });
 
     if (![201, 204].includes(Number(joinRes.response.status))) {
-      console.error("Falha ao adicionar no servidor Discord:", joinRes.data);
+      logWarn("discord_join_guild_not_ideal_status", {
+        status: joinRes.response.status,
+        data: joinRes.data
+      });
     }
 
     await saveDiscordLinkToUser({
@@ -1428,8 +1766,7 @@ app.get(
       discordAccessToken
     });
 
-    const syncResult = await syncDiscordRolesForUid(normalizeUid(uid));
-    console.log("Discord sync result:", syncResult);
+    await syncDiscordRolesForUid(normalizeUid(uid));
 
     const redirectTarget =
       `${FRONTEND_BASE_URL}${sanitizeNextPath(next)}?discord=connected`;
@@ -1570,11 +1907,6 @@ app.post(
     );
 
     if (!response.ok) {
-      console.error(
-        "Erro Mercado Pago /criar-pagamento:",
-        JSON.stringify(data, null, 2)
-      );
-
       return res.status(500).json({
         ok: false,
         error: "ERRO_MP_CRIAR_PAGAMENTO",
@@ -1637,7 +1969,6 @@ app.get("/status-pagamento/:ref", (req, res) => {
       ref: pagamento.ref
     });
   } catch (error) {
-    console.error("Erro ao consultar status do pagamento:", error);
     return sendError(res, 500, "ERRO_INTERNO_STATUS_PAGAMENTO");
   }
 });
@@ -1663,7 +1994,6 @@ app.post(
     );
 
     if (!response.ok) {
-      console.error("Erro Mercado Pago /emitir-licenca:", payment);
       return res.status(500).json({
         ok: false,
         error: "ERRO_MP_CONSULTAR_PAGAMENTO",
@@ -1779,7 +2109,6 @@ app.post("/verificar-licenca", (req, res) => {
       product: payload.product
     });
   } catch (error) {
-    console.error("Erro ao verificar licença:", error);
     return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_LICENCA");
   }
 });
@@ -1864,7 +2193,6 @@ app.post("/emitir-acesso", (req, res) => {
       expiresAt: accessPayload.exp
     });
   } catch (error) {
-    console.error("Erro ao emitir acesso:", error);
     return sendError(res, 500, "ERRO_INTERNO_EMITIR_ACESSO");
   }
 });
@@ -1948,7 +2276,6 @@ app.post("/verificar-acesso", (req, res) => {
       uid: payload.uid || ""
     });
   } catch (error) {
-    console.error("Erro ao verificar acesso:", error);
     return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_ACESSO");
   }
 });
@@ -2265,8 +2592,6 @@ app.post(
 app.post(
   "/webhook",
   asyncHandler(async (req, res) => {
-    console.log("Webhook Mercado Pago recebido:", JSON.stringify(req.body, null, 2));
-
     const body = req.body || {};
     const type = body.type || body.topic || null;
     const paymentId =
@@ -2284,7 +2609,6 @@ app.post(
       );
 
       if (!response.ok) {
-        console.error("Erro ao consultar pagamento no webhook:", payment);
         return res.sendStatus(200);
       }
 
@@ -2303,19 +2627,13 @@ app.post(
         if (db) {
           try {
             await approveReferralRewardFromPayment(payment);
-            console.log("Afiliado aprovado automaticamente:", ref);
           } catch (refError) {
-            console.error("Erro ao aprovar recompensa de indicação:", refError);
+            logError("approve_referral_reward_error", refError, {
+              ref,
+              paymentId
+            });
           }
         }
-
-        console.log("Pagamento aprovado salvo em memória:", ref);
-      } else {
-        console.log("Pagamento recebido no webhook, mas ainda não aprovado:", {
-          paymentId,
-          status,
-          ref
-        });
       }
     }
 
@@ -2460,6 +2778,7 @@ app.use((err, req, res, next) => {
     requestId: req.requestId
   });
 });
+
 /* =========================
    START
 ========================= */
