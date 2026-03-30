@@ -17,14 +17,12 @@ body{
     radial-gradient(circle at 50% 100%, #001a0f, #000);
 }
 
-/* GRID */
 .grid{
   display:grid;
   grid-template-columns: 260px 1fr 360px;
   height:100vh;
 }
 
-/* MENU */
 .menu{
   border-right:1px solid #00ff9c22;
   padding:20px;
@@ -46,7 +44,6 @@ body{
   background:#00ff9c11;
 }
 
-/* MAIN */
 .main{
   padding:20px;
   overflow:auto;
@@ -55,14 +52,12 @@ body{
 .section{ display:none; }
 .active{ display:block; }
 
-/* CARDS */
 .card{
   border:1px solid #00ff9c22;
   padding:12px;
   margin-bottom:10px;
 }
 
-/* STATUS */
 .status{
   display:grid;
   grid-template-columns: repeat(3,1fr);
@@ -75,7 +70,6 @@ body{
   text-align:center;
 }
 
-/* LOG */
 .logs{
   border-left:1px solid #00ff9c22;
   padding:15px;
@@ -87,7 +81,6 @@ body{
   margin-bottom:4px;
 }
 
-/* TERMINAL */
 .terminal{
   margin-top:10px;
   border:1px solid #00ff9c22;
@@ -100,59 +93,41 @@ body{
 
 <div class="grid">
 
-<!-- MENU -->
 <div class="menu">
   <h2>OSL CORE</h2>
-
   <button onclick="show('dashboard')">Dashboard</button>
   <button onclick="show('rooms')">Salas</button>
-  <button onclick="show('chat')">Chat</button>
   <button onclick="show('video')">Vídeo</button>
   <button onclick="show('system')">Sistema</button>
 </div>
 
-<!-- MAIN -->
 <div class="main">
 
-<!-- DASHBOARD -->
 <div id="dashboard" class="section active">
   <div class="status">
     <div class="box">Salas<br><b id="statRooms">0</b></div>
     <div class="box">Jogadores<br><b id="statPlayers">0</b></div>
-    <div class="box">Mensagens<br><b id="statMessages">0</b></div>
+    <div class="box">Eventos<br><b id="statEvents">0</b></div>
     <div class="box">Vídeo<br><b id="statVideo">0</b></div>
     <div class="box">Gravação<br><b id="statRecord">0</b></div>
-    <div class="box">Eventos<br><b id="statEvents">0</b></div>
   </div>
 </div>
 
-<!-- ROOMS -->
 <div id="rooms" class="section">
-  <div id="roomsList">0 salas</div>
+  <div id="roomsList">Carregando...</div>
 </div>
 
-<!-- CHAT -->
-<div id="chat" class="section">
-  <div id="chatList">nenhuma mensagem</div>
-</div>
-
-<!-- VIDEO -->
 <div id="video" class="section">
-  <div id="videoList">sem atividade</div>
+  <div id="videoList">Sem atividade</div>
 </div>
 
-<!-- SYSTEM -->
 <div id="system" class="section">
-  <div id="systemInfo">carregando...</div>
-
-  <div class="terminal" id="terminal">
-    terminal iniciado...
-  </div>
+  <div id="systemInfo">Carregando...</div>
+  <div class="terminal" id="terminal">terminal iniciado...</div>
 </div>
 
 </div>
 
-<!-- LOG -->
 <div class="logs">
   <div>SYSTEM LOG</div>
   <div id="logs"></div>
@@ -160,16 +135,12 @@ body{
 
 </div>
 
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-
 <script>
 const SERVER = "https://osl-video-server-production.up.railway.app";
-const socket = io(SERVER);
 
 let stats = {
   rooms:0,
   players:0,
-  messages:0,
   video:0,
   record:0,
   events:0
@@ -187,63 +158,65 @@ function log(msg){
   div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
-
-  while(el.children.length > 150){
-    el.removeChild(el.firstChild);
-  }
 }
 
 function updateStats(){
   statRooms.textContent = stats.rooms;
   statPlayers.textContent = stats.players;
-  statMessages.textContent = stats.messages;
   statVideo.textContent = stats.video;
   statRecord.textContent = stats.record;
   statEvents.textContent = stats.events;
 }
 
-/* SOCKET */
-socket.on("connect", ()=> log("🟢 conectado"));
+/* ===== SALAS ===== */
+async function loadRooms(){
+  try{
+    const res = await fetch(SERVER + "/game/rooms", { cache:"no-store" });
+    const data = await res.json();
 
-socket.on("rooms-update", rooms=>{
-  stats.rooms = rooms.length;
-  stats.players = rooms.reduce((a,r)=>a+r.playerCount,0);
-  stats.video = rooms.filter(r=>r.videoActive).length;
-  stats.record = rooms.filter(r=>r.recordingActive).length;
-  stats.events++;
+    const rooms = data.rooms || [];
 
-  updateStats();
+    stats.rooms = rooms.length;
+    stats.players = rooms.reduce((a,r)=>a+(r.playerCount||0),0);
+    stats.video = rooms.filter(r=>r.videoActive).length;
+    stats.record = rooms.filter(r=>r.recordingActive).length;
+    stats.events++;
 
-  if(!rooms.length){
-    roomsList.innerHTML = "0 salas ativas";
-  }else{
+    updateStats();
+
+    if(!rooms.length){
+      roomsList.innerHTML = "Nenhuma sala ativa";
+      videoList.innerHTML = "Sem atividade";
+      return;
+    }
+
     roomsList.innerHTML = rooms.map(r=>`
       <div class="card">
-        ${r.name}<br>
-        players: ${r.playerCount}<br>
-        video: ${r.videoActive}<br>
-        recording: ${r.recordingActive}
+        <b>${r.name || r.roomId}</b><br>
+        Código: ${r.roomId}<br>
+        Host: ${r.host || "-"}<br>
+        Jogadores: ${r.playerCount}<br>
+        Sessão: ${r.sessionActive ? "ATIVA" : "PARADA"}<br>
+        Vídeo: ${r.videoActive ? "ON" : "OFF"}<br>
+        Gravação: ${r.recordingActive ? "ON" : "OFF"}
       </div>
     `).join("");
+
+    videoList.innerHTML = rooms.map(r=>`
+      <div class="card">
+        ${r.name}: vídeo ${r.videoActive ? "ON" : "OFF"}
+      </div>
+    `).join("");
+
+    log("salas atualizadas");
+
+  }catch(e){
+    log("erro ao carregar salas");
+    console.error(e);
   }
+}
 
-  videoList.innerHTML = rooms.map(r=>`
-    <div class="card">${r.name}: ${r.videoActive ? "ON" : "OFF"}</div>
-  `).join("");
-
-  log("atualização de salas");
-});
-
-socket.on("new-message", msg=>{
-  stats.messages++;
-  stats.events++;
-  updateStats();
-
-  chatList.innerHTML += `<div class="card">${msg.roomId}: ${msg.message}</div>`;
-  log("mensagem recebida");
-});
-
-/* SYSTEM */
+/* ===== SYSTEM ===== */
 async function loadSystem(){
   try{
     const res = await fetch(SERVER + "/health");
@@ -257,32 +230,21 @@ async function loadSystem(){
 
     log("health carregado");
   }catch{
-    log("erro ao carregar health");
+    log("erro no health");
   }
 }
 
+/* ===== LOOP ===== */
+loadRooms();
 loadSystem();
 
-/* HEARTBEAT (VIDA) */
-setInterval(()=>{
-  log("monitorando sistema...");
-},4000);
+setInterval(loadRooms, 2000);
+setInterval(loadSystem, 5000);
 
+/* TERMINAL VISUAL */
 setInterval(()=>{
-  log("checando conexões...");
-},7000);
-
-setInterval(()=>{
-  if(stats.rooms === 0){
-    log("nenhuma atividade detectada");
-  }
-},9000);
-
-/* TERMINAL SIMULADO */
-setInterval(()=>{
-  const t = document.getElementById("terminal");
-  t.innerHTML += `<div>> sync ok</div>`;
-  t.scrollTop = t.scrollHeight;
+  terminal.innerHTML += `<div>> sync ok</div>`;
+  terminal.scrollTop = terminal.scrollHeight;
 },3000);
 
 </script>
