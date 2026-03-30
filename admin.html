@@ -1,1351 +1,1567 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8" />
-<meta
-  name="viewport"
-  content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-/>
-<title>OSL // SYSTEM CORE</title>
-
-<style>
-  :root{
-    --bg:#030706;
-    --bg-2:#07110d;
-    --panel:#0a1511;
-    --panel-2:#0d1c17;
-    --panel-3:#08100d;
-    --line:rgba(0,255,156,.12);
-    --line-strong:rgba(0,255,156,.28);
-    --text:#d7ffe8;
-    --muted:rgba(215,255,232,.62);
-    --green:#00ff9c;
-    --green-soft:rgba(0,255,156,.10);
-    --green-2:#66ffc4;
-    --danger:#ff6b6b;
-    --warn:#ffd166;
-    --shadow:0 20px 60px rgba(0,0,0,.45);
-    --radius-xl:24px;
-    --radius-lg:18px;
-    --radius-md:14px;
-    --radius-sm:10px;
-  }
-
-  *{ box-sizing:border-box; }
-
-  html,body{
-    margin:0;
-    min-height:100%;
-    background:
-      radial-gradient(1200px 500px at 50% -10%, rgba(0,255,156,.08), transparent 55%),
-      radial-gradient(800px 380px at 10% 10%, rgba(0,255,156,.04), transparent 40%),
-      radial-gradient(900px 420px at 100% 0%, rgba(102,255,196,.03), transparent 38%),
-      linear-gradient(180deg, var(--bg-2), var(--bg));
-    color:var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-    overflow-x:hidden;
-  }
-
-  body::before{
-    content:"";
-    position:fixed;
-    inset:0;
-    pointer-events:none;
-    background:
-      linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
-    background-size:38px 38px;
-    opacity:.10;
-  }
-
-  body::after{
-    content:"";
-    position:fixed;
-    inset:0;
-    pointer-events:none;
-    background:
-      radial-gradient(circle at center, transparent 60%, rgba(0,0,0,.28) 100%);
-  }
-
-  .page{
-    position:relative;
-    z-index:1;
-    min-height:100vh;
-    padding:
-      max(12px, env(safe-area-inset-top))
-      max(12px, env(safe-area-inset-right))
-      max(14px, env(safe-area-inset-bottom))
-      max(12px, env(safe-area-inset-left));
-  }
-
-  .shell{
-    width:min(1700px, 100%);
-    margin:0 auto;
-    display:grid;
-    gap:14px;
-  }
-
-  .topbar{
-    display:grid;
-    grid-template-columns:auto 1fr auto;
-    align-items:center;
-    gap:16px;
-    padding:16px 18px;
-    border-radius:22px;
-    border:1px solid var(--line-strong);
-    background:
-      linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.01)),
-      radial-gradient(circle at top, rgba(0,255,156,.08), transparent 65%),
-      linear-gradient(180deg, rgba(12,24,18,.95), rgba(8,15,12,.97));
-    box-shadow:var(--shadow);
-    overflow:hidden;
-    position:relative;
-  }
-
-  .topbar::before{
-    content:"";
-    position:absolute;
-    inset:0;
-    pointer-events:none;
-    background:linear-gradient(90deg, transparent, rgba(0,255,156,.10), transparent);
-    opacity:.4;
-  }
-
-  .brand{
-    min-width:0;
-  }
-
-  .brand .eyebrow{
-    margin:0 0 6px;
-    font-size:10px;
-    letter-spacing:.28em;
-    text-transform:uppercase;
-    color:var(--muted);
-  }
-
-  .brand h1{
-    margin:0;
-    font-size:clamp(22px, 3vw, 40px);
-    line-height:1;
-    letter-spacing:-.04em;
-    color:#eafff4;
-  }
-
-  .topMeta{
-    display:flex;
-    justify-content:center;
-    align-items:center;
-    gap:14px;
-    flex-wrap:wrap;
-    font-size:13px;
-    color:#c7ffdf;
-  }
-
-  .topMeta strong{
-    color:var(--green);
-  }
-
-  .topActions{
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    justify-content:flex-end;
-  }
-
-  .btn{
-    appearance:none;
-    border:none;
-    cursor:pointer;
-    min-height:42px;
-    padding:10px 14px;
-    border-radius:12px;
-    font:inherit;
-    font-size:12px;
-    font-weight:700;
-    letter-spacing:.04em;
-    transition:transform .12s ease, opacity .15s ease, border-color .15s ease, background .15s ease;
-  }
-
-  .btn:hover{ transform:translateY(-1px); }
-  .btn:active{ transform:translateY(0); opacity:.94; }
-
-  .btnPrimary{
-    color:#02170f;
-    background:linear-gradient(180deg, #00ff9c, #00c97c);
-    box-shadow:0 0 24px rgba(0,255,156,.18);
-  }
-
-  .btnGhost{
-    color:var(--text);
-    background:rgba(255,255,255,.03);
-    border:1px solid var(--line-strong);
-  }
-
-  .layout{
-    display:grid;
-    grid-template-columns:260px minmax(0,1fr) 360px;
-    gap:14px;
-    min-height:calc(100vh - 110px);
-  }
-
-  .sidebar,
-  .rightbar,
-  .center{
-    min-width:0;
-    min-height:0;
-  }
-
-  .sidebar{
-    display:grid;
-    gap:14px;
-    align-content:start;
-  }
-
-  .navCard,
-  .card{
-    border:1px solid var(--line);
-    border-radius:20px;
-    background:
-      linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.01)),
-      linear-gradient(180deg, rgba(12,23,18,.96), rgba(8,15,12,.98));
-    box-shadow:var(--shadow);
-    overflow:hidden;
-    position:relative;
-  }
-
-  .card::before,
-  .navCard::before{
-    content:"";
-    position:absolute;
-    inset:0;
-    pointer-events:none;
-    background:radial-gradient(600px 160px at 50% 0%, rgba(0,255,156,.07), transparent 60%);
-  }
-
-  .cardInner,
-  .navInner{
-    position:relative;
-    z-index:1;
-    padding:16px;
-  }
-
-  .navTitle,
-  .sectionTitle{
-    margin:0 0 12px;
-    font-size:11px;
-    letter-spacing:.22em;
-    text-transform:uppercase;
-    color:var(--green);
-  }
-
-  .navButtons{
-    display:grid;
-    gap:10px;
-  }
-
-  .navBtn{
-    width:100%;
-    text-align:left;
-    padding:12px 14px;
-    border-radius:12px;
-    border:1px solid var(--line);
-    background:rgba(255,255,255,.025);
-    color:var(--text);
-    cursor:pointer;
-    font:inherit;
-    font-size:13px;
-    transition:transform .12s ease, border-color .15s ease, background .15s ease;
-  }
-
-  .navBtn:hover{
-    transform:translateY(-1px);
-    border-color:var(--line-strong);
-    background:rgba(0,255,156,.05);
-  }
-
-  .navBtn.active{
-    border-color:rgba(0,255,156,.32);
-    background:rgba(0,255,156,.10);
-    color:#eafff4;
-    box-shadow:inset 0 0 0 1px rgba(0,255,156,.12);
-  }
-
-  .quickInfo{
-    display:grid;
-    gap:10px;
-  }
-
-  .quickItem{
-    border:1px solid var(--line);
-    border-radius:14px;
-    background:rgba(255,255,255,.02);
-    padding:12px;
-  }
-
-  .quickItem b{
-    display:block;
-    font-size:10px;
-    letter-spacing:.18em;
-    text-transform:uppercase;
-    color:var(--muted);
-    margin-bottom:8px;
-  }
-
-  .quickItem span{
-    color:#e6fff1;
-    font-size:13px;
-    word-break:break-word;
-  }
-
-  .center{
-    display:grid;
-    grid-template-rows:auto minmax(0,1fr);
-    gap:14px;
-  }
-
-  .statsGrid{
-    display:grid;
-    grid-template-columns:repeat(6, minmax(0,1fr));
-    gap:12px;
-  }
-
-  .stat{
-    border:1px solid var(--line);
-    border-radius:16px;
-    background:rgba(255,255,255,.02);
-    padding:14px;
-  }
-
-  .statLabel{
-    font-size:10px;
-    letter-spacing:.18em;
-    text-transform:uppercase;
-    color:var(--muted);
-    margin-bottom:10px;
-  }
-
-  .statValue{
-    font-size:clamp(20px, 2vw, 34px);
-    line-height:1;
-    color:#eafff4;
-    font-weight:800;
-  }
-
-  .statHint{
-    margin-top:8px;
-    font-size:11px;
-    color:var(--muted);
-  }
-
-  .contentCard{
-    min-height:0;
-    display:grid;
-    grid-template-rows:auto auto minmax(0,1fr);
-  }
-
-  .contentTop{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:12px;
-    flex-wrap:wrap;
-    padding:16px 18px 12px;
-    border-bottom:1px solid var(--line);
-    position:relative;
-    z-index:1;
-  }
-
-  .contentTop h2{
-    margin:0 0 4px;
-    font-size:clamp(22px, 2vw, 32px);
-    line-height:1;
-    letter-spacing:-.03em;
-    color:#eafff4;
-  }
-
-  .contentTop p{
-    margin:0;
-    font-size:12px;
-    color:var(--muted);
-  }
-
-  .toolbar{
-    padding:12px 18px;
-    border-bottom:1px solid var(--line);
-    position:relative;
-    z-index:1;
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    align-items:center;
-    justify-content:space-between;
-  }
-
-  .searchWrap{
-    flex:1 1 260px;
-  }
-
-  .input{
-    width:100%;
-    min-height:44px;
-    border-radius:12px;
-    border:1px solid var(--line-strong);
-    background:rgba(0,0,0,.24);
-    color:var(--text);
-    padding:11px 13px;
-    outline:none;
-    font:inherit;
-    font-size:13px;
-  }
-
-  .input::placeholder{
-    color:rgba(215,255,232,.35);
-  }
-
-  .contentBody{
-    min-height:0;
-    overflow:auto;
-    padding:16px 18px 18px;
-    position:relative;
-    z-index:1;
-  }
-
-  .panelSection{ display:none; }
-  .panelSection.active{ display:block; }
-
-  .empty{
-    padding:18px;
-    border-radius:14px;
-    border:1px dashed var(--line-strong);
-    background:rgba(255,255,255,.02);
-    color:var(--muted);
-    text-align:center;
-    line-height:1.6;
-  }
-
-  .roomList{
-    display:grid;
-    gap:12px;
-  }
-
-  .roomCard{
-    border:1px solid var(--line);
-    border-radius:16px;
-    background:rgba(255,255,255,.02);
-    overflow:hidden;
-  }
-
-  .roomHead{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    gap:12px;
-    flex-wrap:wrap;
-    padding:14px;
-    border-bottom:1px solid var(--line);
-    background:rgba(255,255,255,.015);
-  }
-
-  .roomHead h3{
-    margin:0 0 6px;
-    font-size:20px;
-    line-height:1;
-    color:#eafff4;
-  }
-
-  .roomCode{
-    font-size:11px;
-    letter-spacing:.16em;
-    text-transform:uppercase;
-    color:var(--muted);
-    word-break:break-word;
-  }
-
-  .badges{
-    display:flex;
-    gap:8px;
-    flex-wrap:wrap;
-  }
-
-  .badge{
-    display:inline-flex;
-    align-items:center;
-    justify-content:center;
-    min-height:28px;
-    padding:0 10px;
-    border-radius:999px;
-    font-size:10px;
-    letter-spacing:.14em;
-    text-transform:uppercase;
-    border:1px solid var(--line-strong);
-    background:rgba(255,255,255,.03);
-    color:#dbfff0;
-  }
-
-  .badge.ok{
-    background:rgba(0,255,156,.10);
-    border-color:rgba(0,255,156,.24);
-  }
-
-  .badge.warn{
-    background:rgba(255,209,102,.10);
-    border-color:rgba(255,209,102,.24);
-    color:#fff2c6;
-  }
-
-  .badge.danger{
-    background:rgba(255,107,107,.10);
-    border-color:rgba(255,107,107,.24);
-    color:#ffd8d8;
-  }
-
-  .roomBody{
-    padding:14px;
-    display:grid;
-    gap:12px;
-  }
-
-  .roomMeta{
-    display:grid;
-    grid-template-columns:repeat(4, minmax(0,1fr));
-    gap:10px;
-  }
-
-  .mini{
-    border:1px solid var(--line);
-    border-radius:12px;
-    background:rgba(255,255,255,.02);
-    padding:10px 12px;
-  }
-
-  .mini b{
-    display:block;
-    font-size:10px;
-    letter-spacing:.16em;
-    text-transform:uppercase;
-    color:var(--muted);
-    margin-bottom:8px;
-  }
-
-  .mini span{
-    color:#eafff4;
-    font-size:13px;
-    word-break:break-word;
-  }
-
-  .players{
-    display:grid;
-    gap:10px;
-  }
-
-  .player{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    gap:12px;
-    flex-wrap:wrap;
-    border:1px solid var(--line);
-    border-radius:12px;
-    background:rgba(255,255,255,.02);
-    padding:10px 12px;
-  }
-
-  .playerLeft{
-    display:flex;
-    align-items:center;
-    gap:10px;
-    min-width:0;
-  }
-
-  .avatar{
-    width:38px;
-    height:38px;
-    border-radius:10px;
-    display:grid;
-    place-items:center;
-    background:linear-gradient(180deg, #00ff9c33, #00ff9c11);
-    border:1px solid rgba(0,255,156,.24);
-    color:#ecfff6;
-    font-weight:800;
-    flex:0 0 auto;
-  }
-
-  .playerText{
-    min-width:0;
-  }
-
-  .playerName{
-    font-size:13px;
-    font-weight:800;
-    color:#eafff4;
-    white-space:nowrap;
-    overflow:hidden;
-    text-overflow:ellipsis;
-  }
-
-  .playerMeta{
-    font-size:11px;
-    color:var(--muted);
-    margin-top:4px;
-  }
-
-  .playerRight{
-    font-size:11px;
-    color:#9fffd0;
-    letter-spacing:.12em;
-    text-transform:uppercase;
-  }
-
-  .systemGrid{
-    display:grid;
-    grid-template-columns:repeat(2, minmax(0,1fr));
-    gap:12px;
-    margin-bottom:14px;
-  }
-
-  .terminal{
-    border:1px solid var(--line);
-    border-radius:16px;
-    background:rgba(0,0,0,.20);
-    padding:14px;
-    min-height:260px;
-    max-height:48vh;
-    overflow:auto;
-    font-size:12px;
-    line-height:1.55;
-    color:#baffdd;
-  }
-
-  .rightbar{
-    display:grid;
-    gap:14px;
-    align-content:start;
-  }
-
-  .logsBox{
-    min-height:300px;
-    max-height:60vh;
-    overflow:auto;
-    border:1px solid var(--line);
-    border-radius:16px;
-    background:rgba(0,0,0,.20);
-    padding:12px;
-  }
-
-  .log{
-    font-size:12px;
-    line-height:1.55;
-    padding:8px 10px;
-    border-radius:10px;
-    background:rgba(255,255,255,.02);
-    border-left:2px solid rgba(0,255,156,.30);
-    margin-bottom:8px;
-    word-break:break-word;
-    white-space:pre-wrap;
-  }
-
-  .footer{
-    padding:4px 4px 0;
-    color:var(--muted);
-    font-size:11px;
-    letter-spacing:.10em;
-    text-transform:uppercase;
-    display:flex;
-    justify-content:space-between;
-    gap:10px;
-    flex-wrap:wrap;
-  }
-
-  .pulse{
-    animation:pulse 1.4s ease-in-out infinite;
-  }
-
-  @keyframes pulse{
-    0%,100%{ opacity:1; }
-    50%{ opacity:.45; }
-  }
-
-  @media (max-width:1380px){
-    .layout{
-      grid-template-columns:220px minmax(0,1fr) 320px;
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>OSL // SYSTEM CORE</title>
+
+  <style>
+    :root{
+      --bg:#020504;
+      --bg-2:#04110d;
+      --bg-3:#071a13;
+      --panel:#07110e;
+      --panel-2:#0a1713;
+      --panel-3:#0c1f18;
+      --line:rgba(0,255,156,.12);
+      --line-2:rgba(0,255,156,.22);
+      --line-3:rgba(0,255,156,.38);
+      --text:#d7fff1;
+      --muted:#7eb9a7;
+      --green:#00ff9c;
+      --green-2:#00d987;
+      --green-soft:rgba(0,255,156,.08);
+      --danger:#ff6b6b;
+      --warn:#ffd166;
+      --radius-xl:24px;
+      --radius-lg:18px;
+      --radius-md:14px;
+      --radius-sm:12px;
+      --shadow:0 20px 70px rgba(0,0,0,.45);
+      --glow:0 0 18px rgba(0,255,156,.14);
     }
 
-    .statsGrid{
-      grid-template-columns:repeat(3, minmax(0,1fr));
+    *{ box-sizing:border-box; }
+
+    html,body{
+      margin:0;
+      min-height:100%;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(0,255,156,.08), transparent 28%),
+        radial-gradient(circle at 90% 0%, rgba(0,180,120,.10), transparent 24%),
+        radial-gradient(circle at 50% 100%, rgba(0,255,156,.06), transparent 30%),
+        linear-gradient(180deg, var(--bg-3) 0%, var(--bg-2) 32%, var(--bg) 100%);
+      color:var(--text);
+      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      overflow-x:hidden;
     }
-  }
 
-  @media (max-width:1100px){
-    .layout{
-      grid-template-columns:1fr;
+    body::before{
+      content:"";
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+      background:
+        linear-gradient(rgba(0,255,156,.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,156,.018) 1px, transparent 1px);
+      background-size:30px 30px;
+      opacity:.22;
     }
 
-    .sidebar{ order:1; }
-    .center{ order:2; }
-    .rightbar{ order:3; }
-
-    .statsGrid{
-      grid-template-columns:repeat(3, minmax(0,1fr));
+    body::after{
+      content:"";
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+      background:
+        radial-gradient(circle at center, transparent 55%, rgba(0,0,0,.46) 100%);
+      opacity:.8;
     }
-  }
 
-  @media (max-width:760px){
     .page{
+      position:relative;
+      z-index:1;
+      min-height:100vh;
       padding:
-        max(10px, env(safe-area-inset-top))
-        max(10px, env(safe-area-inset-right))
-        max(12px, env(safe-area-inset-bottom))
-        max(10px, env(safe-area-inset-left));
+        max(12px, env(safe-area-inset-top))
+        max(12px, env(safe-area-inset-right))
+        max(14px, env(safe-area-inset-bottom))
+        max(12px, env(safe-area-inset-left));
+    }
+
+    .shell{
+      width:min(1680px, 100%);
+      margin:0 auto;
+      display:grid;
+      gap:14px;
     }
 
     .topbar{
-      grid-template-columns:1fr;
-      justify-items:start;
-      padding:14px;
-      border-radius:16px;
+      display:grid;
+      grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto;
+      gap:16px;
+      align-items:center;
+      padding:18px 20px;
+      border:1px solid var(--line-3);
+      border-radius:26px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.008)),
+        radial-gradient(circle at 50% 0%, rgba(0,255,156,.10), transparent 55%),
+        linear-gradient(180deg, rgba(10,26,20,.92), rgba(5,14,11,.96));
+      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.02);
+      overflow:hidden;
+      position:relative;
     }
 
-    .topMeta{
-      justify-content:flex-start;
+    .topbar::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:linear-gradient(90deg, transparent, rgba(0,255,156,.12), transparent);
+      opacity:.35;
+    }
+
+    .brand{ min-width:0; }
+    .eyebrow{
+      margin:0 0 8px;
+      font-size:11px;
+      letter-spacing:.34em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+
+    .title{
+      margin:0;
+      font-size:clamp(30px, 4vw, 64px);
+      line-height:.94;
+      letter-spacing:-.05em;
+      color:#eefff8;
+      text-shadow:0 0 20px rgba(0,255,156,.10);
+    }
+
+    .meta{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:14px;
+      flex-wrap:wrap;
+      color:#c8f9e7;
+      font-size:14px;
+    }
+
+    .meta strong{
+      color:var(--green);
+      text-shadow:0 0 8px rgba(0,255,156,.24);
     }
 
     .topActions{
-      justify-content:flex-start;
-      width:100%;
-    }
-
-    .topActions .btn{
-      flex:1 1 160px;
-    }
-
-    .navCard,
-    .card{
-      border-radius:16px;
-    }
-
-    .statsGrid{
-      grid-template-columns:repeat(2, minmax(0,1fr));
-    }
-
-    .roomMeta,
-    .systemGrid{
-      grid-template-columns:1fr;
-    }
-
-    .contentTop{
-      padding:14px 14px 10px;
-    }
-
-    .toolbar{
-      padding:10px 14px;
-    }
-
-    .contentBody{
-      padding:14px;
-    }
-
-    .footer{
-      flex-direction:column;
-    }
-  }
-
-  @media (max-width:460px){
-    .statsGrid{
-      grid-template-columns:1fr;
-    }
-
-    .brand h1{
-      font-size:28px;
-    }
-
-    .roomHead h3{
-      font-size:18px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
     }
 
     .btn{
-      width:100%;
+      appearance:none;
+      border:none;
+      cursor:pointer;
+      min-height:48px;
+      padding:12px 16px;
+      border-radius:14px;
+      font:inherit;
+      font-weight:800;
+      color:var(--text);
+      background:rgba(255,255,255,.03);
+      border:1px solid var(--line-2);
+      transition:transform .12s ease, border-color .15s ease, background .15s ease, opacity .15s ease;
     }
-  }
-</style>
+
+    .btn:hover{
+      transform:translateY(-1px);
+      border-color:var(--line-3);
+      background:rgba(255,255,255,.05);
+    }
+
+    .btn:active{
+      transform:translateY(0);
+      opacity:.95;
+    }
+
+    .btnPrimary{
+      background:linear-gradient(180deg, #00ff9c, #00cb7c);
+      color:#04150f;
+      border-color:transparent;
+      box-shadow:0 0 28px rgba(0,255,156,.18);
+    }
+
+    .btnDanger{
+      color:#ffdede;
+      border-color:rgba(255,107,107,.18);
+      background:rgba(255,107,107,.07);
+    }
+
+    .layout{
+      display:grid;
+      grid-template-columns:290px minmax(0,1fr) 360px;
+      gap:14px;
+      min-height:calc(100vh - 140px);
+    }
+
+    .card{
+      border:1px solid var(--line-2);
+      border-radius:22px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.008)),
+        linear-gradient(180deg, rgba(8,21,17,.94), rgba(4,12,9,.96));
+      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.01);
+      position:relative;
+      overflow:hidden;
+      min-width:0;
+      min-height:0;
+    }
+
+    .card::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:radial-gradient(500px 160px at 50% 0%, rgba(0,255,156,.09), transparent 65%);
+      opacity:.7;
+    }
+
+    .cardInner{
+      position:relative;
+      z-index:1;
+      padding:16px;
+    }
+
+    .sideCol,
+    .rightCol{
+      display:grid;
+      gap:14px;
+      align-content:start;
+      min-height:0;
+    }
+
+    .navTitle,
+    .sectionLabel{
+      margin:0 0 14px;
+      font-size:11px;
+      letter-spacing:.30em;
+      text-transform:uppercase;
+      color:var(--green);
+      text-shadow:0 0 8px rgba(0,255,156,.18);
+    }
+
+    .navButtons{
+      display:grid;
+      gap:10px;
+    }
+
+    .navBtn{
+      width:100%;
+      text-align:left;
+      padding:14px 16px;
+      border-radius:14px;
+      border:1px solid var(--line-2);
+      background:rgba(255,255,255,.02);
+      color:#d9fff2;
+      cursor:pointer;
+      font:inherit;
+      font-size:16px;
+      transition:all .15s ease;
+    }
+
+    .navBtn:hover,
+    .navBtn.active{
+      background:linear-gradient(180deg, rgba(0,255,156,.14), rgba(0,255,156,.06));
+      border-color:var(--line-3);
+      box-shadow:var(--glow);
+    }
+
+    .miniStat{
+      display:grid;
+      gap:12px;
+    }
+
+    .miniBox{
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:rgba(255,255,255,.02);
+      padding:14px;
+    }
+
+    .miniBox b{
+      display:block;
+      margin-bottom:10px;
+      font-size:11px;
+      letter-spacing:.20em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+
+    .miniBox span{
+      display:block;
+      font-size:14px;
+      line-height:1.7;
+      word-break:break-word;
+      color:#effff8;
+    }
+
+    .centerCol{
+      display:grid;
+      gap:14px;
+      min-height:0;
+      align-content:start;
+    }
+
+    .statsGrid{
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0,1fr));
+      gap:14px;
+    }
+
+    .stat{
+      padding:18px;
+      border-radius:18px;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.02);
+      min-width:0;
+    }
+
+    .statLabel{
+      font-size:11px;
+      letter-spacing:.22em;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin-bottom:10px;
+    }
+
+    .statValue{
+      font-size:clamp(30px, 4vw, 46px);
+      line-height:1;
+      font-weight:900;
+      color:#effff8;
+      text-shadow:0 0 14px rgba(0,255,156,.10);
+    }
+
+    .statHint{
+      margin-top:10px;
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.5;
+    }
+
+    .panelSection{
+      display:none;
+    }
+
+    .panelSection.active{
+      display:block;
+    }
+
+    .panelHeader{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-bottom:14px;
+    }
+
+    .panelHeader h2{
+      margin:0 0 6px;
+      font-size:clamp(28px, 3vw, 50px);
+      line-height:.95;
+      color:#eefff8;
+      letter-spacing:-.04em;
+    }
+
+    .panelHeader p{
+      margin:0;
+      color:var(--muted);
+      font-size:14px;
+      line-height:1.6;
+    }
+
+    .search{
+      width:100%;
+      min-height:52px;
+      border-radius:14px;
+      border:1px solid var(--line-2);
+      background:rgba(0,0,0,.22);
+      color:var(--text);
+      padding:14px 16px;
+      outline:none;
+      font:inherit;
+      font-size:14px;
+    }
+
+    .search::placeholder{
+      color:rgba(215,255,241,.34);
+    }
+
+    .roomsList,
+    .chatList,
+    .videoList,
+    .systemList{
+      display:grid;
+      gap:12px;
+      margin-top:14px;
+    }
+
+    .rowCard{
+      border:1px solid var(--line);
+      border-radius:18px;
+      background:rgba(255,255,255,.02);
+      padding:14px;
+    }
+
+    .rowTitle{
+      margin:0 0 8px;
+      color:#eefff8;
+      font-size:20px;
+      line-height:1.1;
+    }
+
+    .rowMeta{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-bottom:12px;
+    }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-height:28px;
+      padding:0 10px;
+      border-radius:999px;
+      border:1px solid var(--line-2);
+      background:rgba(255,255,255,.03);
+      font-size:11px;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+      color:#d9fff1;
+    }
+
+    .badge.ok{
+      color:#dffff0;
+      background:rgba(0,255,156,.08);
+      border-color:rgba(0,255,156,.24);
+    }
+
+    .badge.warn{
+      color:#fff6d8;
+      background:rgba(255,209,102,.08);
+      border-color:rgba(255,209,102,.24);
+    }
+
+    .badge.danger{
+      color:#ffdede;
+      background:rgba(255,107,107,.08);
+      border-color:rgba(255,107,107,.24);
+    }
+
+    .roomGrid{
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:10px;
+    }
+
+    .subBox{
+      border:1px solid rgba(0,255,156,.10);
+      border-radius:14px;
+      padding:12px;
+      background:rgba(255,255,255,.015);
+      min-width:0;
+    }
+
+    .subBox b{
+      display:block;
+      margin-bottom:8px;
+      font-size:10px;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+
+    .subBox span{
+      color:#eafff7;
+      font-size:14px;
+      word-break:break-word;
+    }
+
+    .playersWrap{
+      display:grid;
+      gap:10px;
+      margin-top:12px;
+    }
+
+    .playerLine{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      padding:12px;
+      border-radius:14px;
+      border:1px solid rgba(0,255,156,.10);
+      background:rgba(255,255,255,.015);
+    }
+
+    .emptyState{
+      margin-top:14px;
+      padding:18px;
+      border-radius:16px;
+      border:1px dashed var(--line-2);
+      background:rgba(255,255,255,.015);
+      color:var(--muted);
+      text-align:center;
+      line-height:1.7;
+    }
+
+    .chatEntry{
+      padding:14px;
+      border-radius:16px;
+      border:1px solid rgba(0,255,156,.10);
+      background:rgba(255,255,255,.02);
+    }
+
+    .chatMeta{
+      font-size:11px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      color:var(--green);
+      margin-bottom:8px;
+    }
+
+    .chatText{
+      color:#f2fff9;
+      line-height:1.65;
+      font-size:14px;
+      word-break:break-word;
+    }
+
+    .videoGrid{
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0,1fr));
+      gap:12px;
+    }
+
+    .videoBox{
+      padding:14px;
+      border-radius:16px;
+      border:1px solid rgba(0,255,156,.10);
+      background:rgba(255,255,255,.02);
+    }
+
+    .videoBox h3{
+      margin:0 0 10px;
+      font-size:18px;
+      color:#effff8;
+    }
+
+    .sysRows{
+      display:grid;
+      gap:10px;
+    }
+
+    .sysRow{
+      padding:14px;
+      border-radius:14px;
+      border:1px solid rgba(0,255,156,.10);
+      background:rgba(255,255,255,.02);
+      line-height:1.6;
+      color:#effff8;
+      font-size:14px;
+    }
+
+    .logsCard{
+      display:grid;
+      grid-template-rows:auto auto 1fr;
+      min-height:0;
+    }
+
+    .logsTools{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-bottom:14px;
+    }
+
+    .logsBox{
+      min-height:420px;
+      max-height:calc(100vh - 280px);
+      overflow:auto;
+      display:grid;
+      gap:10px;
+      align-content:start;
+    }
+
+    .logLine{
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(0,255,156,.12);
+      background:rgba(255,255,255,.02);
+      color:#e7fff7;
+      line-height:1.6;
+      font-size:13px;
+      word-break:break-word;
+      box-shadow:inset 3px 0 0 rgba(0,255,156,.38);
+    }
+
+    .logLine.info{ box-shadow:inset 3px 0 0 rgba(0,255,156,.38); }
+    .logLine.warn{ box-shadow:inset 3px 0 0 rgba(255,209,102,.60); }
+    .logLine.error{ box-shadow:inset 3px 0 0 rgba(255,107,107,.60); }
+
+    .footer{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      color:var(--muted);
+      font-size:12px;
+      letter-spacing:.10em;
+      text-transform:uppercase;
+      padding:2px 4px 0;
+    }
+
+    .footer strong{
+      color:var(--green);
+    }
+
+    @media (max-width:1320px){
+      .layout{
+        grid-template-columns:260px minmax(0,1fr);
+      }
+
+      .rightCol{
+        grid-column:1 / -1;
+      }
+
+      .logsBox{
+        max-height:420px;
+      }
+    }
+
+    @media (max-width:1024px){
+      .layout{
+        grid-template-columns:1fr;
+      }
+
+      .statsGrid{
+        grid-template-columns:repeat(2, minmax(0,1fr));
+      }
+
+      .roomGrid{
+        grid-template-columns:repeat(2, minmax(0,1fr));
+      }
+
+      .videoGrid{
+        grid-template-columns:1fr;
+      }
+    }
+
+    @media (max-width:720px){
+      .page{
+        padding:
+          max(10px, env(safe-area-inset-top))
+          max(10px, env(safe-area-inset-right))
+          max(12px, env(safe-area-inset-bottom))
+          max(10px, env(safe-area-inset-left));
+      }
+
+      .topbar{
+        grid-template-columns:1fr;
+        border-radius:18px;
+        padding:16px;
+      }
+
+      .meta{
+        justify-content:flex-start;
+      }
+
+      .topActions{
+        justify-content:flex-start;
+      }
+
+      .card{
+        border-radius:18px;
+      }
+
+      .statsGrid{
+        grid-template-columns:1fr;
+      }
+
+      .roomGrid{
+        grid-template-columns:1fr;
+      }
+
+      .title{
+        font-size:44px;
+      }
+
+      .navButtons{
+        grid-template-columns:repeat(2, minmax(0,1fr));
+      }
+
+      .navBtn{
+        text-align:center;
+        padding:12px;
+        font-size:14px;
+      }
+
+      .logsTools{
+        flex-direction:column;
+      }
+
+      .btn{
+        width:100%;
+      }
+
+      .logsBox{
+        min-height:280px;
+        max-height:340px;
+      }
+    }
+
+    @media (max-width:520px){
+      .navButtons{
+        grid-template-columns:1fr;
+      }
+
+      .panelHeader h2{
+        font-size:34px;
+      }
+
+      .title{
+        font-size:36px;
+      }
+
+      .meta{
+        font-size:13px;
+      }
+    }
+  </style>
 </head>
 <body>
-<main class="page">
-  <div class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <p class="eyebrow">Painel administrativo · núcleo do sistema</p>
-        <h1>OSL // SYSTEM CORE</h1>
-      </div>
+  <main class="page">
+    <div class="shell">
 
-      <div class="topMeta">
-        <span>Servidor: <strong id="serverStatus">Conectando</strong></span>
-        <span>•</span>
-        <span>Uptime: <strong id="serverUptime">---</strong></span>
-        <span>•</span>
-        <span>Ambiente: <strong id="serverEnv">---</strong></span>
-      </div>
-
-      <div class="topActions">
-        <button class="btn btnGhost" id="refreshBtn">Atualizar agora</button>
-        <button class="btn btnPrimary" id="toggleAutoBtn">Auto refresh: ON</button>
-      </div>
-    </header>
-
-    <section class="layout">
-      <aside class="sidebar">
-        <section class="navCard">
-          <div class="navInner">
-            <h2 class="navTitle">Navegação</h2>
-            <div class="navButtons">
-              <button class="navBtn active" data-section="dashboard">Dashboard</button>
-              <button class="navBtn" data-section="rooms">Salas</button>
-              <button class="navBtn" data-section="video">Vídeo</button>
-              <button class="navBtn" data-section="system">Sistema</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="card">
-          <div class="cardInner">
-            <h2 class="sectionTitle">Servidor alvo</h2>
-            <div class="quickInfo">
-              <div class="quickItem">
-                <b>URL</b>
-                <span id="serverUrlText">---</span>
-              </div>
-              <div class="quickItem">
-                <b>Última atualização</b>
-                <span id="lastUpdateText">---</span>
-              </div>
-              <div class="quickItem">
-                <b>Status do ciclo</b>
-                <span id="cycleText">Monitorando</span>
-              </div>
-            </div>
-          </div>
-        </section>
-      </aside>
-
-      <section class="center">
-        <section class="card">
-          <div class="cardInner">
-            <h2 class="sectionTitle">Métricas em tempo real</h2>
-            <div class="statsGrid">
-              <div class="stat">
-                <div class="statLabel">Salas</div>
-                <div class="statValue" id="statRooms">0</div>
-                <div class="statHint">salas registradas</div>
-              </div>
-              <div class="stat">
-                <div class="statLabel">Jogadores</div>
-                <div class="statValue" id="statPlayers">0</div>
-                <div class="statHint">online agora</div>
-              </div>
-              <div class="stat">
-                <div class="statLabel">Sessões</div>
-                <div class="statValue" id="statSessions">0</div>
-                <div class="statHint">rituais ativos</div>
-              </div>
-              <div class="stat">
-                <div class="statLabel">Vídeo</div>
-                <div class="statValue" id="statVideo">0</div>
-                <div class="statHint">salas com vídeo</div>
-              </div>
-              <div class="stat">
-                <div class="statLabel">Gravação</div>
-                <div class="statValue" id="statRecord">0</div>
-                <div class="statHint">salas gravando</div>
-              </div>
-              <div class="stat">
-                <div class="statLabel">Eventos</div>
-                <div class="statValue" id="statEvents">0</div>
-                <div class="statHint">ciclos processados</div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card contentCard">
-          <div class="contentTop">
-            <div>
-              <h2 id="contentTitle">Dashboard</h2>
-              <p id="contentSub">Visão consolidada das salas e atividade do sistema.</p>
-            </div>
-          </div>
-
-          <div class="toolbar">
-            <div class="searchWrap">
-              <input class="input" id="searchInput" type="text" placeholder="Buscar por sala, código ou host..." />
-            </div>
-          </div>
-
-          <div class="contentBody">
-            <section class="panelSection active" id="section-dashboard">
-              <div class="empty">
-                O painel está online. Use a navegação lateral para abrir as áreas de salas, vídeo e sistema.
-              </div>
-            </section>
-
-            <section class="panelSection" id="section-rooms">
-              <div class="roomList" id="roomsList">
-                <div class="empty">Carregando salas...</div>
-              </div>
-            </section>
-
-            <section class="panelSection" id="section-video">
-              <div class="roomList" id="videoList">
-                <div class="empty">Sem atividade de vídeo no momento.</div>
-              </div>
-            </section>
-
-            <section class="panelSection" id="section-system">
-              <div class="systemGrid">
-                <div class="mini">
-                  <b>Status</b>
-                  <span id="systemStatus">---</span>
-                </div>
-                <div class="mini">
-                  <b>Firebase</b>
-                  <span id="systemFirebase">---</span>
-                </div>
-                <div class="mini">
-                  <b>Iniciado em</b>
-                  <span id="systemStartedAt">---</span>
-                </div>
-                <div class="mini">
-                  <b>Agora</b>
-                  <span id="systemNow">---</span>
-                </div>
-              </div>
-
-              <div class="terminal" id="terminal">terminal iniciado...</div>
-            </section>
-          </div>
-        </section>
-
-        <div class="footer">
-          <div>OSL Monitor</div>
-          <div id="footerHint">Sistema estável</div>
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow">Painel administrativo · núcleo do sistema</p>
+          <h1 class="title">OSL // SYSTEM CORE</h1>
         </div>
+
+        <div class="meta">
+          <span>Servidor: <strong id="metaServerStatus">Conectando</strong></span>
+          <span>•</span>
+          <span>Uptime: <strong id="metaUptime">---</strong></span>
+          <span>•</span>
+          <span>Ambiente: <strong id="metaEnv">---</strong></span>
+        </div>
+
+        <div class="topActions">
+          <button class="btn" id="refreshBtn">Atualizar agora</button>
+          <button class="btn btnPrimary" id="autoBtn">Auto refresh: ON</button>
+        </div>
+      </header>
+
+      <section class="layout">
+
+        <aside class="sideCol">
+          <section class="card">
+            <div class="cardInner">
+              <p class="navTitle">Navegação</p>
+
+              <div class="navButtons">
+                <button class="navBtn active" data-section="dashboard">Dashboard</button>
+                <button class="navBtn" data-section="rooms">Salas</button>
+                <button class="navBtn" data-section="chat">Chat</button>
+                <button class="navBtn" data-section="video">Vídeo</button>
+                <button class="navBtn" data-section="system">Sistema</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="cardInner miniStat">
+              <p class="sectionLabel">Servidor alvo</p>
+
+              <div class="miniBox">
+                <b>URL</b>
+                <span id="serverUrl"></span>
+              </div>
+
+              <div class="miniBox">
+                <b>Última atualização</b>
+                <span id="lastUpdated">---</span>
+              </div>
+
+              <div class="miniBox">
+                <b>Status do ciclo</b>
+                <span id="cycleStatus">Aguardando</span>
+              </div>
+            </div>
+          </section>
+        </aside>
+
+        <section class="centerCol">
+          <section class="card">
+            <div class="cardInner">
+              <p class="sectionLabel">Métricas em tempo real</p>
+
+              <div class="statsGrid">
+                <div class="stat">
+                  <div class="statLabel">Salas</div>
+                  <div class="statValue" id="statRooms">0</div>
+                  <div class="statHint">salas registradas</div>
+                </div>
+
+                <div class="stat">
+                  <div class="statLabel">Jogadores</div>
+                  <div class="statValue" id="statPlayers">0</div>
+                  <div class="statHint">online agora</div>
+                </div>
+
+                <div class="stat">
+                  <div class="statLabel">Sessões</div>
+                  <div class="statValue" id="statSessions">0</div>
+                  <div class="statHint">rituais ativos</div>
+                </div>
+
+                <div class="stat">
+                  <div class="statLabel">Vídeo</div>
+                  <div class="statValue" id="statVideo">0</div>
+                  <div class="statHint">salas com vídeo</div>
+                </div>
+
+                <div class="stat">
+                  <div class="statLabel">Gravação</div>
+                  <div class="statValue" id="statRecord">0</div>
+                  <div class="statHint">salas gravando</div>
+                </div>
+
+                <div class="stat">
+                  <div class="statLabel">Eventos</div>
+                  <div class="statValue" id="statEvents">0</div>
+                  <div class="statHint">ciclos processados</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="card panelSection active" id="section-dashboard">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2>Dashboard</h2>
+                  <p>Visão consolidada das salas e atividade do sistema.</p>
+                </div>
+              </div>
+
+              <input class="search" id="searchInput" type="text" placeholder="Buscar por sala, código, host ou jogador..." />
+
+              <div class="roomsList" id="dashboardContent"></div>
+            </div>
+          </section>
+
+          <section class="card panelSection" id="section-rooms">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2>Salas</h2>
+                  <p>Monitoramento completo das salas detectadas.</p>
+                </div>
+              </div>
+
+              <div class="roomsList" id="roomsContent"></div>
+            </div>
+          </section>
+
+          <section class="card panelSection" id="section-chat">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2>Chat</h2>
+                  <p>Mensagens detectadas pelo painel e por logs do sistema.</p>
+                </div>
+              </div>
+
+              <div class="chatList" id="chatContent"></div>
+            </div>
+          </section>
+
+          <section class="card panelSection" id="section-video">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2>Vídeo</h2>
+                  <p>Estado visual das salas com vídeo e gravação.</p>
+                </div>
+              </div>
+
+              <div class="videoList" id="videoContent"></div>
+            </div>
+          </section>
+
+          <section class="card panelSection" id="section-system">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2>Sistema</h2>
+                  <p>Saúde do backend, integridade e estado geral.</p>
+                </div>
+              </div>
+
+              <div class="sysRows" id="systemContent"></div>
+            </div>
+          </section>
+        </section>
+
+        <aside class="rightCol">
+          <section class="card logsCard">
+            <div class="cardInner">
+              <p class="sectionLabel">Logs do sistema</p>
+
+              <div class="logsTools">
+                <button class="btn" id="clearLogsBtn">Limpar logs</button>
+                <button class="btn" id="pauseLogsBtn">Pausar stream</button>
+                <button class="btn btnDanger" id="clearEventsBtn">Limpar eventos</button>
+              </div>
+
+              <div class="logsBox" id="logsBox">
+                <div class="logLine info">Aguardando atividade do sistema...</div>
+              </div>
+            </div>
+          </section>
+        </aside>
+
       </section>
 
-      <aside class="rightbar">
-        <section class="card">
-          <div class="cardInner">
-            <h2 class="sectionTitle">Logs do sistema</h2>
-            <div class="logsBox" id="logsBox">
-              <div class="log">Aguardando atividade...</div>
-            </div>
-          </div>
-        </section>
-      </aside>
-    </section>
-  </div>
-</main>
+      <footer class="footer">
+        <div>Painel: <strong>OSL System Core</strong></div>
+        <div>Fonte: <strong id="footerServer"></strong></div>
+      </footer>
+    </div>
+  </main>
 
-<script>
-  const SERVER = "https://osl-video-server-production.up.railway.app";
+  <script>
+    const SERVER = "https://osl-video-server-production.up.railway.app";
 
-  const state = {
-    autoRefresh: true,
-    rooms: [],
-    events: 0,
-    logs: [],
-    health: null,
-    lastUpdate: null
-  };
-
-  const el = {
-    serverStatus: document.getElementById("serverStatus"),
-    serverUptime: document.getElementById("serverUptime"),
-    serverEnv: document.getElementById("serverEnv"),
-    serverUrlText: document.getElementById("serverUrlText"),
-    lastUpdateText: document.getElementById("lastUpdateText"),
-    cycleText: document.getElementById("cycleText"),
-
-    statRooms: document.getElementById("statRooms"),
-    statPlayers: document.getElementById("statPlayers"),
-    statSessions: document.getElementById("statSessions"),
-    statVideo: document.getElementById("statVideo"),
-    statRecord: document.getElementById("statRecord"),
-    statEvents: document.getElementById("statEvents"),
-
-    contentTitle: document.getElementById("contentTitle"),
-    contentSub: document.getElementById("contentSub"),
-    searchInput: document.getElementById("searchInput"),
-
-    roomsList: document.getElementById("roomsList"),
-    videoList: document.getElementById("videoList"),
-
-    systemStatus: document.getElementById("systemStatus"),
-    systemFirebase: document.getElementById("systemFirebase"),
-    systemStartedAt: document.getElementById("systemStartedAt"),
-    systemNow: document.getElementById("systemNow"),
-
-    terminal: document.getElementById("terminal"),
-    logsBox: document.getElementById("logsBox"),
-    footerHint: document.getElementById("footerHint"),
-
-    refreshBtn: document.getElementById("refreshBtn"),
-    toggleAutoBtn: document.getElementById("toggleAutoBtn"),
-    navButtons: [...document.querySelectorAll(".navBtn")],
-    sections: {
-      dashboard: document.getElementById("section-dashboard"),
-      rooms: document.getElementById("section-rooms"),
-      video: document.getElementById("section-video"),
-      system: document.getElementById("section-system")
-    }
-  };
-
-  el.serverUrlText.textContent = SERVER;
-
-  function escapeHtml(str){
-    return String(str ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
-  }
-
-  function formatDate(value){
-    if(!value) return "---";
-    const d = new Date(value);
-    if(Number.isNaN(d.getTime())) return String(value);
-    return d.toLocaleString("pt-BR");
-  }
-
-  function formatUptime(sec){
-    const total = Number(sec || 0);
-    const d = Math.floor(total / 86400);
-    const h = Math.floor((total % 86400) / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = Math.floor(total % 60);
-
-    if(d > 0) return `${d}d ${h}h ${m}m`;
-    if(h > 0) return `${h}h ${m}m`;
-    if(m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
-  }
-
-  function initials(name){
-    const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
-    if(!parts.length) return "??";
-    if(parts.length === 1) return parts[0].slice(0,2).toUpperCase();
-    return (parts[0][0] + parts[1][0]).toUpperCase();
-  }
-
-  function addLog(msg){
-    const line = `[${new Date().toLocaleTimeString("pt-BR")}] ${msg}`;
-    state.logs.push(line);
-    if(state.logs.length > 220) state.logs.shift();
-
-    el.logsBox.innerHTML = state.logs
-      .slice()
-      .reverse()
-      .map(item => `<div class="log">${escapeHtml(item)}</div>`)
-      .join("");
-  }
-
-  function setSection(id){
-    Object.entries(el.sections).forEach(([key, node]) => {
-      node.classList.toggle("active", key === id);
-    });
-
-    el.navButtons.forEach(btn => {
-      btn.classList.toggle("active", btn.dataset.section === id);
-    });
-
-    const map = {
-      dashboard: {
-        title: "Dashboard",
-        sub: "Visão consolidada das salas e atividade do sistema."
-      },
-      rooms: {
-        title: "Salas",
-        sub: "Salas registradas, host, jogadores e estado geral."
-      },
-      video: {
-        title: "Vídeo",
-        sub: "Monitoramento visual das salas com vídeo e gravação."
-      },
-      system: {
-        title: "Sistema",
-        sub: "Saúde do backend, ambiente e terminal de monitoramento."
-      }
+    const state = {
+      autoRefresh: true,
+      logsPaused: false,
+      rooms: [],
+      previousRoomsMap: new Map(),
+      logsEventSource: null,
+      refreshTimer: null,
+      visualEvents: [],
+      chatEvents: [],
+      eventCount: 0,
+      health: null
     };
 
-    el.contentTitle.textContent = map[id].title;
-    el.contentSub.textContent = map[id].sub;
-  }
+    const el = {
+      metaServerStatus: document.getElementById("metaServerStatus"),
+      metaUptime: document.getElementById("metaUptime"),
+      metaEnv: document.getElementById("metaEnv"),
 
-  async function fetchJson(path){
-    const res = await fetch(SERVER + path, { cache: "no-store" });
-    const data = await res.json().catch(() => ({}));
-    if(!res.ok) throw new Error(data?.error || `HTTP_${res.status}`);
-    return data;
-  }
+      statRooms: document.getElementById("statRooms"),
+      statPlayers: document.getElementById("statPlayers"),
+      statSessions: document.getElementById("statSessions"),
+      statVideo: document.getElementById("statVideo"),
+      statRecord: document.getElementById("statRecord"),
+      statEvents: document.getElementById("statEvents"),
 
-  function renderHealth(data){
-    state.health = data || null;
+      serverUrl: document.getElementById("serverUrl"),
+      lastUpdated: document.getElementById("lastUpdated"),
+      cycleStatus: document.getElementById("cycleStatus"),
 
-    if(!data || data.ok !== true){
-      el.serverStatus.textContent = "Offline";
-      el.serverUptime.textContent = "---";
-      el.serverEnv.textContent = "---";
-      el.systemStatus.textContent = "Sem resposta";
-      el.systemFirebase.textContent = "---";
-      el.systemStartedAt.textContent = "---";
-      el.systemNow.textContent = "---";
-      return;
+      searchInput: document.getElementById("searchInput"),
+      dashboardContent: document.getElementById("dashboardContent"),
+      roomsContent: document.getElementById("roomsContent"),
+      chatContent: document.getElementById("chatContent"),
+      videoContent: document.getElementById("videoContent"),
+      systemContent: document.getElementById("systemContent"),
+
+      logsBox: document.getElementById("logsBox"),
+
+      refreshBtn: document.getElementById("refreshBtn"),
+      autoBtn: document.getElementById("autoBtn"),
+      clearLogsBtn: document.getElementById("clearLogsBtn"),
+      pauseLogsBtn: document.getElementById("pauseLogsBtn"),
+      clearEventsBtn: document.getElementById("clearEventsBtn"),
+
+      footerServer: document.getElementById("footerServer")
+    };
+
+    el.serverUrl.textContent = SERVER;
+    el.footerServer.textContent = SERVER;
+
+    function escapeHtml(str) {
+      return String(str ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
     }
 
-    el.serverStatus.textContent = "Online";
-    el.serverUptime.textContent = formatUptime(data.uptimeSec || 0);
-    el.serverEnv.textContent = data.environment || "---";
-
-    el.systemStatus.textContent = data.ok ? "Operacional" : "Instável";
-    el.systemFirebase.textContent = data.firebaseConfigured ? "Conectado" : "Não configurado";
-    el.systemStartedAt.textContent = formatDate(data.startedAt);
-    el.systemNow.textContent = formatDate(data.now);
-  }
-
-  function renderStats(rooms){
-    const totalRooms = rooms.length;
-    const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
-    const totalSessions = rooms.filter(room => room.sessionActive).length;
-    const totalVideo = rooms.filter(room => room.videoActive).length;
-    const totalRecord = rooms.filter(room => room.recordingActive).length;
-
-    el.statRooms.textContent = String(totalRooms);
-    el.statPlayers.textContent = String(totalPlayers);
-    el.statSessions.textContent = String(totalSessions);
-    el.statVideo.textContent = String(totalVideo);
-    el.statRecord.textContent = String(totalRecord);
-    el.statEvents.textContent = String(state.events);
-  }
-
-  function roomMatchesSearch(room){
-    const q = el.searchInput.value.trim().toLowerCase();
-    if(!q) return true;
-
-    const text = [
-      room.name,
-      room.roomId,
-      room.host,
-      ...(Array.isArray(room.players) ? room.players.map(p => p.playerName) : [])
-    ].join(" ").toLowerCase();
-
-    return text.includes(q);
-  }
-
-  function renderRooms(rooms){
-    const filtered = rooms.filter(roomMatchesSearch);
-
-    if(!filtered.length){
-      el.roomsList.innerHTML = `<div class="empty">Nenhuma sala corresponde à busca atual.</div>`;
-      return;
+    function formatDate(value) {
+      if (!value) return "---";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleString("pt-BR");
     }
 
-    el.roomsList.innerHTML = filtered.map(room => {
-      const players = Array.isArray(room.players) ? room.players : [];
+    function formatUptime(sec) {
+      const total = Number(sec || 0);
+      const d = Math.floor(total / 86400);
+      const h = Math.floor((total % 86400) / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = Math.floor(total % 60);
 
-      return `
-        <article class="roomCard">
-          <div class="roomHead">
-            <div>
-              <h3>${escapeHtml(room.name || "Sala sem nome")}</h3>
-              <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
+      if (d > 0) return `${d}d ${h}h ${m}m`;
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    function logVisual(message, type = "info") {
+      const entry = {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        time: new Date(),
+        message: String(message),
+        type
+      };
+
+      state.visualEvents.push(entry);
+      while (state.visualEvents.length > 300) {
+        state.visualEvents.shift();
+      }
+
+      renderLogs();
+    }
+
+    function addChatEvent(source, text, roomId = "") {
+      state.chatEvents.unshift({
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        time: new Date(),
+        source: source || "Sistema",
+        roomId: roomId || "",
+        text: text || ""
+      });
+
+      while (state.chatEvents.length > 120) {
+        state.chatEvents.pop();
+      }
+
+      renderChat();
+    }
+
+    function renderLogs() {
+      const items = [...state.visualEvents].slice(-220).reverse();
+
+      if (!items.length) {
+        el.logsBox.innerHTML = `<div class="logLine info">Sem logs visuais no momento.</div>`;
+        return;
+      }
+
+      el.logsBox.innerHTML = items.map(item => `
+        <div class="logLine ${escapeHtml(item.type)}">
+          [${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}] ${escapeHtml(item.message)}
+        </div>
+      `).join("");
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(SERVER + path, { cache: "no-store" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || `HTTP_${res.status}`);
+      return json;
+    }
+
+    function roomMatches(room, term) {
+      if (!term) return true;
+      const q = term.toLowerCase();
+
+      const haystack = [
+        room.roomId,
+        room.name,
+        room.host,
+        ...(room.players || []).map(p => p.playerName)
+      ].join(" ").toLowerCase();
+
+      return haystack.includes(q);
+    }
+
+    function computeStats(rooms) {
+      const totalRooms = rooms.length;
+      const totalPlayers = rooms.reduce((acc, room) => acc + Number(room.playerCount || 0), 0);
+      const totalSessions = rooms.filter(r => r.sessionActive).length;
+      const totalVideo = rooms.filter(r => r.videoActive).length;
+      const totalRecord = rooms.filter(r => r.recordingActive).length;
+
+      el.statRooms.textContent = String(totalRooms);
+      el.statPlayers.textContent = String(totalPlayers);
+      el.statSessions.textContent = String(totalSessions);
+      el.statVideo.textContent = String(totalVideo);
+      el.statRecord.textContent = String(totalRecord);
+      el.statEvents.textContent = String(state.eventCount);
+    }
+
+    function renderDashboard() {
+      const rooms = state.rooms || [];
+      if (!rooms.length) {
+        el.dashboardContent.innerHTML = `
+          <div class="emptyState">
+            O painel está online.<br>
+            Ainda não há dados suficientes para montar a visão consolidada.
+          </div>
+        `;
+        return;
+      }
+
+      const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
+      const sessions = rooms.filter(r => r.sessionActive).length;
+      const withVideo = rooms.filter(r => r.videoActive).length;
+      const withRecord = rooms.filter(r => r.recordingActive).length;
+
+      el.dashboardContent.innerHTML = `
+        <div class="rowCard">
+          <h3 class="rowTitle">Resumo global</h3>
+          <div class="roomGrid">
+            <div class="subBox"><b>Salas</b><span>${rooms.length}</span></div>
+            <div class="subBox"><b>Jogadores</b><span>${totalPlayers}</span></div>
+            <div class="subBox"><b>Rituais ativos</b><span>${sessions}</span></div>
+            <div class="subBox"><b>Vídeo / gravação</b><span>${withVideo} / ${withRecord}</span></div>
+          </div>
+        </div>
+
+        ${rooms.slice(0, 4).map(room => `
+          <div class="rowCard">
+            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
+            <div class="rowMeta">
+              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
+              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
+              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
+              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
             </div>
-
-            <div class="badges">
-              <span class="badge ${room.sessionActive ? "ok" : ""}">
-                ${room.sessionActive ? "sessão ativa" : "sessão parada"}
-              </span>
-              <span class="badge ${room.videoActive ? "warn" : ""}">
-                vídeo ${room.videoActive ? "on" : "off"}
-              </span>
-              <span class="badge ${room.recordingActive ? "danger" : ""}">
-                rec ${room.recordingActive ? "on" : "off"}
-              </span>
+            <div class="roomGrid">
+              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
+              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
+              <div class="subBox"><b>Criada</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
+              <div class="subBox"><b>Atualizada</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
             </div>
           </div>
+        `).join("")}
+      `;
+    }
 
-          <div class="roomBody">
-            <div class="roomMeta">
-              <div class="mini">
-                <b>Host</b>
-                <span>${escapeHtml(room.host || "Não definido")}</span>
-              </div>
-              <div class="mini">
-                <b>Jogadores</b>
-                <span>${escapeHtml(String(room.playerCount || 0))}</span>
-              </div>
-              <div class="mini">
-                <b>Criada em</b>
-                <span>${escapeHtml(formatDate(room.createdAt))}</span>
-              </div>
-              <div class="mini">
-                <b>Atualizada em</b>
-                <span>${escapeHtml(formatDate(room.updatedAt))}</span>
-              </div>
+    function renderRooms() {
+      const term = el.searchInput.value.trim().toLowerCase();
+      const rooms = (state.rooms || []).filter(room => roomMatches(room, term));
+
+      if (!rooms.length) {
+        el.roomsContent.innerHTML = `
+          <div class="emptyState">
+            Nenhuma sala encontrada agora.
+          </div>
+        `;
+        return;
+      }
+
+      el.roomsContent.innerHTML = rooms.map(room => {
+        const players = Array.isArray(room.players) ? room.players : [];
+
+        return `
+          <div class="rowCard">
+            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
+
+            <div class="rowMeta">
+              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
+              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Sessão parada"}</span>
+              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ligado" : "Vídeo desligado"}</span>
+              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
             </div>
 
-            <div class="players">
+            <div class="roomGrid">
+              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
+              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
+              <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
+              <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
+            </div>
+
+            <div class="playersWrap">
               ${
                 players.length
                   ? players.map(player => `
-                    <div class="player">
-                      <div class="playerLeft">
-                        <div class="avatar">${escapeHtml(initials(player.playerName))}</div>
-                        <div class="playerText">
-                          <div class="playerName">${escapeHtml(player.playerName || "Jogador")}</div>
-                          <div class="playerMeta">ID: ${escapeHtml(player.playerId || "---")}</div>
-                        </div>
-                      </div>
-                      <div class="playerRight">online</div>
+                    <div class="playerLine">
+                      <div><strong>${escapeHtml(player.playerName || "Jogador")}</strong></div>
+                      <div>${escapeHtml(formatDate(player.joinedAt))}</div>
                     </div>
                   `).join("")
-                  : `<div class="empty">Nenhum jogador ativo nesta sala.</div>`
+                  : `<div class="emptyState">Nenhum jogador visível nesta sala.</div>`
               }
             </div>
           </div>
-        </article>
+        `;
+      }).join("");
+    }
+
+    function renderVideo() {
+      const rooms = state.rooms || [];
+
+      if (!rooms.length) {
+        el.videoContent.innerHTML = `<div class="emptyState">Sem atividade de vídeo detectada.</div>`;
+        return;
+      }
+
+      el.videoContent.innerHTML = `
+        <div class="videoGrid">
+          ${rooms.map(room => `
+            <div class="videoBox">
+              <h3>${escapeHtml(room.name || room.roomId || "Sala")}</h3>
+              <div class="rowMeta">
+                <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
+                <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+                <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
+              </div>
+              <div class="subBox">
+                <b>Participantes</b>
+                <span>${escapeHtml(String(room.playerCount || 0))}</span>
+              </div>
+            </div>
+          `).join("")}
+        </div>
       `;
-    }).join("");
-  }
-
-  function renderVideo(rooms){
-    const activeRooms = rooms.filter(room => room.videoActive || room.recordingActive);
-
-    if(!activeRooms.length){
-      el.videoList.innerHTML = `<div class="empty">Nenhuma sala com vídeo ou gravação ativa neste momento.</div>`;
-      return;
     }
 
-    el.videoList.innerHTML = activeRooms.map(room => `
-      <article class="roomCard">
-        <div class="roomHead">
-          <div>
-            <h3>${escapeHtml(room.name || "Sala")}</h3>
-            <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
+    function renderChat() {
+      const items = state.chatEvents || [];
+
+      if (!items.length) {
+        el.chatContent.innerHTML = `
+          <div class="emptyState">
+            Nenhuma mensagem de chat detectada ainda.<br>
+            Quando o sistema registrar mensagens, elas aparecerão aqui.
           </div>
-          <div class="badges">
-            <span class="badge ${room.videoActive ? "warn" : ""}">
-              vídeo ${room.videoActive ? "on" : "off"}
-            </span>
-            <span class="badge ${room.recordingActive ? "danger" : ""}">
-              gravação ${room.recordingActive ? "on" : "off"}
-            </span>
+        `;
+        return;
+      }
+
+      el.chatContent.innerHTML = items.map(item => `
+        <div class="chatEntry">
+          <div class="chatMeta">
+            ${escapeHtml(item.source)} ${item.roomId ? "• " + escapeHtml(item.roomId) : ""} • ${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}
           </div>
+          <div class="chatText">${escapeHtml(item.text)}</div>
         </div>
-        <div class="roomBody">
-          <div class="roomMeta">
-            <div class="mini">
-              <b>Host</b>
-              <span>${escapeHtml(room.host || "Não definido")}</span>
-            </div>
-            <div class="mini">
-              <b>Jogadores</b>
-              <span>${escapeHtml(String(room.playerCount || 0))}</span>
-            </div>
-          </div>
-        </div>
-      </article>
-    `).join("");
-  }
-
-  async function loadRooms(){
-    try{
-      const data = await fetchJson("/game/rooms");
-      const rooms = Array.isArray(data.rooms) ? data.rooms : [];
-
-      state.rooms = rooms;
-      state.events += 1;
-      state.lastUpdate = new Date();
-
-      renderStats(rooms);
-      renderRooms(rooms);
-      renderVideo(rooms);
-
-      el.lastUpdateText.textContent = state.lastUpdate.toLocaleString("pt-BR");
-      el.cycleText.textContent = "Atualizado";
-      el.footerHint.textContent = rooms.length
-        ? `${rooms.length} sala(s) monitorada(s)`
-        : "Nenhuma sala ativa";
-    }catch(error){
-      console.error(error);
-      addLog("erro ao carregar salas");
-      el.cycleText.textContent = "Falha";
-      el.roomsList.innerHTML = `<div class="empty">Não foi possível carregar as salas.</div>`;
-      el.videoList.innerHTML = `<div class="empty">Não foi possível carregar o módulo de vídeo.</div>`;
-    }
-  }
-
-  async function loadHealth(){
-    try{
-      const data = await fetchJson("/health");
-      renderHealth(data);
-      addLog("health carregado");
-    }catch(error){
-      console.error(error);
-      renderHealth(null);
-      addLog("erro no health");
-    }
-  }
-
-  function appendTerminal(text){
-    const line = document.createElement("div");
-    line.textContent = `> ${text}`;
-    el.terminal.appendChild(line);
-
-    while(el.terminal.children.length > 120){
-      el.terminal.removeChild(el.terminal.firstChild);
+      `).join("");
     }
 
-    el.terminal.scrollTop = el.terminal.scrollHeight;
-  }
+    function renderSystem() {
+      const h = state.health || null;
 
-  async function refreshAll(){
-    el.cycleText.textContent = "Atualizando...";
-    await Promise.all([loadHealth(), loadRooms()]);
-  }
+      if (!h) {
+        el.systemContent.innerHTML = `
+          <div class="sysRow">Sem dados de health no momento.</div>
+        `;
+        return;
+      }
 
-  el.navButtons.forEach(btn => {
-    btn.addEventListener("click", () => setSection(btn.dataset.section));
-  });
+      el.systemContent.innerHTML = `
+        <div class="sysRow"><strong>Serviço:</strong> ${escapeHtml(h.service || "osl-video-server")}</div>
+        <div class="sysRow"><strong>Online:</strong> ${h.ok ? "Sim" : "Não"}</div>
+        <div class="sysRow"><strong>Ambiente:</strong> ${escapeHtml(h.environment || "---")}</div>
+        <div class="sysRow"><strong>Uptime:</strong> ${escapeHtml(formatUptime(h.uptimeSec || 0))}</div>
+        <div class="sysRow"><strong>Iniciado em:</strong> ${escapeHtml(formatDate(h.startedAt))}</div>
+        <div class="sysRow"><strong>Agora:</strong> ${escapeHtml(formatDate(h.now))}</div>
+        <div class="sysRow"><strong>Firebase:</strong> ${h.firebaseConfigured ? "Conectado" : "Não configurado"}</div>
+      `;
+    }
 
-  el.refreshBtn.addEventListener("click", refreshAll);
+    function normalizeRoom(room) {
+      return {
+        roomId: String(room.roomId || ""),
+        name: String(room.name || ""),
+        host: String(room.host || ""),
+        playerCount: Number(room.playerCount || 0),
+        players: Array.isArray(room.players) ? room.players : [],
+        sessionActive: !!room.sessionActive,
+        videoActive: !!room.videoActive,
+        recordingActive: !!room.recordingActive,
+        createdAt: room.createdAt || null,
+        updatedAt: room.updatedAt || null
+      };
+    }
 
-  el.toggleAutoBtn.addEventListener("click", () => {
-    state.autoRefresh = !state.autoRefresh;
-    el.toggleAutoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
-    addLog(`auto refresh ${state.autoRefresh ? "ativado" : "desativado"}`);
-  });
+    function mapPlayers(players) {
+      return new Map((players || []).map(p => [String(p.playerId || p.playerName || Math.random()), p]));
+    }
 
-  el.searchInput.addEventListener("input", () => {
-    renderRooms(state.rooms);
-  });
+    function diffRooms(nextRooms) {
+      const nextMap = new Map(nextRooms.map(room => [room.roomId, room]));
+      const prevMap = state.previousRoomsMap;
 
-  addLog("painel iniciado");
-  appendTerminal("boot ok");
-  refreshAll();
+      for (const [roomId, room] of nextMap.entries()) {
+        if (!prevMap.has(roomId)) {
+          state.eventCount++;
+          logVisual(`Sala criada: ${room.name || roomId}`);
+        }
 
-  setInterval(() => {
-    if(state.autoRefresh) refreshAll();
-  }, 1200);
+        const prev = prevMap.get(roomId);
+        if (!prev) continue;
 
-  setInterval(() => {
-    appendTerminal("sync ok");
-  }, 3000);
+        if (!prev.sessionActive && room.sessionActive) {
+          state.eventCount++;
+          logVisual(`Ritual iniciado em ${room.name || roomId}`);
+        }
 
-  setInterval(() => {
-    addLog("monitorando sistema...");
-  }, 5000);
+        if (prev.sessionActive && !room.sessionActive) {
+          state.eventCount++;
+          logVisual(`Ritual encerrado em ${room.name || roomId}`, "warn");
+        }
 
-  setInterval(() => {
-    addLog("checando integridade...");
-  }, 8000);
-</script>
+        if (!prev.videoActive && room.videoActive) {
+          state.eventCount++;
+          logVisual(`Vídeo ligado em ${room.name || roomId}`);
+        }
+
+        if (prev.videoActive && !room.videoActive) {
+          state.eventCount++;
+          logVisual(`Vídeo desligado em ${room.name || roomId}`, "warn");
+        }
+
+        if (!prev.recordingActive && room.recordingActive) {
+          state.eventCount++;
+          logVisual(`Gravação iniciada em ${room.name || roomId}`, "warn");
+        }
+
+        if (prev.recordingActive && !room.recordingActive) {
+          state.eventCount++;
+          logVisual(`Gravação encerrada em ${room.name || roomId}`, "warn");
+        }
+
+        const prevPlayers = mapPlayers(prev.players);
+        const nextPlayers = mapPlayers(room.players);
+
+        for (const [key, player] of nextPlayers.entries()) {
+          if (!prevPlayers.has(key)) {
+            state.eventCount++;
+            logVisual(`Jogador entrou: ${player.playerName || "Jogador"} em ${room.name || roomId}`);
+          }
+        }
+
+        for (const [key, player] of prevPlayers.entries()) {
+          if (!nextPlayers.has(key)) {
+            state.eventCount++;
+            logVisual(`Jogador saiu: ${player.playerName || "Jogador"} de ${room.name || roomId}`, "warn");
+          }
+        }
+      }
+
+      for (const [roomId, room] of prevMap.entries()) {
+        if (!nextMap.has(roomId)) {
+          state.eventCount++;
+          logVisual(`Sala removida: ${room.name || roomId}`, "warn");
+        }
+      }
+
+      state.previousRoomsMap = nextMap;
+    }
+
+    function parseLogLine(raw) {
+      const line = String(raw || "").trim();
+      if (!line) return;
+
+      let data = null;
+      try {
+        data = JSON.parse(line);
+      } catch {
+        data = null;
+      }
+
+      if (data) {
+        const message = String(data.message || "");
+        const type = data.level === "error" ? "error" : data.level === "warn" ? "warn" : "info";
+
+        if (message === "http_request") {
+          const path = String(data.path || "");
+          const method = String(data.method || "");
+          const statusCode = data.statusCode;
+
+          if (path.includes("/game/room/create")) logVisual(`HTTP ${method} ${path} → sala criada (${statusCode})`, type);
+          else if (path.includes("/game/player/join")) logVisual(`HTTP ${method} ${path} → entrada de jogador (${statusCode})`, type);
+          else if (path.includes("/game/player/leave")) logVisual(`HTTP ${method} ${path} → saída de jogador (${statusCode})`, type);
+          else if (path.includes("/game/session/start")) logVisual(`HTTP ${method} ${path} → ritual iniciado (${statusCode})`, type);
+          else if (path.includes("/game/session/end")) logVisual(`HTTP ${method} ${path} → ritual encerrado (${statusCode})`, type);
+          else if (path.includes("/game/video")) logVisual(`HTTP ${method} ${path} → atualização de vídeo (${statusCode})`, type);
+          else if (path.includes("/game/recording")) logVisual(`HTTP ${method} ${path} → atualização de gravação (${statusCode})`, type);
+          else if (path.includes("/health")) logVisual(`Health carregado`, "info");
+          return;
+        }
+
+        if (message.toLowerCase().includes("message") || message.toLowerCase().includes("chat")) {
+          addChatEvent("LOG", message, data.roomId || data.room || "");
+          logVisual(`Chat detectado por log: ${message}`, type);
+          return;
+        }
+
+        logVisual(message || line, type);
+        return;
+      }
+
+      const lower = line.toLowerCase();
+
+      if (lower.includes("message") || lower.includes("chat")) {
+        addChatEvent("LOG", line, "");
+      }
+
+      logVisual(line, "info");
+    }
+
+    async function loadLogsSnapshot() {
+      try {
+        const data = await fetchJson("/logs");
+        if (!Array.isArray(data)) return;
+
+        data.slice(-120).forEach(parseLogLine);
+      } catch {
+        logVisual("Não foi possível carregar /logs", "warn");
+      }
+    }
+
+    function connectLogStream() {
+      if (state.logsEventSource) {
+        state.logsEventSource.close();
+      }
+
+      try {
+        const source = new EventSource(SERVER + "/logs/stream");
+        state.logsEventSource = source;
+
+        source.addEventListener("bootstrap", (event) => {
+          if (state.logsPaused) return;
+          try {
+            const lines = JSON.parse(event.data);
+            if (Array.isArray(lines)) {
+              lines.slice(-100).forEach(parseLogLine);
+            }
+          } catch {}
+        });
+
+        source.addEventListener("log", (event) => {
+          if (state.logsPaused) return;
+          parseLogLine(event.data);
+        });
+
+        source.onerror = () => {
+          logVisual("Stream de logs indisponível, mantendo fallback", "warn");
+        };
+      } catch {
+        logVisual("Falha ao conectar no stream de logs", "error");
+      }
+    }
+
+    async function refreshAll() {
+      el.cycleStatus.textContent = "Atualizando...";
+
+      try {
+        const [health, roomsRes] = await Promise.all([
+          fetchJson("/health"),
+          fetchJson("/game/rooms")
+        ]);
+
+        state.health = health || null;
+
+        el.metaServerStatus.textContent = health?.ok ? "Online" : "Offline";
+        el.metaUptime.textContent = formatUptime(health?.uptimeSec || 0);
+        el.metaEnv.textContent = health?.environment || "---";
+
+        const rooms = Array.isArray(roomsRes.rooms)
+          ? roomsRes.rooms.map(normalizeRoom)
+          : [];
+
+        diffRooms(rooms);
+        state.rooms = rooms;
+
+        computeStats(rooms);
+        renderDashboard();
+        renderRooms();
+        renderVideo();
+        renderSystem();
+        renderChat();
+
+        el.lastUpdated.textContent = new Date().toLocaleString("pt-BR");
+        el.cycleStatus.textContent = "Sincronizado";
+      } catch (error) {
+        el.metaServerStatus.textContent = "Offline";
+        el.cycleStatus.textContent = "Falha";
+        logVisual(`Falha ao atualizar painel: ${error.message || error}`, "error");
+      }
+    }
+
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      state.refreshTimer = setInterval(() => {
+        if (state.autoRefresh) refreshAll();
+      }, 3000);
+    }
+
+    function stopAutoRefresh() {
+      if (state.refreshTimer) {
+        clearInterval(state.refreshTimer);
+        state.refreshTimer = null;
+      }
+    }
+
+    document.querySelectorAll(".navBtn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".navBtn").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+
+        const section = btn.dataset.section;
+        document.querySelectorAll(".panelSection").forEach(s => s.classList.remove("active"));
+        const target = document.getElementById("section-" + section);
+        if (target) target.classList.add("active");
+      });
+    });
+
+    el.searchInput.addEventListener("input", () => {
+      renderRooms();
+    });
+
+    el.refreshBtn.addEventListener("click", () => {
+      refreshAll();
+    });
+
+    el.autoBtn.addEventListener("click", () => {
+      state.autoRefresh = !state.autoRefresh;
+      el.autoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
+      el.autoBtn.classList.toggle("btnPrimary", state.autoRefresh);
+    });
+
+    el.clearLogsBtn.addEventListener("click", () => {
+      state.visualEvents = [];
+      renderLogs();
+      logVisual("Logs visuais limpos pelo operador.");
+    });
+
+    el.pauseLogsBtn.addEventListener("click", () => {
+      state.logsPaused = !state.logsPaused;
+      el.pauseLogsBtn.textContent = state.logsPaused ? "Retomar stream" : "Pausar stream";
+      logVisual(state.logsPaused ? "Stream visual pausado." : "Stream visual retomado.");
+    });
+
+    el.clearEventsBtn.addEventListener("click", () => {
+      state.chatEvents = [];
+      state.eventCount = 0;
+      el.statEvents.textContent = "0";
+      renderChat();
+      logVisual("Eventos e cache de chat limpos pelo operador.", "warn");
+    });
+
+    refreshAll();
+    loadLogsSnapshot();
+    connectLogStream();
+    startAutoRefresh();
+  </script>
 </body>
 </html>
