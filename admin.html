@@ -3,98 +3,51 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OSL // CONTROL</title>
-
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<title>OSL CONTROL</title>
 
 <style>
 body{
   margin:0;
-  background:#050507;
+  background:#000;
   color:#00ff9c;
-  font-family: "Courier New", monospace;
-  overflow:hidden;
+  font-family:monospace;
 }
 
-/* GRID */
 .container{
   display:grid;
   grid-template-columns: 1fr 350px;
   height:100vh;
 }
 
-/* LEFT SIDE */
 .left{
+  padding:20px;
+}
+
+.right{
+  border-left:1px solid #00ff9c;
   padding:20px;
   overflow:auto;
 }
 
-/* RIGHT SIDE (LOGS) */
-.right{
-  border-left:1px solid rgba(0,255,150,.2);
-  padding:15px;
-  background:#020303;
-}
-
-/* HEADER */
-.header{
+.title{
   font-size:20px;
-  margin-bottom:10px;
-  letter-spacing:2px;
-  color:#00ffc3;
+  margin-bottom:20px;
 }
 
-/* ROOMS */
 .room{
-  border:1px solid rgba(0,255,150,.2);
-  padding:12px;
+  border:1px solid #00ff9c;
+  padding:10px;
   margin-bottom:10px;
-  border-radius:6px;
-  background:rgba(0,255,150,.03);
-  transition:.2s;
 }
 
-.room:hover{
-  background:rgba(0,255,150,.08);
-}
-
-.status{
-  font-size:12px;
-  opacity:.7;
-}
-
-/* LOGS */
-.logs{
-  height:100%;
-  overflow:auto;
+.player{
+  margin-left:10px;
   font-size:12px;
 }
 
 .log{
-  margin-bottom:6px;
-  opacity:.8;
-}
-
-/* GLOW */
-.glow{
-  text-shadow:0 0 10px #00ff9c;
-}
-
-/* SCAN LINE */
-body::after{
-  content:"";
-  position:absolute;
-  width:100%;
-  height:100%;
-  pointer-events:none;
-  background:linear-gradient(rgba(0,255,150,.03) 1px, transparent 1px);
-  background-size:100% 3px;
-  animation:scan 6s linear infinite;
-}
-
-@keyframes scan{
-  0%{ transform:translateY(0);}
-  100%{ transform:translateY(100%);}
+  font-size:12px;
+  margin-bottom:5px;
 }
 </style>
 </head>
@@ -104,74 +57,84 @@ body::after{
 <div class="container">
 
   <div class="left">
-    <div class="header glow">OSL VIDEO SERVER // LIVE CONTROL</div>
+    <div class="title">OSL SERVER // LIVE</div>
+
     <div id="rooms"></div>
   </div>
 
   <div class="right">
-    <div class="header glow">SYSTEM LOG</div>
-    <div class="logs" id="logs"></div>
+    <div class="title">SYSTEM LOG</div>
+    <div id="logs"></div>
   </div>
 
 </div>
 
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
 <script>
 const SERVER = "https://osl-video-server-production.up.railway.app";
-const socket = io(SERVER);
 
 const roomsEl = document.getElementById("rooms");
 const logsEl = document.getElementById("logs");
 
-/* ---------- RENDER ROOMS ---------- */
+// 🔌 SOCKET REALTIME
+const socket = io(SERVER);
+
+socket.on("connect", () => {
+  log("🟢 conectado ao servidor");
+});
+
+// 📡 ROOMS UPDATE
+socket.on("rooms-update", (rooms) => {
+  renderRooms(rooms);
+});
+
+// 💬 MENSAGENS
+socket.on("new-message", (msg) => {
+  log(`💬 ${msg.roomId}: ${msg.message}`);
+});
+
+// 🔄 FALLBACK (caso socket falhe)
+async function fetchRooms(){
+  const res = await fetch(SERVER + "/game/rooms");
+  const data = await res.json();
+  renderRooms(data.rooms || []);
+}
+
+// 🎯 RENDER SALAS
 function renderRooms(rooms){
   if(!rooms.length){
-    roomsEl.innerHTML = `<div class="status">[ aguardando atividade... ]</div>`;
+    roomsEl.innerHTML = "Nenhuma sala ativa";
     return;
   }
 
-  roomsEl.innerHTML = rooms.map(r => `
+  roomsEl.innerHTML = rooms.map(room => `
     <div class="room">
-      <div class="glow">${r.name}</div>
-      <div class="status">ID: ${r.roomId}</div>
-      <div class="status">PLAYERS: ${r.playerCount}</div>
-      <div class="status">VIDEO: ${r.videoActive ? "ON" : "OFF"}</div>
-      <div class="status">SESSION: ${r.sessionActive ? "RUNNING" : "IDLE"}</div>
+      <b>${room.name}</b><br>
+      ID: ${room.roomId}<br>
+      Players: ${room.playerCount}<br>
+      Video: ${room.videoActive ? "ON" : "OFF"}<br>
+      Recording: ${room.recordingActive ? "ON" : "OFF"}<br>
+
+      ${room.players.map(p => `
+        <div class="player">- ${p.playerName}</div>
+      `).join("")}
     </div>
   `).join("");
 }
 
-/* ---------- LOG SYSTEM ---------- */
+// 🧾 LOG
 function log(text){
   const div = document.createElement("div");
   div.className = "log";
   div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
   logsEl.appendChild(div);
   logsEl.scrollTop = logsEl.scrollHeight;
-
-  if(logsEl.children.length > 200){
-    logsEl.removeChild(logsEl.firstChild);
-  }
 }
 
-/* ---------- SOCKET EVENTS ---------- */
-socket.on("connect", ()=>{
-  log("CONNECTED TO SERVER");
-});
-
-socket.on("rooms-update", (rooms)=>{
-  renderRooms(rooms);
-  log("ROOM UPDATE RECEIVED");
-});
-
-socket.on("new-message", (data)=>{
-  log(`MSG ${data.roomId}: ${data.message}`);
-});
-
-/* ---------- DEBUG VISUAL ---------- */
-setInterval(()=>{
-  document.title = "OSL // " + new Date().toLocaleTimeString();
-},1000);
-
+// fallback inicial
+fetchRooms();
+setInterval(fetchRooms, 5000);
 </script>
 
 </body>
