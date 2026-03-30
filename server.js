@@ -1110,6 +1110,25 @@ async function syncDiscordRolesForUid(uid) {
 const PANEL_ROOM_TTL_MS = 1000 * 60 * 60 * 6;
 const PANEL_PLAYER_TTL_MS = 1000 * 60 * 2;
 const panelRooms = new Map();
+const panelClients = new Set();
+
+function broadcastPanelUpdate() {
+  try {
+    const rooms = Array.from(panelRooms.values()).map(serializePanelRoom);
+
+    const payload = JSON.stringify({
+      ok: true,
+      rooms
+    });
+
+    for (const client of panelClients) {
+      client.write(`event: rooms\n`);
+      client.write(`data: ${payload}\n\n`);
+    }
+  } catch (e) {
+    logError("broadcast_panel_error", e);
+  }
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -1188,6 +1207,8 @@ function cleanupPanelRooms() {
       !room.recordingActive
     ) {
       panelRooms.delete(roomId);
+
+      broadcastPanelUpdate();
     }
   }
 }
@@ -1328,6 +1349,13 @@ app.get("/panel", (req, res) => {
       }
 
       const source = new EventSource("/logs/stream");
+      const panelSource = new EventSource("/panel/stream");
+
+panelSource.addEventListener("rooms", (event) => {
+  const data = JSON.parse(event.data);
+
+  console.log("Atualização do painel:", data);
+});
 
       source.addEventListener("bootstrap", (event) => {
         try {
@@ -1453,6 +1481,31 @@ app.get("/logs/stream", (req, res) => {
 /* =========================
    PAINEL ROUTES
 ========================= */
+app.get("/panel/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive"
+  });
+
+  panelClients.add(res);
+
+  try {
+    const rooms = Array.from(panelRooms.values()).map(serializePanelRoom);
+
+    res.write(`event: rooms\n`);
+    res.write(`data: ${JSON.stringify({ ok: true, rooms })}\n\n`);
+  } catch {}
+
+  const heartbeat = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    panelClients.delete(res);
+  });
+});
 
 app.post("/game/room/create", (req, res) => {
   try {
@@ -1465,7 +1518,9 @@ app.post("/game/room/create", (req, res) => {
     }
 
     const room = getOrCreatePanelRoom(roomId, name, host);
-
+    
+broadcastPanelUpdate();
+    
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
@@ -1548,6 +1603,8 @@ app.post("/game/session/start", (req, res) => {
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive = true;
     room.updatedAt = nowIso();
+    
+    broadcastPanelUpdate();
 
     return res.json({
       ok: true,
@@ -1573,6 +1630,8 @@ app.post("/game/session/end", (req, res) => {
     room.recordingActive = false;
     room.updatedAt = nowIso();
 
+    broadcastPanelUpdate();
+
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
@@ -1596,6 +1655,8 @@ app.post("/game/video", (req, res) => {
     room.videoActive = active;
     room.updatedAt = nowIso();
 
+broadcastPanelUpdate();
+    
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
@@ -1619,6 +1680,8 @@ app.post("/game/recording", (req, res) => {
     room.recordingActive = active;
     room.updatedAt = nowIso();
 
+broadcastPanelUpdate();
+    
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
