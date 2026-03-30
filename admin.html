@@ -1,253 +1,1351 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="UTF-8">
+<meta charset="UTF-8" />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+/>
 <title>OSL // SYSTEM CORE</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <style>
-body{
-  margin:0;
-  font-family:monospace;
-  color:#00ff9c;
+  :root{
+    --bg:#030706;
+    --bg-2:#07110d;
+    --panel:#0a1511;
+    --panel-2:#0d1c17;
+    --panel-3:#08100d;
+    --line:rgba(0,255,156,.12);
+    --line-strong:rgba(0,255,156,.28);
+    --text:#d7ffe8;
+    --muted:rgba(215,255,232,.62);
+    --green:#00ff9c;
+    --green-soft:rgba(0,255,156,.10);
+    --green-2:#66ffc4;
+    --danger:#ff6b6b;
+    --warn:#ffd166;
+    --shadow:0 20px 60px rgba(0,0,0,.45);
+    --radius-xl:24px;
+    --radius-lg:18px;
+    --radius-md:14px;
+    --radius-sm:10px;
+  }
 
-  background:
-    radial-gradient(circle at 20% 20%, #00332233, transparent 40%),
-    radial-gradient(circle at 80% 0%, #00221155, transparent 50%),
-    radial-gradient(circle at 50% 100%, #001a0f, #000);
-}
+  *{ box-sizing:border-box; }
 
-.grid{
-  display:grid;
-  grid-template-columns: 260px 1fr 360px;
-  height:100vh;
-}
+  html,body{
+    margin:0;
+    min-height:100%;
+    background:
+      radial-gradient(1200px 500px at 50% -10%, rgba(0,255,156,.08), transparent 55%),
+      radial-gradient(800px 380px at 10% 10%, rgba(0,255,156,.04), transparent 40%),
+      radial-gradient(900px 420px at 100% 0%, rgba(102,255,196,.03), transparent 38%),
+      linear-gradient(180deg, var(--bg-2), var(--bg));
+    color:var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    overflow-x:hidden;
+  }
 
-.menu{
-  border-right:1px solid #00ff9c22;
-  padding:20px;
-}
+  body::before{
+    content:"";
+    position:fixed;
+    inset:0;
+    pointer-events:none;
+    background:
+      linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+    background-size:38px 38px;
+    opacity:.10;
+  }
 
-.menu h2{ margin-bottom:20px; }
+  body::after{
+    content:"";
+    position:fixed;
+    inset:0;
+    pointer-events:none;
+    background:
+      radial-gradient(circle at center, transparent 60%, rgba(0,0,0,.28) 100%);
+  }
 
-.menu button{
-  width:100%;
-  margin-bottom:10px;
-  padding:10px;
-  background:none;
-  border:1px solid #00ff9c33;
-  color:#00ff9c;
-  cursor:pointer;
-}
+  .page{
+    position:relative;
+    z-index:1;
+    min-height:100vh;
+    padding:
+      max(12px, env(safe-area-inset-top))
+      max(12px, env(safe-area-inset-right))
+      max(14px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+  }
 
-.menu button:hover{
-  background:#00ff9c11;
-}
+  .shell{
+    width:min(1700px, 100%);
+    margin:0 auto;
+    display:grid;
+    gap:14px;
+  }
 
-.main{
-  padding:20px;
-  overflow:auto;
-}
+  .topbar{
+    display:grid;
+    grid-template-columns:auto 1fr auto;
+    align-items:center;
+    gap:16px;
+    padding:16px 18px;
+    border-radius:22px;
+    border:1px solid var(--line-strong);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.01)),
+      radial-gradient(circle at top, rgba(0,255,156,.08), transparent 65%),
+      linear-gradient(180deg, rgba(12,24,18,.95), rgba(8,15,12,.97));
+    box-shadow:var(--shadow);
+    overflow:hidden;
+    position:relative;
+  }
 
-.section{ display:none; }
-.active{ display:block; }
+  .topbar::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    background:linear-gradient(90deg, transparent, rgba(0,255,156,.10), transparent);
+    opacity:.4;
+  }
 
-.card{
-  border:1px solid #00ff9c22;
-  padding:12px;
-  margin-bottom:10px;
-}
+  .brand{
+    min-width:0;
+  }
 
-.status{
-  display:grid;
-  grid-template-columns: repeat(3,1fr);
-  gap:10px;
-}
+  .brand .eyebrow{
+    margin:0 0 6px;
+    font-size:10px;
+    letter-spacing:.28em;
+    text-transform:uppercase;
+    color:var(--muted);
+  }
 
-.box{
-  border:1px solid #00ff9c22;
-  padding:10px;
-  text-align:center;
-}
+  .brand h1{
+    margin:0;
+    font-size:clamp(22px, 3vw, 40px);
+    line-height:1;
+    letter-spacing:-.04em;
+    color:#eafff4;
+  }
 
-.logs{
-  border-left:1px solid #00ff9c22;
-  padding:15px;
-  overflow:auto;
-}
+  .topMeta{
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:14px;
+    flex-wrap:wrap;
+    font-size:13px;
+    color:#c7ffdf;
+  }
 
-.log{
-  font-size:12px;
-  margin-bottom:4px;
-}
+  .topMeta strong{
+    color:var(--green);
+  }
 
-.terminal{
-  margin-top:10px;
-  border:1px solid #00ff9c22;
-  padding:10px;
-}
+  .topActions{
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+
+  .btn{
+    appearance:none;
+    border:none;
+    cursor:pointer;
+    min-height:42px;
+    padding:10px 14px;
+    border-radius:12px;
+    font:inherit;
+    font-size:12px;
+    font-weight:700;
+    letter-spacing:.04em;
+    transition:transform .12s ease, opacity .15s ease, border-color .15s ease, background .15s ease;
+  }
+
+  .btn:hover{ transform:translateY(-1px); }
+  .btn:active{ transform:translateY(0); opacity:.94; }
+
+  .btnPrimary{
+    color:#02170f;
+    background:linear-gradient(180deg, #00ff9c, #00c97c);
+    box-shadow:0 0 24px rgba(0,255,156,.18);
+  }
+
+  .btnGhost{
+    color:var(--text);
+    background:rgba(255,255,255,.03);
+    border:1px solid var(--line-strong);
+  }
+
+  .layout{
+    display:grid;
+    grid-template-columns:260px minmax(0,1fr) 360px;
+    gap:14px;
+    min-height:calc(100vh - 110px);
+  }
+
+  .sidebar,
+  .rightbar,
+  .center{
+    min-width:0;
+    min-height:0;
+  }
+
+  .sidebar{
+    display:grid;
+    gap:14px;
+    align-content:start;
+  }
+
+  .navCard,
+  .card{
+    border:1px solid var(--line);
+    border-radius:20px;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.01)),
+      linear-gradient(180deg, rgba(12,23,18,.96), rgba(8,15,12,.98));
+    box-shadow:var(--shadow);
+    overflow:hidden;
+    position:relative;
+  }
+
+  .card::before,
+  .navCard::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    pointer-events:none;
+    background:radial-gradient(600px 160px at 50% 0%, rgba(0,255,156,.07), transparent 60%);
+  }
+
+  .cardInner,
+  .navInner{
+    position:relative;
+    z-index:1;
+    padding:16px;
+  }
+
+  .navTitle,
+  .sectionTitle{
+    margin:0 0 12px;
+    font-size:11px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--green);
+  }
+
+  .navButtons{
+    display:grid;
+    gap:10px;
+  }
+
+  .navBtn{
+    width:100%;
+    text-align:left;
+    padding:12px 14px;
+    border-radius:12px;
+    border:1px solid var(--line);
+    background:rgba(255,255,255,.025);
+    color:var(--text);
+    cursor:pointer;
+    font:inherit;
+    font-size:13px;
+    transition:transform .12s ease, border-color .15s ease, background .15s ease;
+  }
+
+  .navBtn:hover{
+    transform:translateY(-1px);
+    border-color:var(--line-strong);
+    background:rgba(0,255,156,.05);
+  }
+
+  .navBtn.active{
+    border-color:rgba(0,255,156,.32);
+    background:rgba(0,255,156,.10);
+    color:#eafff4;
+    box-shadow:inset 0 0 0 1px rgba(0,255,156,.12);
+  }
+
+  .quickInfo{
+    display:grid;
+    gap:10px;
+  }
+
+  .quickItem{
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:rgba(255,255,255,.02);
+    padding:12px;
+  }
+
+  .quickItem b{
+    display:block;
+    font-size:10px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin-bottom:8px;
+  }
+
+  .quickItem span{
+    color:#e6fff1;
+    font-size:13px;
+    word-break:break-word;
+  }
+
+  .center{
+    display:grid;
+    grid-template-rows:auto minmax(0,1fr);
+    gap:14px;
+  }
+
+  .statsGrid{
+    display:grid;
+    grid-template-columns:repeat(6, minmax(0,1fr));
+    gap:12px;
+  }
+
+  .stat{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:rgba(255,255,255,.02);
+    padding:14px;
+  }
+
+  .statLabel{
+    font-size:10px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin-bottom:10px;
+  }
+
+  .statValue{
+    font-size:clamp(20px, 2vw, 34px);
+    line-height:1;
+    color:#eafff4;
+    font-weight:800;
+  }
+
+  .statHint{
+    margin-top:8px;
+    font-size:11px;
+    color:var(--muted);
+  }
+
+  .contentCard{
+    min-height:0;
+    display:grid;
+    grid-template-rows:auto auto minmax(0,1fr);
+  }
+
+  .contentTop{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap;
+    padding:16px 18px 12px;
+    border-bottom:1px solid var(--line);
+    position:relative;
+    z-index:1;
+  }
+
+  .contentTop h2{
+    margin:0 0 4px;
+    font-size:clamp(22px, 2vw, 32px);
+    line-height:1;
+    letter-spacing:-.03em;
+    color:#eafff4;
+  }
+
+  .contentTop p{
+    margin:0;
+    font-size:12px;
+    color:var(--muted);
+  }
+
+  .toolbar{
+    padding:12px 18px;
+    border-bottom:1px solid var(--line);
+    position:relative;
+    z-index:1;
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+  }
+
+  .searchWrap{
+    flex:1 1 260px;
+  }
+
+  .input{
+    width:100%;
+    min-height:44px;
+    border-radius:12px;
+    border:1px solid var(--line-strong);
+    background:rgba(0,0,0,.24);
+    color:var(--text);
+    padding:11px 13px;
+    outline:none;
+    font:inherit;
+    font-size:13px;
+  }
+
+  .input::placeholder{
+    color:rgba(215,255,232,.35);
+  }
+
+  .contentBody{
+    min-height:0;
+    overflow:auto;
+    padding:16px 18px 18px;
+    position:relative;
+    z-index:1;
+  }
+
+  .panelSection{ display:none; }
+  .panelSection.active{ display:block; }
+
+  .empty{
+    padding:18px;
+    border-radius:14px;
+    border:1px dashed var(--line-strong);
+    background:rgba(255,255,255,.02);
+    color:var(--muted);
+    text-align:center;
+    line-height:1.6;
+  }
+
+  .roomList{
+    display:grid;
+    gap:12px;
+  }
+
+  .roomCard{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:rgba(255,255,255,.02);
+    overflow:hidden;
+  }
+
+  .roomHead{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+    flex-wrap:wrap;
+    padding:14px;
+    border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.015);
+  }
+
+  .roomHead h3{
+    margin:0 0 6px;
+    font-size:20px;
+    line-height:1;
+    color:#eafff4;
+  }
+
+  .roomCode{
+    font-size:11px;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--muted);
+    word-break:break-word;
+  }
+
+  .badges{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+
+  .badge{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-height:28px;
+    padding:0 10px;
+    border-radius:999px;
+    font-size:10px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    border:1px solid var(--line-strong);
+    background:rgba(255,255,255,.03);
+    color:#dbfff0;
+  }
+
+  .badge.ok{
+    background:rgba(0,255,156,.10);
+    border-color:rgba(0,255,156,.24);
+  }
+
+  .badge.warn{
+    background:rgba(255,209,102,.10);
+    border-color:rgba(255,209,102,.24);
+    color:#fff2c6;
+  }
+
+  .badge.danger{
+    background:rgba(255,107,107,.10);
+    border-color:rgba(255,107,107,.24);
+    color:#ffd8d8;
+  }
+
+  .roomBody{
+    padding:14px;
+    display:grid;
+    gap:12px;
+  }
+
+  .roomMeta{
+    display:grid;
+    grid-template-columns:repeat(4, minmax(0,1fr));
+    gap:10px;
+  }
+
+  .mini{
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:rgba(255,255,255,.02);
+    padding:10px 12px;
+  }
+
+  .mini b{
+    display:block;
+    font-size:10px;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin-bottom:8px;
+  }
+
+  .mini span{
+    color:#eafff4;
+    font-size:13px;
+    word-break:break-word;
+  }
+
+  .players{
+    display:grid;
+    gap:10px;
+  }
+
+  .player{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+    border:1px solid var(--line);
+    border-radius:12px;
+    background:rgba(255,255,255,.02);
+    padding:10px 12px;
+  }
+
+  .playerLeft{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    min-width:0;
+  }
+
+  .avatar{
+    width:38px;
+    height:38px;
+    border-radius:10px;
+    display:grid;
+    place-items:center;
+    background:linear-gradient(180deg, #00ff9c33, #00ff9c11);
+    border:1px solid rgba(0,255,156,.24);
+    color:#ecfff6;
+    font-weight:800;
+    flex:0 0 auto;
+  }
+
+  .playerText{
+    min-width:0;
+  }
+
+  .playerName{
+    font-size:13px;
+    font-weight:800;
+    color:#eafff4;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+
+  .playerMeta{
+    font-size:11px;
+    color:var(--muted);
+    margin-top:4px;
+  }
+
+  .playerRight{
+    font-size:11px;
+    color:#9fffd0;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+  }
+
+  .systemGrid{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0,1fr));
+    gap:12px;
+    margin-bottom:14px;
+  }
+
+  .terminal{
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:rgba(0,0,0,.20);
+    padding:14px;
+    min-height:260px;
+    max-height:48vh;
+    overflow:auto;
+    font-size:12px;
+    line-height:1.55;
+    color:#baffdd;
+  }
+
+  .rightbar{
+    display:grid;
+    gap:14px;
+    align-content:start;
+  }
+
+  .logsBox{
+    min-height:300px;
+    max-height:60vh;
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:16px;
+    background:rgba(0,0,0,.20);
+    padding:12px;
+  }
+
+  .log{
+    font-size:12px;
+    line-height:1.55;
+    padding:8px 10px;
+    border-radius:10px;
+    background:rgba(255,255,255,.02);
+    border-left:2px solid rgba(0,255,156,.30);
+    margin-bottom:8px;
+    word-break:break-word;
+    white-space:pre-wrap;
+  }
+
+  .footer{
+    padding:4px 4px 0;
+    color:var(--muted);
+    font-size:11px;
+    letter-spacing:.10em;
+    text-transform:uppercase;
+    display:flex;
+    justify-content:space-between;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+
+  .pulse{
+    animation:pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse{
+    0%,100%{ opacity:1; }
+    50%{ opacity:.45; }
+  }
+
+  @media (max-width:1380px){
+    .layout{
+      grid-template-columns:220px minmax(0,1fr) 320px;
+    }
+
+    .statsGrid{
+      grid-template-columns:repeat(3, minmax(0,1fr));
+    }
+  }
+
+  @media (max-width:1100px){
+    .layout{
+      grid-template-columns:1fr;
+    }
+
+    .sidebar{ order:1; }
+    .center{ order:2; }
+    .rightbar{ order:3; }
+
+    .statsGrid{
+      grid-template-columns:repeat(3, minmax(0,1fr));
+    }
+  }
+
+  @media (max-width:760px){
+    .page{
+      padding:
+        max(10px, env(safe-area-inset-top))
+        max(10px, env(safe-area-inset-right))
+        max(12px, env(safe-area-inset-bottom))
+        max(10px, env(safe-area-inset-left));
+    }
+
+    .topbar{
+      grid-template-columns:1fr;
+      justify-items:start;
+      padding:14px;
+      border-radius:16px;
+    }
+
+    .topMeta{
+      justify-content:flex-start;
+    }
+
+    .topActions{
+      justify-content:flex-start;
+      width:100%;
+    }
+
+    .topActions .btn{
+      flex:1 1 160px;
+    }
+
+    .navCard,
+    .card{
+      border-radius:16px;
+    }
+
+    .statsGrid{
+      grid-template-columns:repeat(2, minmax(0,1fr));
+    }
+
+    .roomMeta,
+    .systemGrid{
+      grid-template-columns:1fr;
+    }
+
+    .contentTop{
+      padding:14px 14px 10px;
+    }
+
+    .toolbar{
+      padding:10px 14px;
+    }
+
+    .contentBody{
+      padding:14px;
+    }
+
+    .footer{
+      flex-direction:column;
+    }
+  }
+
+  @media (max-width:460px){
+    .statsGrid{
+      grid-template-columns:1fr;
+    }
+
+    .brand h1{
+      font-size:28px;
+    }
+
+    .roomHead h3{
+      font-size:18px;
+    }
+
+    .btn{
+      width:100%;
+    }
+  }
 </style>
 </head>
-
 <body>
+<main class="page">
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <p class="eyebrow">Painel administrativo · núcleo do sistema</p>
+        <h1>OSL // SYSTEM CORE</h1>
+      </div>
 
-<div class="grid">
+      <div class="topMeta">
+        <span>Servidor: <strong id="serverStatus">Conectando</strong></span>
+        <span>•</span>
+        <span>Uptime: <strong id="serverUptime">---</strong></span>
+        <span>•</span>
+        <span>Ambiente: <strong id="serverEnv">---</strong></span>
+      </div>
 
-<div class="menu">
-  <h2>OSL CORE</h2>
-  <button onclick="show('dashboard')">Dashboard</button>
-  <button onclick="show('rooms')">Salas</button>
-  <button onclick="show('video')">Vídeo</button>
-  <button onclick="show('system')">Sistema</button>
-</div>
+      <div class="topActions">
+        <button class="btn btnGhost" id="refreshBtn">Atualizar agora</button>
+        <button class="btn btnPrimary" id="toggleAutoBtn">Auto refresh: ON</button>
+      </div>
+    </header>
 
-<div class="main">
+    <section class="layout">
+      <aside class="sidebar">
+        <section class="navCard">
+          <div class="navInner">
+            <h2 class="navTitle">Navegação</h2>
+            <div class="navButtons">
+              <button class="navBtn active" data-section="dashboard">Dashboard</button>
+              <button class="navBtn" data-section="rooms">Salas</button>
+              <button class="navBtn" data-section="video">Vídeo</button>
+              <button class="navBtn" data-section="system">Sistema</button>
+            </div>
+          </div>
+        </section>
 
-<div id="dashboard" class="section active">
-  <div class="status">
-    <div class="box">Salas<br><b id="statRooms">0</b></div>
-    <div class="box">Jogadores<br><b id="statPlayers">0</b></div>
-    <div class="box">Eventos<br><b id="statEvents">0</b></div>
-    <div class="box">Vídeo<br><b id="statVideo">0</b></div>
-    <div class="box">Gravação<br><b id="statRecord">0</b></div>
+        <section class="card">
+          <div class="cardInner">
+            <h2 class="sectionTitle">Servidor alvo</h2>
+            <div class="quickInfo">
+              <div class="quickItem">
+                <b>URL</b>
+                <span id="serverUrlText">---</span>
+              </div>
+              <div class="quickItem">
+                <b>Última atualização</b>
+                <span id="lastUpdateText">---</span>
+              </div>
+              <div class="quickItem">
+                <b>Status do ciclo</b>
+                <span id="cycleText">Monitorando</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="center">
+        <section class="card">
+          <div class="cardInner">
+            <h2 class="sectionTitle">Métricas em tempo real</h2>
+            <div class="statsGrid">
+              <div class="stat">
+                <div class="statLabel">Salas</div>
+                <div class="statValue" id="statRooms">0</div>
+                <div class="statHint">salas registradas</div>
+              </div>
+              <div class="stat">
+                <div class="statLabel">Jogadores</div>
+                <div class="statValue" id="statPlayers">0</div>
+                <div class="statHint">online agora</div>
+              </div>
+              <div class="stat">
+                <div class="statLabel">Sessões</div>
+                <div class="statValue" id="statSessions">0</div>
+                <div class="statHint">rituais ativos</div>
+              </div>
+              <div class="stat">
+                <div class="statLabel">Vídeo</div>
+                <div class="statValue" id="statVideo">0</div>
+                <div class="statHint">salas com vídeo</div>
+              </div>
+              <div class="stat">
+                <div class="statLabel">Gravação</div>
+                <div class="statValue" id="statRecord">0</div>
+                <div class="statHint">salas gravando</div>
+              </div>
+              <div class="stat">
+                <div class="statLabel">Eventos</div>
+                <div class="statValue" id="statEvents">0</div>
+                <div class="statHint">ciclos processados</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card contentCard">
+          <div class="contentTop">
+            <div>
+              <h2 id="contentTitle">Dashboard</h2>
+              <p id="contentSub">Visão consolidada das salas e atividade do sistema.</p>
+            </div>
+          </div>
+
+          <div class="toolbar">
+            <div class="searchWrap">
+              <input class="input" id="searchInput" type="text" placeholder="Buscar por sala, código ou host..." />
+            </div>
+          </div>
+
+          <div class="contentBody">
+            <section class="panelSection active" id="section-dashboard">
+              <div class="empty">
+                O painel está online. Use a navegação lateral para abrir as áreas de salas, vídeo e sistema.
+              </div>
+            </section>
+
+            <section class="panelSection" id="section-rooms">
+              <div class="roomList" id="roomsList">
+                <div class="empty">Carregando salas...</div>
+              </div>
+            </section>
+
+            <section class="panelSection" id="section-video">
+              <div class="roomList" id="videoList">
+                <div class="empty">Sem atividade de vídeo no momento.</div>
+              </div>
+            </section>
+
+            <section class="panelSection" id="section-system">
+              <div class="systemGrid">
+                <div class="mini">
+                  <b>Status</b>
+                  <span id="systemStatus">---</span>
+                </div>
+                <div class="mini">
+                  <b>Firebase</b>
+                  <span id="systemFirebase">---</span>
+                </div>
+                <div class="mini">
+                  <b>Iniciado em</b>
+                  <span id="systemStartedAt">---</span>
+                </div>
+                <div class="mini">
+                  <b>Agora</b>
+                  <span id="systemNow">---</span>
+                </div>
+              </div>
+
+              <div class="terminal" id="terminal">terminal iniciado...</div>
+            </section>
+          </div>
+        </section>
+
+        <div class="footer">
+          <div>OSL Monitor</div>
+          <div id="footerHint">Sistema estável</div>
+        </div>
+      </section>
+
+      <aside class="rightbar">
+        <section class="card">
+          <div class="cardInner">
+            <h2 class="sectionTitle">Logs do sistema</h2>
+            <div class="logsBox" id="logsBox">
+              <div class="log">Aguardando atividade...</div>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </section>
   </div>
-</div>
-
-<div id="rooms" class="section">
-  <div id="roomsList">Carregando...</div>
-</div>
-
-<div id="video" class="section">
-  <div id="videoList">Sem atividade</div>
-</div>
-
-<div id="system" class="section">
-  <div id="systemInfo">Carregando...</div>
-  <div class="terminal" id="terminal">terminal iniciado...</div>
-</div>
-
-</div>
-
-<div class="logs">
-  <div>SYSTEM LOG</div>
-  <div id="logs"></div>
-</div>
-
-</div>
+</main>
 
 <script>
-const SERVER = "https://osl-video-server-production.up.railway.app";
+  const SERVER = "https://osl-video-server-production.up.railway.app";
 
-let stats = {
-  rooms:0,
-  players:0,
-  video:0,
-  record:0,
-  events:0
-};
+  const state = {
+    autoRefresh: true,
+    rooms: [],
+    events: 0,
+    logs: [],
+    health: null,
+    lastUpdate: null
+  };
 
-function show(id){
-  document.querySelectorAll(".section").forEach(s=>s.classList.remove("active"));
-  document.getElementById(id).classList.add("active");
-}
+  const el = {
+    serverStatus: document.getElementById("serverStatus"),
+    serverUptime: document.getElementById("serverUptime"),
+    serverEnv: document.getElementById("serverEnv"),
+    serverUrlText: document.getElementById("serverUrlText"),
+    lastUpdateText: document.getElementById("lastUpdateText"),
+    cycleText: document.getElementById("cycleText"),
 
-function log(msg){
-  const el = document.getElementById("logs");
-  const div = document.createElement("div");
-  div.className = "log";
-  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-  el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
-}
+    statRooms: document.getElementById("statRooms"),
+    statPlayers: document.getElementById("statPlayers"),
+    statSessions: document.getElementById("statSessions"),
+    statVideo: document.getElementById("statVideo"),
+    statRecord: document.getElementById("statRecord"),
+    statEvents: document.getElementById("statEvents"),
 
-function updateStats(){
-  statRooms.textContent = stats.rooms;
-  statPlayers.textContent = stats.players;
-  statVideo.textContent = stats.video;
-  statRecord.textContent = stats.record;
-  statEvents.textContent = stats.events;
-}
+    contentTitle: document.getElementById("contentTitle"),
+    contentSub: document.getElementById("contentSub"),
+    searchInput: document.getElementById("searchInput"),
 
-/* ===== SALAS ===== */
-async function loadRooms(){
-  try{
-    const res = await fetch(SERVER + "/game/rooms", { cache:"no-store" });
-    const data = await res.json();
+    roomsList: document.getElementById("roomsList"),
+    videoList: document.getElementById("videoList"),
 
-    const rooms = data.rooms || [];
+    systemStatus: document.getElementById("systemStatus"),
+    systemFirebase: document.getElementById("systemFirebase"),
+    systemStartedAt: document.getElementById("systemStartedAt"),
+    systemNow: document.getElementById("systemNow"),
 
-    stats.rooms = rooms.length;
-    stats.players = rooms.reduce((a,r)=>a+(r.playerCount||0),0);
-    stats.video = rooms.filter(r=>r.videoActive).length;
-    stats.record = rooms.filter(r=>r.recordingActive).length;
-    stats.events++;
+    terminal: document.getElementById("terminal"),
+    logsBox: document.getElementById("logsBox"),
+    footerHint: document.getElementById("footerHint"),
 
-    updateStats();
+    refreshBtn: document.getElementById("refreshBtn"),
+    toggleAutoBtn: document.getElementById("toggleAutoBtn"),
+    navButtons: [...document.querySelectorAll(".navBtn")],
+    sections: {
+      dashboard: document.getElementById("section-dashboard"),
+      rooms: document.getElementById("section-rooms"),
+      video: document.getElementById("section-video"),
+      system: document.getElementById("section-system")
+    }
+  };
 
-    if(!rooms.length){
-      roomsList.innerHTML = "Nenhuma sala ativa";
-      videoList.innerHTML = "Sem atividade";
+  el.serverUrlText.textContent = SERVER;
+
+  function escapeHtml(str){
+    return String(str ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function formatDate(value){
+    if(!value) return "---";
+    const d = new Date(value);
+    if(Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString("pt-BR");
+  }
+
+  function formatUptime(sec){
+    const total = Number(sec || 0);
+    const d = Math.floor(total / 86400);
+    const h = Math.floor((total % 86400) / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = Math.floor(total % 60);
+
+    if(d > 0) return `${d}d ${h}h ${m}m`;
+    if(h > 0) return `${h}h ${m}m`;
+    if(m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function initials(name){
+    const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+    if(!parts.length) return "??";
+    if(parts.length === 1) return parts[0].slice(0,2).toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+
+  function addLog(msg){
+    const line = `[${new Date().toLocaleTimeString("pt-BR")}] ${msg}`;
+    state.logs.push(line);
+    if(state.logs.length > 220) state.logs.shift();
+
+    el.logsBox.innerHTML = state.logs
+      .slice()
+      .reverse()
+      .map(item => `<div class="log">${escapeHtml(item)}</div>`)
+      .join("");
+  }
+
+  function setSection(id){
+    Object.entries(el.sections).forEach(([key, node]) => {
+      node.classList.toggle("active", key === id);
+    });
+
+    el.navButtons.forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.section === id);
+    });
+
+    const map = {
+      dashboard: {
+        title: "Dashboard",
+        sub: "Visão consolidada das salas e atividade do sistema."
+      },
+      rooms: {
+        title: "Salas",
+        sub: "Salas registradas, host, jogadores e estado geral."
+      },
+      video: {
+        title: "Vídeo",
+        sub: "Monitoramento visual das salas com vídeo e gravação."
+      },
+      system: {
+        title: "Sistema",
+        sub: "Saúde do backend, ambiente e terminal de monitoramento."
+      }
+    };
+
+    el.contentTitle.textContent = map[id].title;
+    el.contentSub.textContent = map[id].sub;
+  }
+
+  async function fetchJson(path){
+    const res = await fetch(SERVER + path, { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok) throw new Error(data?.error || `HTTP_${res.status}`);
+    return data;
+  }
+
+  function renderHealth(data){
+    state.health = data || null;
+
+    if(!data || data.ok !== true){
+      el.serverStatus.textContent = "Offline";
+      el.serverUptime.textContent = "---";
+      el.serverEnv.textContent = "---";
+      el.systemStatus.textContent = "Sem resposta";
+      el.systemFirebase.textContent = "---";
+      el.systemStartedAt.textContent = "---";
+      el.systemNow.textContent = "---";
       return;
     }
 
-    roomsList.innerHTML = rooms.map(r=>`
-      <div class="card">
-        <b>${r.name || r.roomId}</b><br>
-        Código: ${r.roomId}<br>
-        Host: ${r.host || "-"}<br>
-        Jogadores: ${r.playerCount}<br>
-        Sessão: ${r.sessionActive ? "ATIVA" : "PARADA"}<br>
-        Vídeo: ${r.videoActive ? "ON" : "OFF"}<br>
-        Gravação: ${r.recordingActive ? "ON" : "OFF"}
-      </div>
-    `).join("");
+    el.serverStatus.textContent = "Online";
+    el.serverUptime.textContent = formatUptime(data.uptimeSec || 0);
+    el.serverEnv.textContent = data.environment || "---";
 
-    videoList.innerHTML = rooms.map(r=>`
-      <div class="card">
-        ${r.name}: vídeo ${r.videoActive ? "ON" : "OFF"}
-      </div>
-    `).join("");
-
-    log("salas atualizadas");
-
-  }catch(e){
-    log("erro ao carregar salas");
-    console.error(e);
+    el.systemStatus.textContent = data.ok ? "Operacional" : "Instável";
+    el.systemFirebase.textContent = data.firebaseConfigured ? "Conectado" : "Não configurado";
+    el.systemStartedAt.textContent = formatDate(data.startedAt);
+    el.systemNow.textContent = formatDate(data.now);
   }
-}
 
-/* ===== SYSTEM ===== */
-async function loadSystem(){
-  try{
-    const res = await fetch(SERVER + "/health");
-    const d = await res.json();
+  function renderStats(rooms){
+    const totalRooms = rooms.length;
+    const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
+    const totalSessions = rooms.filter(room => room.sessionActive).length;
+    const totalVideo = rooms.filter(room => room.videoActive).length;
+    const totalRecord = rooms.filter(room => room.recordingActive).length;
 
-    systemInfo.innerHTML = `
-      status: ${d.ok}<br>
-      uptime: ${Math.floor(d.uptimeSec)}s<br>
-      env: ${d.environment}
-    `;
-
-    log("health carregado");
-  }catch{
-    log("erro no health");
+    el.statRooms.textContent = String(totalRooms);
+    el.statPlayers.textContent = String(totalPlayers);
+    el.statSessions.textContent = String(totalSessions);
+    el.statVideo.textContent = String(totalVideo);
+    el.statRecord.textContent = String(totalRecord);
+    el.statEvents.textContent = String(state.events);
   }
-}
 
-/* ===== LOOP ===== */
-loadRooms();
-loadSystem();
+  function roomMatchesSearch(room){
+    const q = el.searchInput.value.trim().toLowerCase();
+    if(!q) return true;
 
-setInterval(loadRooms, 2000);
-setInterval(loadSystem, 5000);
+    const text = [
+      room.name,
+      room.roomId,
+      room.host,
+      ...(Array.isArray(room.players) ? room.players.map(p => p.playerName) : [])
+    ].join(" ").toLowerCase();
 
-/* TERMINAL VISUAL */
-setInterval(()=>{
-  terminal.innerHTML += `<div>> sync ok</div>`;
-  terminal.scrollTop = terminal.scrollHeight;
-},3000);
+    return text.includes(q);
+  }
 
+  function renderRooms(rooms){
+    const filtered = rooms.filter(roomMatchesSearch);
+
+    if(!filtered.length){
+      el.roomsList.innerHTML = `<div class="empty">Nenhuma sala corresponde à busca atual.</div>`;
+      return;
+    }
+
+    el.roomsList.innerHTML = filtered.map(room => {
+      const players = Array.isArray(room.players) ? room.players : [];
+
+      return `
+        <article class="roomCard">
+          <div class="roomHead">
+            <div>
+              <h3>${escapeHtml(room.name || "Sala sem nome")}</h3>
+              <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
+            </div>
+
+            <div class="badges">
+              <span class="badge ${room.sessionActive ? "ok" : ""}">
+                ${room.sessionActive ? "sessão ativa" : "sessão parada"}
+              </span>
+              <span class="badge ${room.videoActive ? "warn" : ""}">
+                vídeo ${room.videoActive ? "on" : "off"}
+              </span>
+              <span class="badge ${room.recordingActive ? "danger" : ""}">
+                rec ${room.recordingActive ? "on" : "off"}
+              </span>
+            </div>
+          </div>
+
+          <div class="roomBody">
+            <div class="roomMeta">
+              <div class="mini">
+                <b>Host</b>
+                <span>${escapeHtml(room.host || "Não definido")}</span>
+              </div>
+              <div class="mini">
+                <b>Jogadores</b>
+                <span>${escapeHtml(String(room.playerCount || 0))}</span>
+              </div>
+              <div class="mini">
+                <b>Criada em</b>
+                <span>${escapeHtml(formatDate(room.createdAt))}</span>
+              </div>
+              <div class="mini">
+                <b>Atualizada em</b>
+                <span>${escapeHtml(formatDate(room.updatedAt))}</span>
+              </div>
+            </div>
+
+            <div class="players">
+              ${
+                players.length
+                  ? players.map(player => `
+                    <div class="player">
+                      <div class="playerLeft">
+                        <div class="avatar">${escapeHtml(initials(player.playerName))}</div>
+                        <div class="playerText">
+                          <div class="playerName">${escapeHtml(player.playerName || "Jogador")}</div>
+                          <div class="playerMeta">ID: ${escapeHtml(player.playerId || "---")}</div>
+                        </div>
+                      </div>
+                      <div class="playerRight">online</div>
+                    </div>
+                  `).join("")
+                  : `<div class="empty">Nenhum jogador ativo nesta sala.</div>`
+              }
+            </div>
+          </div>
+        </article>
+      `;
+    }).join("");
+  }
+
+  function renderVideo(rooms){
+    const activeRooms = rooms.filter(room => room.videoActive || room.recordingActive);
+
+    if(!activeRooms.length){
+      el.videoList.innerHTML = `<div class="empty">Nenhuma sala com vídeo ou gravação ativa neste momento.</div>`;
+      return;
+    }
+
+    el.videoList.innerHTML = activeRooms.map(room => `
+      <article class="roomCard">
+        <div class="roomHead">
+          <div>
+            <h3>${escapeHtml(room.name || "Sala")}</h3>
+            <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
+          </div>
+          <div class="badges">
+            <span class="badge ${room.videoActive ? "warn" : ""}">
+              vídeo ${room.videoActive ? "on" : "off"}
+            </span>
+            <span class="badge ${room.recordingActive ? "danger" : ""}">
+              gravação ${room.recordingActive ? "on" : "off"}
+            </span>
+          </div>
+        </div>
+        <div class="roomBody">
+          <div class="roomMeta">
+            <div class="mini">
+              <b>Host</b>
+              <span>${escapeHtml(room.host || "Não definido")}</span>
+            </div>
+            <div class="mini">
+              <b>Jogadores</b>
+              <span>${escapeHtml(String(room.playerCount || 0))}</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    `).join("");
+  }
+
+  async function loadRooms(){
+    try{
+      const data = await fetchJson("/game/rooms");
+      const rooms = Array.isArray(data.rooms) ? data.rooms : [];
+
+      state.rooms = rooms;
+      state.events += 1;
+      state.lastUpdate = new Date();
+
+      renderStats(rooms);
+      renderRooms(rooms);
+      renderVideo(rooms);
+
+      el.lastUpdateText.textContent = state.lastUpdate.toLocaleString("pt-BR");
+      el.cycleText.textContent = "Atualizado";
+      el.footerHint.textContent = rooms.length
+        ? `${rooms.length} sala(s) monitorada(s)`
+        : "Nenhuma sala ativa";
+    }catch(error){
+      console.error(error);
+      addLog("erro ao carregar salas");
+      el.cycleText.textContent = "Falha";
+      el.roomsList.innerHTML = `<div class="empty">Não foi possível carregar as salas.</div>`;
+      el.videoList.innerHTML = `<div class="empty">Não foi possível carregar o módulo de vídeo.</div>`;
+    }
+  }
+
+  async function loadHealth(){
+    try{
+      const data = await fetchJson("/health");
+      renderHealth(data);
+      addLog("health carregado");
+    }catch(error){
+      console.error(error);
+      renderHealth(null);
+      addLog("erro no health");
+    }
+  }
+
+  function appendTerminal(text){
+    const line = document.createElement("div");
+    line.textContent = `> ${text}`;
+    el.terminal.appendChild(line);
+
+    while(el.terminal.children.length > 120){
+      el.terminal.removeChild(el.terminal.firstChild);
+    }
+
+    el.terminal.scrollTop = el.terminal.scrollHeight;
+  }
+
+  async function refreshAll(){
+    el.cycleText.textContent = "Atualizando...";
+    await Promise.all([loadHealth(), loadRooms()]);
+  }
+
+  el.navButtons.forEach(btn => {
+    btn.addEventListener("click", () => setSection(btn.dataset.section));
+  });
+
+  el.refreshBtn.addEventListener("click", refreshAll);
+
+  el.toggleAutoBtn.addEventListener("click", () => {
+    state.autoRefresh = !state.autoRefresh;
+    el.toggleAutoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
+    addLog(`auto refresh ${state.autoRefresh ? "ativado" : "desativado"}`);
+  });
+
+  el.searchInput.addEventListener("input", () => {
+    renderRooms(state.rooms);
+  });
+
+  addLog("painel iniciado");
+  appendTerminal("boot ok");
+  refreshAll();
+
+  setInterval(() => {
+    if(state.autoRefresh) refreshAll();
+  }, 1200);
+
+  setInterval(() => {
+    appendTerminal("sync ok");
+  }, 3000);
+
+  setInterval(() => {
+    addLog("monitorando sistema...");
+  }, 5000);
+
+  setInterval(() => {
+    addLog("checando integridade...");
+  }, 8000);
 </script>
-
 </body>
 </html>
