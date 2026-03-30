@@ -2,68 +2,105 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OSL CONTROL</title>
+<title>OSL CONTROL CORE</title>
 
 <style>
 body{
   margin:0;
-  background:#000;
+  background:#020202;
   color:#00ff9c;
   font-family:monospace;
 }
 
-.container{
+.grid{
   display:grid;
-  grid-template-columns: 1fr 350px;
+  grid-template-columns: 250px 1fr 350px;
   height:100vh;
 }
 
-.left{
-  padding:20px;
+/* MENU */
+.menu{
+  border-right:1px solid #00ff9c;
+  padding:15px;
 }
 
-.right{
-  border-left:1px solid #00ff9c;
-  padding:20px;
-  overflow:auto;
-}
-
-.title{
-  font-size:20px;
+.menu h3{
   margin-bottom:20px;
 }
 
-.room{
+.menu button{
+  display:block;
+  width:100%;
+  margin-bottom:10px;
+  background:none;
+  border:1px solid #00ff9c;
+  color:#00ff9c;
+  padding:8px;
+  cursor:pointer;
+}
+
+/* MAIN */
+.main{
+  padding:15px;
+  overflow:auto;
+}
+
+.section{
+  display:none;
+}
+
+.active{
+  display:block;
+}
+
+.card{
   border:1px solid #00ff9c;
   padding:10px;
   margin-bottom:10px;
 }
 
-.player{
-  margin-left:10px;
-  font-size:12px;
+/* LOG */
+.logs{
+  border-left:1px solid #00ff9c;
+  padding:10px;
+  overflow:auto;
 }
 
 .log{
   font-size:12px;
-  margin-bottom:5px;
 }
 </style>
 </head>
 
 <body>
 
-<div class="container">
+<div class="grid">
 
-  <div class="left">
-    <div class="title">OSL SERVER // LIVE</div>
+  <!-- MENU -->
+  <div class="menu">
+    <h3>OSL CORE</h3>
 
-    <div id="rooms"></div>
+    <button onclick="show('rooms')">Salas</button>
+    <button onclick="show('chat')">Chat</button>
+    <button onclick="show('video')">Vídeo</button>
+    <button onclick="show('payments')">Pagamentos</button>
+    <button onclick="show('system')">Sistema</button>
   </div>
 
-  <div class="right">
-    <div class="title">SYSTEM LOG</div>
+  <!-- MAIN -->
+  <div class="main">
+
+    <div id="rooms" class="section active"></div>
+    <div id="chat" class="section"></div>
+    <div id="video" class="section"></div>
+    <div id="payments" class="section"></div>
+    <div id="system" class="section"></div>
+
+  </div>
+
+  <!-- LOG -->
+  <div class="logs">
+    <h3>SYSTEM LOG</h3>
     <div id="logs"></div>
   </div>
 
@@ -74,67 +111,69 @@ body{
 <script>
 const SERVER = "https://osl-video-server-production.up.railway.app";
 
-const roomsEl = document.getElementById("rooms");
-const logsEl = document.getElementById("logs");
-
-// 🔌 SOCKET REALTIME
 const socket = io(SERVER);
 
-socket.on("connect", () => {
-  log("🟢 conectado ao servidor");
-});
+const logsEl = document.getElementById("logs");
 
-// 📡 ROOMS UPDATE
-socket.on("rooms-update", (rooms) => {
-  renderRooms(rooms);
-});
-
-// 💬 MENSAGENS
-socket.on("new-message", (msg) => {
-  log(`💬 ${msg.roomId}: ${msg.message}`);
-});
-
-// 🔄 FALLBACK (caso socket falhe)
-async function fetchRooms(){
-  const res = await fetch(SERVER + "/game/rooms");
-  const data = await res.json();
-  renderRooms(data.rooms || []);
+// troca de abas
+function show(id){
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
 }
 
-// 🎯 RENDER SALAS
-function renderRooms(rooms){
-  if(!rooms.length){
-    roomsEl.innerHTML = "Nenhuma sala ativa";
-    return;
-  }
-
-  roomsEl.innerHTML = rooms.map(room => `
-    <div class="room">
-      <b>${room.name}</b><br>
-      ID: ${room.roomId}<br>
-      Players: ${room.playerCount}<br>
-      Video: ${room.videoActive ? "ON" : "OFF"}<br>
-      Recording: ${room.recordingActive ? "ON" : "OFF"}<br>
-
-      ${room.players.map(p => `
-        <div class="player">- ${p.playerName}</div>
-      `).join("")}
-    </div>
-  `).join("");
-}
-
-// 🧾 LOG
-function log(text){
+// LOG
+function log(msg){
   const div = document.createElement("div");
   div.className = "log";
-  div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
   logsEl.appendChild(div);
-  logsEl.scrollTop = logsEl.scrollHeight;
 }
 
-// fallback inicial
-fetchRooms();
-setInterval(fetchRooms, 5000);
+// ROOMS
+socket.on("rooms-update", (rooms)=>{
+  document.getElementById("rooms").innerHTML = rooms.map(r=>`
+    <div class="card">
+      <b>${r.name}</b><br>
+      players: ${r.playerCount}<br>
+      video: ${r.videoActive}<br>
+      recording: ${r.recordingActive}
+    </div>
+  `).join("");
+});
+
+// CHAT
+socket.on("new-message", (msg)=>{
+  const el = document.getElementById("chat");
+  el.innerHTML += `<div class="card">${msg.roomId}: ${msg.message}</div>`;
+  log("mensagem recebida");
+});
+
+// VIDEO STATUS
+socket.on("rooms-update", (rooms)=>{
+  document.getElementById("video").innerHTML = rooms.map(r=>`
+    <div class="card">
+      ${r.name} → vídeo: ${r.videoActive ? "ON" : "OFF"}
+    </div>
+  `).join("");
+});
+
+// SYSTEM
+async function loadSystem(){
+  const res = await fetch(SERVER + "/health");
+  const data = await res.json();
+
+  document.getElementById("system").innerHTML = `
+    <div class="card">
+      STATUS: ${data.ok}<br>
+      UPTIME: ${Math.floor(data.uptimeSec)}s<br>
+      ENV: ${data.environment}
+    </div>
+  `;
+}
+
+loadSystem();
+
+socket.on("connect", ()=> log("socket conectado"));
 </script>
 
 </body>
