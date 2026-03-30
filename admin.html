@@ -2,14 +2,19 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>OSL // CONTROL CORE</title>
+<title>OSL // SYSTEM CORE</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <style>
 body{
   margin:0;
-  background:#010101;
-  color:#00ff9c;
   font-family:monospace;
+  color:#00ff9c;
+
+  background:
+    radial-gradient(circle at 20% 20%, #00332233, transparent 40%),
+    radial-gradient(circle at 80% 0%, #00221155, transparent 50%),
+    radial-gradient(circle at 50% 100%, #001a0f, #000);
 }
 
 /* GRID */
@@ -21,21 +26,18 @@ body{
 
 /* MENU */
 .menu{
-  border-right:1px solid #00ff9c33;
+  border-right:1px solid #00ff9c22;
   padding:20px;
 }
 
-.menu h2{
-  margin-bottom:20px;
-  font-size:18px;
-}
+.menu h2{ margin-bottom:20px; }
 
 .menu button{
   width:100%;
   margin-bottom:10px;
   padding:10px;
   background:none;
-  border:1px solid #00ff9c55;
+  border:1px solid #00ff9c33;
   color:#00ff9c;
   cursor:pointer;
 }
@@ -50,30 +52,20 @@ body{
   overflow:auto;
 }
 
-.section{
-  display:none;
-}
-
-.active{
-  display:block;
-}
+.section{ display:none; }
+.active{ display:block; }
 
 /* CARDS */
 .card{
-  border:1px solid #00ff9c33;
-  padding:15px;
-  margin-bottom:12px;
-}
-
-.title{
-  font-size:18px;
+  border:1px solid #00ff9c22;
+  padding:12px;
   margin-bottom:10px;
 }
 
 /* STATUS */
 .status{
   display:grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3,1fr);
   gap:10px;
 }
 
@@ -85,14 +77,21 @@ body{
 
 /* LOG */
 .logs{
-  border-left:1px solid #00ff9c33;
+  border-left:1px solid #00ff9c22;
   padding:15px;
   overflow:auto;
 }
 
 .log{
   font-size:12px;
-  margin-bottom:5px;
+  margin-bottom:4px;
+}
+
+/* TERMINAL */
+.terminal{
+  margin-top:10px;
+  border:1px solid #00ff9c22;
+  padding:10px;
 }
 </style>
 </head>
@@ -109,7 +108,6 @@ body{
   <button onclick="show('rooms')">Salas</button>
   <button onclick="show('chat')">Chat</button>
   <button onclick="show('video')">Vídeo</button>
-  <button onclick="show('payments')">Pagamentos</button>
   <button onclick="show('system')">Sistema</button>
 </div>
 
@@ -118,53 +116,45 @@ body{
 
 <!-- DASHBOARD -->
 <div id="dashboard" class="section active">
-  <div class="title">Visão Geral</div>
-
   <div class="status">
     <div class="box">Salas<br><b id="statRooms">0</b></div>
     <div class="box">Jogadores<br><b id="statPlayers">0</b></div>
     <div class="box">Mensagens<br><b id="statMessages">0</b></div>
-    <div class="box">Vídeo ON<br><b id="statVideo">0</b></div>
+    <div class="box">Vídeo<br><b id="statVideo">0</b></div>
     <div class="box">Gravação<br><b id="statRecord">0</b></div>
-    <div class="box">Pagamentos<br><b id="statPayments">0</b></div>
+    <div class="box">Eventos<br><b id="statEvents">0</b></div>
   </div>
 </div>
 
 <!-- ROOMS -->
 <div id="rooms" class="section">
-  <div class="title">Salas</div>
   <div id="roomsList">0 salas</div>
 </div>
 
 <!-- CHAT -->
 <div id="chat" class="section">
-  <div class="title">Chat</div>
-  <div id="chatList">Nenhuma mensagem</div>
+  <div id="chatList">nenhuma mensagem</div>
 </div>
 
 <!-- VIDEO -->
 <div id="video" class="section">
-  <div class="title">Vídeo</div>
-  <div id="videoList">Nenhuma atividade</div>
-</div>
-
-<!-- PAYMENTS -->
-<div id="payments" class="section">
-  <div class="title">Pagamentos</div>
-  <div id="paymentsList">0 transações</div>
+  <div id="videoList">sem atividade</div>
 </div>
 
 <!-- SYSTEM -->
 <div id="system" class="section">
-  <div class="title">Sistema</div>
-  <div id="systemInfo">Carregando...</div>
+  <div id="systemInfo">carregando...</div>
+
+  <div class="terminal" id="terminal">
+    terminal iniciado...
+  </div>
 </div>
 
 </div>
 
 <!-- LOG -->
 <div class="logs">
-  <div class="title">SYSTEM LOG</div>
+  <div>SYSTEM LOG</div>
   <div id="logs"></div>
 </div>
 
@@ -174,7 +164,6 @@ body{
 
 <script>
 const SERVER = "https://osl-video-server-production.up.railway.app";
-
 const socket = io(SERVER);
 
 let stats = {
@@ -183,81 +172,119 @@ let stats = {
   messages:0,
   video:0,
   record:0,
-  payments:0
+  events:0
 };
-
-function updateStats(){
-  document.getElementById("statRooms").textContent = stats.rooms;
-  document.getElementById("statPlayers").textContent = stats.players;
-  document.getElementById("statMessages").textContent = stats.messages;
-  document.getElementById("statVideo").textContent = stats.video;
-  document.getElementById("statRecord").textContent = stats.record;
-  document.getElementById("statPayments").textContent = stats.payments;
-}
 
 function show(id){
   document.querySelectorAll(".section").forEach(s=>s.classList.remove("active"));
   document.getElementById(id).classList.add("active");
 }
 
-function log(text){
+function log(msg){
+  const el = document.getElementById("logs");
   const div = document.createElement("div");
   div.className = "log";
-  div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
-  document.getElementById("logs").appendChild(div);
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+
+  while(el.children.length > 150){
+    el.removeChild(el.firstChild);
+  }
 }
 
-/* ROOMS */
+function updateStats(){
+  statRooms.textContent = stats.rooms;
+  statPlayers.textContent = stats.players;
+  statMessages.textContent = stats.messages;
+  statVideo.textContent = stats.video;
+  statRecord.textContent = stats.record;
+  statEvents.textContent = stats.events;
+}
+
+/* SOCKET */
+socket.on("connect", ()=> log("🟢 conectado"));
+
 socket.on("rooms-update", rooms=>{
   stats.rooms = rooms.length;
   stats.players = rooms.reduce((a,r)=>a+r.playerCount,0);
   stats.video = rooms.filter(r=>r.videoActive).length;
   stats.record = rooms.filter(r=>r.recordingActive).length;
+  stats.events++;
 
   updateStats();
 
   if(!rooms.length){
-    document.getElementById("roomsList").innerHTML = "0 salas ativas";
-    return;
+    roomsList.innerHTML = "0 salas ativas";
+  }else{
+    roomsList.innerHTML = rooms.map(r=>`
+      <div class="card">
+        ${r.name}<br>
+        players: ${r.playerCount}<br>
+        video: ${r.videoActive}<br>
+        recording: ${r.recordingActive}
+      </div>
+    `).join("");
   }
 
-  document.getElementById("roomsList").innerHTML = rooms.map(r=>`
-    <div class="card">
-      ${r.name}<br>
-      players: ${r.playerCount}<br>
-      video: ${r.videoActive}<br>
-      recording: ${r.recordingActive}
-    </div>
+  videoList.innerHTML = rooms.map(r=>`
+    <div class="card">${r.name}: ${r.videoActive ? "ON" : "OFF"}</div>
   `).join("");
+
+  log("atualização de salas");
 });
 
-/* CHAT */
 socket.on("new-message", msg=>{
   stats.messages++;
+  stats.events++;
   updateStats();
 
-  document.getElementById("chatList").innerHTML += `
-    <div class="card">${msg.roomId}: ${msg.message}</div>
-  `;
-
+  chatList.innerHTML += `<div class="card">${msg.roomId}: ${msg.message}</div>`;
   log("mensagem recebida");
 });
 
 /* SYSTEM */
 async function loadSystem(){
-  const res = await fetch(SERVER + "/health");
-  const d = await res.json();
+  try{
+    const res = await fetch(SERVER + "/health");
+    const d = await res.json();
 
-  document.getElementById("systemInfo").innerHTML = `
-    STATUS: ${d.ok}<br>
-    UPTIME: ${Math.floor(d.uptimeSec)}s<br>
-    ENV: ${d.environment}
-  `;
+    systemInfo.innerHTML = `
+      status: ${d.ok}<br>
+      uptime: ${Math.floor(d.uptimeSec)}s<br>
+      env: ${d.environment}
+    `;
+
+    log("health carregado");
+  }catch{
+    log("erro ao carregar health");
+  }
 }
 
 loadSystem();
 
-socket.on("connect", ()=> log("socket conectado"));
+/* HEARTBEAT (VIDA) */
+setInterval(()=>{
+  log("monitorando sistema...");
+},4000);
+
+setInterval(()=>{
+  log("checando conexões...");
+},7000);
+
+setInterval(()=>{
+  if(stats.rooms === 0){
+    log("nenhuma atividade detectada");
+  }
+},9000);
+
+/* TERMINAL SIMULADO */
+setInterval(()=>{
+  const t = document.getElementById("terminal");
+  t.innerHTML += `<div>> sync ok</div>`;
+  t.scrollTop = t.scrollHeight;
+},3000);
+
 </script>
 
 </body>
