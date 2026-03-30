@@ -2,51 +2,47 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
-  />
-  <title>Admin Server | O SextoLugar</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>OSL Admin Command | O SextoLugar</title>
 
   <style>
     :root{
-      --bg:#060708;
-      --bg-2:#0b0d10;
-      --panel:#0f1318;
-      --panel-2:#131922;
-      --panel-3:#0d1117;
+      --bg:#040506;
+      --bg2:#090b0f;
+      --panel:#0c1016;
+      --panel2:#111722;
+      --panel3:#0f141d;
       --line:rgba(255,255,255,.08);
-      --line-strong:rgba(230,192,123,.22);
+      --lineSoft:rgba(255,255,255,.05);
       --gold:#e6c07b;
-      --gold-2:#c99a4b;
-      --text:#eef2f7;
-      --muted:#97a0ad;
-      --ok:#6fda8b;
-      --warn:#ffcc66;
+      --gold2:#b98a42;
+      --text:#eef3f9;
+      --muted:#8e98a8;
+      --ok:#62df8a;
+      --warn:#ffd166;
       --danger:#ff6b6b;
-      --cyan:#7bd7ff;
-      --shadow:0 20px 60px rgba(0,0,0,.42);
+      --cyan:#61d9ff;
+      --violet:#9b8cff;
+      --shadow:0 18px 60px rgba(0,0,0,.45);
       --radius-xl:24px;
       --radius-lg:18px;
       --radius-md:14px;
       --radius-sm:10px;
+      --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      --sans:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+      --serif:Georgia,"Times New Roman",serif;
     }
 
-    *{ box-sizing:border-box; }
-
+    *{box-sizing:border-box}
     html,body{
       margin:0;
       min-height:100%;
       background:
-        radial-gradient(1200px 480px at 50% -10%, rgba(230,192,123,.08), transparent 55%),
-        radial-gradient(900px 420px at 0% 0%, rgba(123,215,255,.06), transparent 45%),
-        linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+        radial-gradient(1100px 500px at 50% -10%, rgba(230,192,123,.08), transparent 55%),
+        radial-gradient(700px 500px at 0% 0%, rgba(97,217,255,.05), transparent 50%),
+        linear-gradient(180deg,var(--bg2),var(--bg));
       color:var(--text);
-      font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-    }
-
-    body{
-      overflow-x:hidden;
+      font-family:var(--sans);
     }
 
     body::before{
@@ -54,25 +50,26 @@
       position:fixed;
       inset:0;
       pointer-events:none;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,.015), transparent 20%, transparent 80%, rgba(255,255,255,.01)),
-        radial-gradient(circle at center, transparent 60%, rgba(0,0,0,.25) 100%);
-      opacity:.9;
+      opacity:.55;
+      background-image:
+        linear-gradient(rgba(255,255,255,.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.02) 1px, transparent 1px);
+      background-size:28px 28px;
+      mask-image:radial-gradient(circle at center, black 35%, transparent 90%);
     }
 
     .page{
-      position:relative;
-      z-index:1;
-      min-height:100vh;
       padding:
         max(14px, env(safe-area-inset-top))
         max(14px, env(safe-area-inset-right))
         max(18px, env(safe-area-inset-bottom))
         max(14px, env(safe-area-inset-left));
+      position:relative;
+      z-index:1;
     }
 
-    .shell{
-      width:min(1600px, 100%);
+    .wrap{
+      width:min(1680px, 100%);
       margin:0 auto;
       display:grid;
       gap:14px;
@@ -80,116 +77,127 @@
 
     .topbar{
       display:grid;
-      grid-template-columns:auto 1fr auto;
-      gap:18px;
+      grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) auto;
+      gap:14px;
       align-items:center;
-      padding:16px 18px;
-      border-radius:22px;
-      border:1px solid var(--line-strong);
+      padding:18px 20px;
+      border-radius:26px;
+      border:1px solid rgba(230,192,123,.18);
       background:
         linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015)),
-        linear-gradient(180deg, rgba(18,22,28,.94), rgba(12,16,22,.97));
+        linear-gradient(180deg, rgba(15,20,28,.96), rgba(9,12,18,.98));
       box-shadow:var(--shadow);
-      position:relative;
       overflow:hidden;
+      position:relative;
     }
 
     .topbar::after{
       content:"";
       position:absolute;
-      inset:0;
+      inset:-20% -10%;
       pointer-events:none;
-      background:linear-gradient(90deg, transparent, rgba(230,192,123,.08), transparent);
-      opacity:.45;
+      background:
+        radial-gradient(500px 120px at 20% 0%, rgba(230,192,123,.10), transparent 60%),
+        radial-gradient(420px 120px at 80% 0%, rgba(97,217,255,.08), transparent 60%);
     }
 
     .brand{
       min-width:0;
+      position:relative;
+      z-index:1;
     }
 
     .eyebrow{
-      margin:0 0 5px;
-      font-size:11px;
-      letter-spacing:.24em;
-      text-transform:uppercase;
+      margin:0 0 6px;
       color:var(--muted);
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.24em;
     }
 
     .title{
       margin:0;
-      font-size:clamp(28px, 4vw, 42px);
-      line-height:1;
-      letter-spacing:-.04em;
-      color:#f6efe4;
+      color:#f8f2e9;
+      font-family:var(--serif);
+      font-size:clamp(30px, 4.2vw, 54px);
+      line-height:.95;
+      letter-spacing:-.045em;
       font-weight:800;
-      font-family:Georgia,"Times New Roman",serif;
     }
 
-    .topMeta{
+    .titleAccent{
+      color:var(--gold);
+      text-shadow:0 0 28px rgba(230,192,123,.14);
+    }
+
+    .metaBar{
       display:flex;
-      align-items:center;
-      justify-content:center;
       gap:14px;
       flex-wrap:wrap;
-      color:#d8e0ea;
+      align-items:center;
+      justify-content:center;
       font-size:14px;
+      color:#d7dfeb;
+      position:relative;
+      z-index:1;
     }
 
-    .topMeta strong{
-      color:var(--gold);
-      font-weight:800;
-    }
+    .metaBar strong{ color:var(--gold); }
 
-    .topActions{
+    .actions{
       display:flex;
       gap:10px;
       flex-wrap:wrap;
       justify-content:flex-end;
+      position:relative;
+      z-index:1;
     }
 
     .btn{
       appearance:none;
       border:none;
-      cursor:pointer;
-      min-height:42px;
+      min-height:44px;
       padding:10px 14px;
-      border-radius:12px;
+      border-radius:14px;
+      cursor:pointer;
       font:inherit;
-      font-weight:700;
-      transition:transform .12s ease, opacity .15s ease, background .15s ease, border-color .15s ease;
+      font-weight:800;
+      transition:.15s ease;
     }
 
     .btn:hover{ transform:translateY(-1px); }
-    .btn:active{ transform:translateY(0); opacity:.95; }
-
-    .btnPrimary{
-      color:#1a140d;
-      background:linear-gradient(180deg, #e7c58a, #c99a4b);
-      box-shadow:0 0 24px rgba(230,192,123,.14);
-    }
+    .btn:active{ transform:translateY(0); }
 
     .btnGhost{
-      color:#f3f6fb;
+      color:#edf3fb;
+      border:1px solid rgba(255,255,255,.09);
       background:rgba(255,255,255,.04);
-      border:1px solid rgba(255,255,255,.10);
     }
 
-    .grid{
+    .btnGold{
+      color:#1d150d;
+      background:linear-gradient(180deg,#e8c98f,#c59141);
+      box-shadow:0 0 24px rgba(230,192,123,.16);
+    }
+
+    .layout{
       display:grid;
-      grid-template-columns:repeat(12, minmax(0,1fr));
+      grid-template-columns:1.12fr 1.25fr .95fr;
       gap:14px;
     }
 
+    .stack{ display:grid; gap:14px; }
+
     .card{
       background:
-        linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.015)),
-        linear-gradient(180deg, rgba(18,23,30,.96), rgba(12,16,22,.98));
+        linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.014)),
+        linear-gradient(180deg, rgba(15,20,28,.96), rgba(10,13,18,.99));
       border:1px solid var(--line);
-      border-radius:22px;
+      border-radius:24px;
       box-shadow:var(--shadow);
       overflow:hidden;
-      min-width:0;
       position:relative;
+      min-width:0;
     }
 
     .card::before{
@@ -197,8 +205,9 @@
       position:absolute;
       inset:0;
       pointer-events:none;
-      background:radial-gradient(600px 180px at 50% 0%, rgba(230,192,123,.07), transparent 62%);
-      opacity:.7;
+      background:
+        radial-gradient(520px 160px at 50% 0%, rgba(230,192,123,.06), transparent 62%);
+      opacity:.8;
     }
 
     .cardInner{
@@ -207,126 +216,91 @@
       padding:18px;
     }
 
-    .sectionEyebrow{
+    .cardEyebrow{
       margin:0 0 10px;
-      font-size:11px;
-      letter-spacing:.22em;
-      text-transform:uppercase;
       color:var(--gold);
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.22em;
     }
 
-    .sectionTitle{
+    .cardTitle{
       margin:0;
-      font-size:clamp(22px, 3vw, 32px);
-      line-height:1.05;
-      letter-spacing:-.03em;
-      color:#f4efe7;
-      font-family:Georgia,"Times New Roman",serif;
+      font-family:var(--serif);
+      font-size:clamp(24px,3vw,36px);
+      line-height:1.03;
+      letter-spacing:-.035em;
+      color:#f7f1e8;
     }
 
-    .sectionSub{
-      margin:8px 0 0;
+    .cardSub{
+      margin:10px 0 0;
       color:var(--muted);
       font-size:13px;
       line-height:1.55;
     }
 
-    .span-3{ grid-column:span 3; }
-    .span-4{ grid-column:span 4; }
-    .span-5{ grid-column:span 5; }
-    .span-6{ grid-column:span 6; }
-    .span-7{ grid-column:span 7; }
-    .span-8{ grid-column:span 8; }
-    .span-12{ grid-column:span 12; }
-
-    .statsRow{
-      display:grid;
-      grid-template-columns:repeat(4, minmax(0,1fr));
-      gap:14px;
-    }
-
-    .statCard{
-      border:1px solid rgba(255,255,255,.08);
-      border-radius:16px;
-      padding:16px;
-      background:rgba(255,255,255,.025);
-    }
-
-    .statLabel{
-      font-size:11px;
-      letter-spacing:.16em;
-      text-transform:uppercase;
-      color:var(--muted);
-      margin-bottom:8px;
-    }
-
-    .statValue{
-      font-size:clamp(24px, 3vw, 36px);
-      line-height:1;
-      font-weight:800;
-      color:#f4efe7;
-      letter-spacing:-.04em;
-    }
-
-    .statHint{
-      margin-top:8px;
-      font-size:12px;
-      color:var(--muted);
-    }
-
-    .healthBox{
-      display:grid;
-      gap:14px;
-    }
-
     .healthMain{
+      margin-top:16px;
       display:flex;
-      align-items:center;
       justify-content:space-between;
+      align-items:center;
       gap:14px;
       flex-wrap:wrap;
       padding:14px 16px;
-      border-radius:16px;
+      border-radius:18px;
       border:1px solid rgba(255,255,255,.08);
-      background:rgba(255,255,255,.02);
+      background:rgba(255,255,255,.025);
     }
 
-    .healthStatus{
-      display:inline-flex;
+    .statusWrap{
+      display:flex;
+      gap:12px;
       align-items:center;
-      gap:10px;
-      font-weight:800;
-      letter-spacing:.08em;
-      text-transform:uppercase;
-      font-size:13px;
+      min-width:0;
     }
 
     .statusDot{
-      width:10px;
-      height:10px;
+      width:12px;
+      height:12px;
       border-radius:50%;
+      background:currentColor;
+      box-shadow:0 0 22px currentColor;
       flex:0 0 auto;
-      box-shadow:0 0 16px currentColor;
     }
 
-    .is-ok{ color:var(--ok); }
-    .is-warn{ color:var(--warn); }
-    .is-danger{ color:var(--danger); }
+    .ok{ color:var(--ok); }
+    .warn{ color:var(--warn); }
+    .danger{ color:var(--danger); }
 
-    .healthMeta{
+    .statusText{
+      font-size:15px;
+      font-weight:900;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+    }
+
+    .statusTime{
+      color:var(--muted);
+      font-size:13px;
+    }
+
+    .kvGrid{
+      margin-top:14px;
       display:grid;
       grid-template-columns:repeat(2, minmax(0,1fr));
       gap:10px;
     }
 
-    .miniInfo{
-      padding:12px 14px;
-      border-radius:14px;
-      border:1px solid rgba(255,255,255,.06);
+    .kv{
+      padding:13px 14px;
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,.07);
       background:rgba(255,255,255,.02);
+      min-width:0;
     }
 
-    .miniInfo b{
+    .kv b{
       display:block;
       font-size:11px;
       letter-spacing:.14em;
@@ -335,87 +309,152 @@
       margin-bottom:7px;
     }
 
-    .miniInfo span{
-      color:#edf2f7;
-      font-size:14px;
+    .kv span{
+      display:block;
+      color:#edf2f9;
+      font-size:15px;
       word-break:break-word;
     }
 
-    .toolbar{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      justify-content:space-between;
-      margin-top:14px;
+    .stats{
+      margin-top:16px;
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:12px;
     }
 
-    .searchWrap{
+    .stat{
+      padding:16px;
+      border-radius:18px;
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.025);
+    }
+
+    .statLabel{
+      color:var(--muted);
+      font-size:11px;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      margin-bottom:8px;
+    }
+
+    .statValue{
+      color:#f8f1e9;
+      font-size:clamp(28px, 3vw, 40px);
+      line-height:1;
+      font-weight:900;
+      letter-spacing:-.05em;
+    }
+
+    .statHint{
+      margin-top:8px;
+      color:var(--muted);
+      font-size:12px;
+    }
+
+    .barGrid{
+      margin-top:16px;
+      display:grid;
+      gap:10px;
+    }
+
+    .barRow{
+      display:grid;
+      gap:6px;
+    }
+
+    .barHead{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      font-size:12px;
+      color:var(--muted);
+    }
+
+    .bar{
+      height:12px;
+      border-radius:999px;
+      overflow:hidden;
+      background:rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.05);
+    }
+
+    .barFill{
+      height:100%;
+      width:0%;
+      border-radius:999px;
+      transition:width .22s ease;
+      background:linear-gradient(90deg, var(--gold2), var(--gold));
+      box-shadow:0 0 24px rgba(230,192,123,.18);
+    }
+
+    .toolbar{
+      margin-top:16px;
       display:flex;
       gap:10px;
       flex-wrap:wrap;
-      align-items:center;
-      width:100%;
     }
 
     .input{
       width:100%;
-      min-height:44px;
-      border-radius:12px;
+      min-height:46px;
+      border-radius:14px;
       border:1px solid rgba(255,255,255,.10);
-      background:rgba(0,0,0,.20);
+      background:rgba(0,0,0,.22);
       color:var(--text);
-      padding:11px 13px;
-      outline:none;
+      padding:12px 14px;
       font:inherit;
+      outline:none;
     }
 
-    .input::placeholder{
-      color:rgba(255,255,255,.34);
-    }
+    .input::placeholder{ color:rgba(255,255,255,.30); }
 
     .roomList{
+      margin-top:14px;
       display:grid;
       gap:12px;
       align-content:start;
     }
 
-    .roomCard{
-      border:1px solid rgba(255,255,255,.08);
+    .room{
       border-radius:18px;
+      border:1px solid rgba(255,255,255,.08);
       background:rgba(255,255,255,.025);
       overflow:hidden;
+      transition:border-color .18s ease, transform .16s ease, box-shadow .18s ease;
+    }
+
+    .room.changed{
+      border-color:rgba(230,192,123,.34);
+      box-shadow:0 0 0 1px rgba(230,192,123,.12), 0 0 26px rgba(230,192,123,.08);
     }
 
     .roomHead{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:12px;
-      flex-wrap:wrap;
       padding:16px 16px 12px;
       border-bottom:1px solid rgba(255,255,255,.06);
-      background:rgba(255,255,255,.015);
-    }
-
-    .roomHeadLeft{
-      min-width:0;
+      display:flex;
+      gap:12px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      background:rgba(255,255,255,.014);
     }
 
     .roomName{
-      margin:0 0 6px;
-      font-size:22px;
-      line-height:1.1;
-      color:#f7efe3;
-      font-weight:800;
+      margin:0 0 5px;
+      font-family:var(--serif);
+      color:#fbf4ea;
+      font-size:24px;
+      line-height:1.05;
       letter-spacing:-.03em;
-      font-family:Georgia,"Times New Roman",serif;
+      font-weight:800;
     }
 
     .roomCode{
       color:var(--muted);
-      font-size:13px;
-      letter-spacing:.10em;
+      font-size:12px;
+      letter-spacing:.16em;
       text-transform:uppercase;
       word-break:break-word;
     }
@@ -429,41 +468,40 @@
 
     .badge{
       display:inline-flex;
+      min-height:30px;
       align-items:center;
       justify-content:center;
-      min-height:30px;
       padding:0 10px;
       border-radius:999px;
       font-size:11px;
-      font-weight:800;
-      letter-spacing:.12em;
       text-transform:uppercase;
+      letter-spacing:.12em;
+      font-weight:900;
       border:1px solid rgba(255,255,255,.10);
-      background:rgba(255,255,255,.04);
-      color:#eef2f7;
+      background:rgba(255,255,255,.05);
     }
 
-    .badge.gold{
-      color:#1a140d;
-      background:linear-gradient(180deg, #e7c58a, #c99a4b);
+    .badgeGold{
+      color:#1b140d;
+      background:linear-gradient(180deg,#e8c98f,#c59141);
       border-color:transparent;
     }
 
-    .badge.ok{
-      color:#e8fff0;
-      background:rgba(111,218,139,.12);
-      border-color:rgba(111,218,139,.24);
+    .badgeOk{
+      color:#ecfff3;
+      background:rgba(98,223,138,.13);
+      border-color:rgba(98,223,138,.25);
     }
 
-    .badge.warn{
-      color:#fff7db;
-      background:rgba(255,204,102,.12);
-      border-color:rgba(255,204,102,.24);
+    .badgeWarn{
+      color:#fff8df;
+      background:rgba(255,209,102,.13);
+      border-color:rgba(255,209,102,.24);
     }
 
-    .badge.danger{
-      color:#ffe7e7;
-      background:rgba(255,107,107,.12);
+    .badgeDanger{
+      color:#ffe9e9;
+      background:rgba(255,107,107,.13);
       border-color:rgba(255,107,107,.24);
     }
 
@@ -473,33 +511,33 @@
       gap:14px;
     }
 
-    .roomMetaGrid{
+    .roomMeta{
       display:grid;
       grid-template-columns:repeat(4, minmax(0,1fr));
       gap:10px;
     }
 
-    .playerList{
+    .players{
       display:grid;
       gap:10px;
     }
 
-    .playerItem{
+    .player{
       display:flex;
       align-items:center;
       justify-content:space-between;
-      gap:12px;
+      gap:10px;
       flex-wrap:wrap;
       padding:12px 14px;
       border-radius:14px;
-      border:1px solid rgba(255,255,255,.06);
       background:rgba(255,255,255,.02);
+      border:1px solid rgba(255,255,255,.06);
     }
 
     .playerLeft{
       display:flex;
-      align-items:center;
       gap:10px;
+      align-items:center;
       min-width:0;
     }
 
@@ -509,17 +547,17 @@
       border-radius:12px;
       display:grid;
       place-items:center;
-      background:linear-gradient(180deg, #6e5832, #2e2417);
-      border:1px solid rgba(230,192,123,.32);
-      color:#fff;
-      font-weight:800;
+      background:linear-gradient(180deg,#5f4c2c,#2c2113);
+      border:1px solid rgba(230,192,123,.30);
+      color:white;
+      font-weight:900;
       flex:0 0 auto;
     }
 
     .playerName{
       font-size:15px;
-      font-weight:800;
-      color:#f3ede5;
+      font-weight:900;
+      color:#f5efe7;
     }
 
     .playerMeta{
@@ -528,95 +566,95 @@
       margin-top:3px;
     }
 
-    .emptyState{
-      padding:18px;
-      border-radius:16px;
-      border:1px dashed rgba(255,255,255,.10);
-      background:rgba(255,255,255,.015);
-      color:var(--muted);
-      text-align:center;
-      line-height:1.65;
-    }
-
-    .logsWrap{
-      display:grid;
-      gap:12px;
-    }
-
+    .feedBox,
     .logsBox{
-      min-height:420px;
-      max-height:65vh;
+      margin-top:16px;
+      min-height:340px;
+      max-height:68vh;
       overflow:auto;
       border-radius:18px;
       border:1px solid rgba(255,255,255,.08);
-      background:
-        linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.26));
-      padding:14px;
-      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-      font-size:12px;
-      line-height:1.55;
-      color:#d7dde6;
+      background:linear-gradient(180deg, rgba(0,0,0,.22), rgba(0,0,0,.28));
+      padding:12px;
     }
 
+    .feedItem,
     .logLine{
-      padding:8px 10px;
-      border-radius:12px;
-      background:rgba(255,255,255,.02);
-      border-left:2px solid rgba(230,192,123,.25);
+      padding:10px 12px;
+      border-radius:14px;
       margin-bottom:8px;
-      word-break:break-word;
+      font-family:var(--mono);
+      font-size:12px;
+      line-height:1.55;
       white-space:pre-wrap;
+      word-break:break-word;
+      background:rgba(255,255,255,.025);
+      border-left:2px solid rgba(230,192,123,.22);
+    }
+
+    .feedItem.ok{ border-left-color:rgba(98,223,138,.55); }
+    .feedItem.warn{ border-left-color:rgba(255,209,102,.55); }
+    .feedItem.danger{ border-left-color:rgba(255,107,107,.55); }
+    .feedItem.cyan{ border-left-color:rgba(97,217,255,.55); }
+
+    .tiny{
+      color:var(--muted);
+      font-size:12px;
+    }
+
+    .empty{
+      padding:18px;
+      text-align:center;
+      color:var(--muted);
+      border:1px dashed rgba(255,255,255,.10);
+      border-radius:16px;
+      background:rgba(255,255,255,.015);
+      line-height:1.6;
     }
 
     .footer{
-      padding:4px 4px 0;
-      color:var(--muted);
-      font-size:12px;
-      letter-spacing:.06em;
       display:flex;
       justify-content:space-between;
       gap:12px;
       flex-wrap:wrap;
+      color:var(--muted);
+      font-size:12px;
+      padding:4px 4px 0;
     }
 
-    .pulse{
-      animation:pulse 1.4s ease-in-out infinite;
-    }
-
-    @keyframes pulse{
-      0%,100%{ opacity:1; }
-      50%{ opacity:.55; }
-    }
-
-    @media (max-width:1200px){
-      .span-3,.span-4,.span-5,.span-6,.span-7,.span-8{
-        grid-column:span 12;
+    @media (max-width:1450px){
+      .layout{
+        grid-template-columns:1fr 1fr;
       }
-
-      .statsRow{
-        grid-template-columns:repeat(2, minmax(0,1fr));
+      .sideCol{
+        grid-column:span 2;
       }
     }
 
-    @media (max-width:780px){
+    @media (max-width:1000px){
       .topbar{
         grid-template-columns:1fr;
       }
-
-      .topMeta{
+      .metaBar,.actions{
         justify-content:flex-start;
       }
-
-      .topActions{
-        justify-content:flex-start;
-      }
-
-      .statsRow,
-      .healthMeta,
-      .roomMetaGrid{
+      .layout{
         grid-template-columns:1fr;
       }
+      .stats{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+      }
+      .roomMeta{
+        grid-template-columns:repeat(2,minmax(0,1fr));
+      }
+    }
 
+    @media (max-width:700px){
+      .kvGrid,
+      .stats,
+      .roomMeta{
+        grid-template-columns:1fr;
+      }
       .footer{
         flex-direction:column;
       }
@@ -625,141 +663,158 @@
 </head>
 <body>
   <main class="page">
-    <div class="shell">
+    <div class="wrap">
       <header class="topbar">
         <div class="brand">
-          <p class="eyebrow">Painel administrativo · servidor em tempo real</p>
-          <h1 class="title">O SextoLugar Server</h1>
+          <p class="eyebrow">Centro de comando · monitoramento do servidor · tempo real</p>
+          <h1 class="title">O <span class="titleAccent">SextoLugar</span> Server</h1>
         </div>
 
-        <div class="topMeta">
+        <div class="metaBar">
           <span>Ambiente: <strong id="metaEnv">---</strong></span>
           <span>|</span>
           <span>Uptime: <strong id="metaUptime">---</strong></span>
           <span>|</span>
           <span>Salas: <strong id="metaRooms">0</strong></span>
+          <span>|</span>
+          <span>Eventos: <strong id="metaEvents">0</strong></span>
         </div>
 
-        <div class="topActions">
+        <div class="actions">
           <button class="btn btnGhost" id="toggleAutoBtn">Auto refresh: ON</button>
+          <button class="btn btnGhost" id="clearFeedBtn">Limpar feed</button>
           <button class="btn btnGhost" id="clearLogsBtn">Limpar logs</button>
-          <button class="btn btnPrimary" id="refreshBtn">Atualizar agora</button>
+          <button class="btn btnGold" id="refreshBtn">Atualizar agora</button>
         </div>
       </header>
 
-      <section class="grid">
-        <section class="card span-4">
-          <div class="cardInner">
-            <p class="sectionEyebrow">Saúde do servidor</p>
-            <h2 class="sectionTitle">Status do backend</h2>
-            <p class="sectionSub">
-              Monitoramento do Railway, disponibilidade geral, ambiente e sinal de vida do servidor.
-            </p>
+      <section class="layout">
+        <div class="stack">
+          <section class="card">
+            <div class="cardInner">
+              <p class="cardEyebrow">Saúde do servidor</p>
+              <h2 class="cardTitle">Status do backend</h2>
+              <p class="cardSub">
+                Verificação do Railway, uptime, ambiente, conectividade do Firebase e resposta do servidor.
+              </p>
 
-            <div class="healthBox" style="margin-top:16px;">
               <div class="healthMain">
-                <div class="healthStatus" id="healthStatusWrap">
-                  <span class="statusDot is-warn" id="healthDot"></span>
-                  <span id="healthStatusText">Conectando...</span>
+                <div class="statusWrap">
+                  <span class="statusDot warn" id="healthDot"></span>
+                  <div class="statusText" id="healthText">Conectando...</div>
                 </div>
-                <div id="healthNow" class="pulse" style="color:var(--muted); font-size:13px;">
-                  verificando...
-                </div>
+                <div class="statusTime" id="healthCheckedAt">aguardando resposta</div>
               </div>
 
-              <div class="healthMeta">
-                <div class="miniInfo">
-                  <b>Servidor</b>
-                  <span id="healthService">---</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Porta</b>
-                  <span id="healthPort">---</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Iniciado em</b>
-                  <span id="healthStartedAt">---</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Firebase</b>
-                  <span id="healthFirebase">---</span>
-                </div>
+              <div class="kvGrid">
+                <div class="kv"><b>Servidor</b><span id="healthService">---</span></div>
+                <div class="kv"><b>Porta</b><span id="healthPort">---</span></div>
+                <div class="kv"><b>Iniciado em</b><span id="healthStartedAt">---</span></div>
+                <div class="kv"><b>Firebase</b><span id="healthFirebase">---</span></div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
 
-        <section class="card span-8">
+          <section class="card">
+            <div class="cardInner">
+              <p class="cardEyebrow">Atividade detectada</p>
+              <h2 class="cardTitle">Feed de eventos</h2>
+              <p class="cardSub">
+                O painel compara snapshots das salas e registra entradas, saídas, vídeo, gravação e início ou fim de sessão.
+              </p>
+
+              <div class="feedBox" id="feedBox">
+                <div class="feedItem cyan">Aguardando atividade do servidor...</div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section class="card">
           <div class="cardInner">
-            <p class="sectionEyebrow">Visão geral</p>
-            <h2 class="sectionTitle">Métricas do painel</h2>
-            <p class="sectionSub">
-              Resumo das salas, jogadores ativos, sessões em andamento, vídeo ligado e gravação.
+            <p class="cardEyebrow">Leitura operacional</p>
+            <h2 class="cardTitle">Métricas em tempo real</h2>
+            <p class="cardSub">
+              Resumo global do backend e visão das salas registradas no endpoint do painel.
             </p>
 
-            <div class="statsRow" style="margin-top:16px;">
-              <div class="statCard">
+            <div class="stats">
+              <div class="stat">
                 <div class="statLabel">Salas ativas</div>
                 <div class="statValue" id="statRooms">0</div>
-                <div class="statHint">salas registradas no servidor</div>
+                <div class="statHint">salas detectadas agora</div>
               </div>
 
-              <div class="statCard">
+              <div class="stat">
                 <div class="statLabel">Jogadores online</div>
                 <div class="statValue" id="statPlayers">0</div>
-                <div class="statHint">total visível agora</div>
+                <div class="statHint">participantes visíveis</div>
               </div>
 
-              <div class="statCard">
+              <div class="stat">
                 <div class="statLabel">Sessões ativas</div>
                 <div class="statValue" id="statSessions">0</div>
                 <div class="statHint">rituais em andamento</div>
               </div>
 
-              <div class="statCard">
+              <div class="stat">
                 <div class="statLabel">Vídeo / gravação</div>
                 <div class="statValue" id="statMedia">0 / 0</div>
-                <div class="statHint">salas com vídeo / gravação</div>
+                <div class="statHint">salas com mídia ligada</div>
               </div>
             </div>
-          </div>
-        </section>
 
-        <section class="card span-7">
-          <div class="cardInner">
-            <p class="sectionEyebrow">Salas</p>
-            <h2 class="sectionTitle">Salas em tempo real</h2>
-            <p class="sectionSub">
-              Leitura completa do endpoint do servidor, com jogadores, host, sessão, vídeo e gravação.
-            </p>
+            <div class="barGrid">
+              <div class="barRow">
+                <div class="barHead">
+                  <span>Cobertura de sessão</span>
+                  <span id="barSessionLabel">0%</span>
+                </div>
+                <div class="bar"><div class="barFill" id="barSession"></div></div>
+              </div>
+
+              <div class="barRow">
+                <div class="barHead">
+                  <span>Cobertura de vídeo</span>
+                  <span id="barVideoLabel">0%</span>
+                </div>
+                <div class="bar"><div class="barFill" id="barVideo"></div></div>
+              </div>
+
+              <div class="barRow">
+                <div class="barHead">
+                  <span>Cobertura de gravação</span>
+                  <span id="barRecordingLabel">0%</span>
+                </div>
+                <div class="bar"><div class="barFill" id="barRecording"></div></div>
+              </div>
+            </div>
 
             <div class="toolbar">
-              <div class="searchWrap">
-                <input
-                  class="input"
-                  id="searchInput"
-                  type="text"
-                  placeholder="Buscar por nome da sala, código, host ou jogador..."
-                />
-              </div>
+              <input
+                class="input"
+                id="searchInput"
+                type="text"
+                placeholder="Buscar por sala, código, host ou jogador..."
+              />
             </div>
 
-            <div class="roomList" id="roomList" style="margin-top:16px;">
-              <div class="emptyState">Carregando salas...</div>
+            <div class="roomList" id="roomList">
+              <div class="empty">Carregando salas...</div>
             </div>
           </div>
         </section>
 
-        <section class="card span-5">
-          <div class="cardInner">
-            <p class="sectionEyebrow">Logs</p>
-            <h2 class="sectionTitle">Logs do servidor</h2>
-            <p class="sectionSub">
-              Se o backend expuser <code>/logs</code> ou <code>/logs/stream</code>, eles aparecem aqui em tempo real.
-            </p>
+        <div class="stack sideCol">
+          <section class="card">
+            <div class="cardInner">
+              <p class="cardEyebrow">Log stream</p>
+              <h2 class="cardTitle">Logs do servidor</h2>
+              <p class="cardSub">
+                Leitura do backend por <code>/logs</code> e <code>/logs/stream</code>, com fallback automático.
+              </p>
 
-            <div class="logsWrap" style="margin-top:16px;">
-              <div class="miniInfo">
+              <div class="kv" style="margin-top:16px;">
                 <b>Status do stream</b>
                 <span id="logStatus">Tentando conectar...</span>
               </div>
@@ -768,8 +823,8 @@
                 <div class="logLine">Aguardando logs do servidor...</div>
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </div>
       </section>
 
       <footer class="footer">
@@ -784,10 +839,14 @@
 
     const state = {
       autoRefresh: true,
+      refreshMs: 1000,
       health: null,
       rooms: [],
+      prevRoomsMap: new Map(),
       eventSource: null,
-      refreshTimer: null,
+      logLines: [],
+      events: [],
+      timer: null,
       lastUpdatedAt: null
     };
 
@@ -795,10 +854,11 @@
       metaEnv: document.getElementById("metaEnv"),
       metaUptime: document.getElementById("metaUptime"),
       metaRooms: document.getElementById("metaRooms"),
+      metaEvents: document.getElementById("metaEvents"),
 
       healthDot: document.getElementById("healthDot"),
-      healthStatusText: document.getElementById("healthStatusText"),
-      healthNow: document.getElementById("healthNow"),
+      healthText: document.getElementById("healthText"),
+      healthCheckedAt: document.getElementById("healthCheckedAt"),
       healthService: document.getElementById("healthService"),
       healthPort: document.getElementById("healthPort"),
       healthStartedAt: document.getElementById("healthStartedAt"),
@@ -809,15 +869,24 @@
       statSessions: document.getElementById("statSessions"),
       statMedia: document.getElementById("statMedia"),
 
+      barSession: document.getElementById("barSession"),
+      barSessionLabel: document.getElementById("barSessionLabel"),
+      barVideo: document.getElementById("barVideo"),
+      barVideoLabel: document.getElementById("barVideoLabel"),
+      barRecording: document.getElementById("barRecording"),
+      barRecordingLabel: document.getElementById("barRecordingLabel"),
+
       roomList: document.getElementById("roomList"),
       logsBox: document.getElementById("logsBox"),
       logStatus: document.getElementById("logStatus"),
+      feedBox: document.getElementById("feedBox"),
 
       footerServer: document.getElementById("footerServer"),
       footerUpdated: document.getElementById("footerUpdated"),
 
       refreshBtn: document.getElementById("refreshBtn"),
       toggleAutoBtn: document.getElementById("toggleAutoBtn"),
+      clearFeedBtn: document.getElementById("clearFeedBtn"),
       clearLogsBtn: document.getElementById("clearLogsBtn"),
       searchInput: document.getElementById("searchInput")
     };
@@ -840,7 +909,14 @@
       return d.toLocaleString("pt-BR");
     }
 
-    function formatRelativeUptime(sec) {
+    function formatTimeOnly(value) {
+      if (!value) return "---";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return "---";
+      return d.toLocaleTimeString("pt-BR");
+    }
+
+    function formatUptime(sec) {
       const total = Number(sec || 0);
       const d = Math.floor(total / 86400);
       const h = Math.floor((total % 86400) / 3600);
@@ -853,6 +929,11 @@
       return `${s}s`;
     }
 
+    function pct(value, total) {
+      if (!total) return 0;
+      return Math.max(0, Math.min(100, Math.round((value / total) * 100)));
+    }
+
     function initials(name) {
       const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
       if (!parts.length) return "??";
@@ -861,9 +942,7 @@
     }
 
     async function fetchJson(path) {
-      const res = await fetch(SERVER_BASE + path, {
-        cache: "no-store"
-      });
+      const res = await fetch(SERVER_BASE + path, { cache: "no-store" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data?.error || `HTTP_${res.status}`);
@@ -871,17 +950,17 @@
       return data;
     }
 
-    function setHealthStatus(kind, text) {
+    function setHealth(kind, text) {
       el.healthDot.className = `statusDot ${kind}`;
-      el.healthStatusText.textContent = text;
+      el.healthText.textContent = text;
     }
 
     function renderHealth(data) {
       state.health = data || null;
 
       if (!data || data.ok !== true) {
-        setHealthStatus("is-danger", "Servidor offline");
-        el.healthNow.textContent = "sem resposta";
+        setHealth("danger", "Servidor offline");
+        el.healthCheckedAt.textContent = "sem resposta";
         el.metaEnv.textContent = "---";
         el.metaUptime.textContent = "---";
         el.healthService.textContent = "---";
@@ -891,10 +970,10 @@
         return;
       }
 
-      setHealthStatus("is-ok", "Servidor online");
-      el.healthNow.textContent = `checado em ${new Date().toLocaleTimeString("pt-BR")}`;
+      setHealth("ok", "Servidor online");
+      el.healthCheckedAt.textContent = `checado em ${new Date().toLocaleTimeString("pt-BR")}`;
       el.metaEnv.textContent = data.environment || "production";
-      el.metaUptime.textContent = formatRelativeUptime(data.uptimeSec || 0);
+      el.metaUptime.textContent = formatUptime(data.uptimeSec || 0);
       el.healthService.textContent = data.service || "osl-video-server";
       el.healthPort.textContent = String(data.port || 3000);
       el.healthStartedAt.textContent = formatDate(data.startedAt);
@@ -909,83 +988,91 @@
       const activeRecording = rooms.filter(room => room.recordingActive).length;
 
       el.metaRooms.textContent = String(totalRooms);
+      el.metaEvents.textContent = String(state.events.length);
+
       el.statRooms.textContent = String(totalRooms);
       el.statPlayers.textContent = String(totalPlayers);
       el.statSessions.textContent = String(activeSessions);
       el.statMedia.textContent = `${activeVideo} / ${activeRecording}`;
+
+      const sessionPct = pct(activeSessions, totalRooms);
+      const videoPct = pct(activeVideo, totalRooms);
+      const recordingPct = pct(activeRecording, totalRooms);
+
+      el.barSession.style.width = `${sessionPct}%`;
+      el.barVideo.style.width = `${videoPct}%`;
+      el.barRecording.style.width = `${recordingPct}%`;
+
+      el.barSessionLabel.textContent = `${sessionPct}%`;
+      el.barVideoLabel.textContent = `${videoPct}%`;
+      el.barRecordingLabel.textContent = `${recordingPct}%`;
     }
 
-    function roomMatchesSearch(room, term) {
+    function roomMatches(room, term) {
       if (!term) return true;
       const q = term.toLowerCase();
-
-      const haystack = [
+      const hay = [
         room.name,
         room.roomId,
         room.host,
-        ...(room.players || []).map(p => p.playerName)
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return haystack.includes(q);
+        ...(room.players || []).map(p => p.playerName),
+        ...(room.players || []).map(p => p.playerId)
+      ].join(" ").toLowerCase();
+      return hay.includes(q);
     }
 
-    function renderRooms(rooms) {
+    function renderRooms(rooms, changedIds = new Set()) {
       const term = el.searchInput.value.trim().toLowerCase();
-      const filtered = rooms.filter(room => roomMatchesSearch(room, term));
+      const list = rooms.filter(room => roomMatches(room, term));
 
-      if (!filtered.length) {
+      if (!list.length) {
         el.roomList.innerHTML = `
-          <div class="emptyState">
+          <div class="empty">
             Nenhuma sala encontrada agora.<br>
-            O painel está online, mas ainda não recebeu atividade visível.
+            Se você entrou no jogo e nada aparece aqui, o frontend do jogo provavelmente ainda não está enviando os eventos para este backend do Railway.
           </div>
         `;
         return;
       }
 
-      el.roomList.innerHTML = filtered.map((room) => {
+      el.roomList.innerHTML = list.map(room => {
         const players = Array.isArray(room.players) ? room.players : [];
+        const changedClass = changedIds.has(room.roomId) ? "changed" : "";
 
         const badges = [
           room.sessionActive
-            ? '<span class="badge ok">sessão ativa</span>'
+            ? '<span class="badge badgeOk">sessão ativa</span>'
             : '<span class="badge">sessão parada</span>',
           room.videoActive
-            ? '<span class="badge warn">vídeo ligado</span>'
-            : '',
+            ? '<span class="badge badgeWarn">vídeo ativo</span>'
+            : '<span class="badge">vídeo off</span>',
           room.recordingActive
-            ? '<span class="badge danger">gravando</span>'
-            : '',
+            ? '<span class="badge badgeDanger">gravando</span>'
+            : '<span class="badge">sem gravação</span>',
           room.host
-            ? '<span class="badge gold">host definido</span>'
+            ? '<span class="badge badgeGold">host</span>'
             : ''
         ].filter(Boolean).join("");
 
-        const playerHtml = players.length
-          ? players.map((player) => `
-              <div class="playerItem">
+        const playersHtml = players.length
+          ? players.map(player => `
+              <div class="player">
                 <div class="playerLeft">
                   <div class="avatar">${escapeHtml(initials(player.playerName))}</div>
                   <div>
                     <div class="playerName">${escapeHtml(player.playerName || "Jogador")}</div>
-                    <div class="playerMeta">
-                      ID: ${escapeHtml(player.playerId || "---")}
-                    </div>
+                    <div class="playerMeta">ID: ${escapeHtml(player.playerId || "---")}</div>
                   </div>
                 </div>
-                <div class="playerMeta">
-                  online desde ${escapeHtml(formatDate(player.joinedAt))}
-                </div>
+                <div class="playerMeta">desde ${escapeHtml(formatDate(player.joinedAt))}</div>
               </div>
             `).join("")
-          : `<div class="emptyState">Nenhum jogador ativo nesta sala.</div>`;
+          : '<div class="empty">Nenhum jogador ativo nesta sala.</div>';
 
         return `
-          <article class="roomCard">
+          <article class="room ${changedClass}">
             <div class="roomHead">
-              <div class="roomHeadLeft">
+              <div>
                 <h3 class="roomName">${escapeHtml(room.name || "Sala sem nome")}</h3>
                 <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
               </div>
@@ -993,46 +1080,190 @@
             </div>
 
             <div class="roomBody">
-              <div class="roomMetaGrid">
-                <div class="miniInfo">
-                  <b>Host</b>
-                  <span>${escapeHtml(room.host || "Não definido")}</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Jogadores</b>
-                  <span>${escapeHtml(String(room.playerCount || 0))}</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Criada em</b>
-                  <span>${escapeHtml(formatDate(room.createdAt))}</span>
-                </div>
-                <div class="miniInfo">
-                  <b>Atualizada em</b>
-                  <span>${escapeHtml(formatDate(room.updatedAt))}</span>
-                </div>
+              <div class="roomMeta">
+                <div class="kv"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
+                <div class="kv"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
+                <div class="kv"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
+                <div class="kv"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
               </div>
 
-              <div class="playerList">
-                ${playerHtml}
-              </div>
+              <div class="players">${playersHtml}</div>
             </div>
           </article>
         `;
       }).join("");
     }
 
+    function addFeedItem(text, kind = "cyan") {
+      const item = {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+        text: String(text || "").trim(),
+        kind,
+        time: new Date().toISOString()
+      };
+
+      if (!item.text) return;
+
+      state.events.unshift(item);
+      state.events = state.events.slice(0, 160);
+      renderFeed();
+      el.metaEvents.textContent = String(state.events.length);
+    }
+
+    function renderFeed() {
+      if (!state.events.length) {
+        el.feedBox.innerHTML = `<div class="feedItem cyan">Nenhuma atividade detectada ainda.</div>`;
+        return;
+      }
+
+      el.feedBox.innerHTML = state.events.map(ev => `
+        <div class="feedItem ${escapeHtml(ev.kind)}">[${escapeHtml(formatTimeOnly(ev.time))}] ${escapeHtml(ev.text)}</div>
+      `).join("");
+    }
+
+    function normalizeRoomSnapshot(room) {
+      return {
+        roomId: String(room.roomId || ""),
+        name: String(room.name || ""),
+        host: String(room.host || ""),
+        sessionActive: !!room.sessionActive,
+        videoActive: !!room.videoActive,
+        recordingActive: !!room.recordingActive,
+        playerCount: Number(room.playerCount || 0),
+        players: Array.isArray(room.players)
+          ? room.players.map(p => ({
+              playerId: String(p.playerId || ""),
+              playerName: String(p.playerName || ""),
+              joinedAt: String(p.joinedAt || ""),
+              lastSeen: String(p.lastSeen || "")
+            }))
+          : []
+      };
+    }
+
+    function buildPlayerMap(room) {
+      const map = new Map();
+      (room.players || []).forEach(p => {
+        map.set(String(p.playerId || ""), p);
+      });
+      return map;
+    }
+
+    function detectRoomEvents(newRooms) {
+      const nextMap = new Map();
+      const changedIds = new Set();
+
+      newRooms.forEach(room => {
+        const snap = normalizeRoomSnapshot(room);
+        nextMap.set(snap.roomId, snap);
+
+        const prev = state.prevRoomsMap.get(snap.roomId);
+
+        if (!prev) {
+          changedIds.add(snap.roomId);
+          addFeedItem(`Sala detectada: ${snap.name || snap.roomId}`, "cyan");
+
+          if (snap.sessionActive) addFeedItem(`Sessão já ativa em ${snap.name || snap.roomId}`, "ok");
+          if (snap.videoActive) addFeedItem(`Vídeo ativo em ${snap.name || snap.roomId}`, "warn");
+          if (snap.recordingActive) addFeedItem(`Gravação ativa em ${snap.name || snap.roomId}`, "danger");
+          (snap.players || []).forEach(p => {
+            addFeedItem(`Jogador entrou em ${snap.name || snap.roomId}: ${p.playerName || p.playerId}`, "ok");
+          });
+          return;
+        }
+
+        let changed = false;
+
+        if (prev.sessionActive !== snap.sessionActive) {
+          addFeedItem(
+            `${snap.name || snap.roomId}: sessão ${snap.sessionActive ? "iniciada" : "encerrada"}`,
+            snap.sessionActive ? "ok" : "warn"
+          );
+          changed = true;
+        }
+
+        if (prev.videoActive !== snap.videoActive) {
+          addFeedItem(
+            `${snap.name || snap.roomId}: vídeo ${snap.videoActive ? "ativado" : "desligado"}`,
+            snap.videoActive ? "warn" : "cyan"
+          );
+          changed = true;
+        }
+
+        if (prev.recordingActive !== snap.recordingActive) {
+          addFeedItem(
+            `${snap.name || snap.roomId}: gravação ${snap.recordingActive ? "iniciada" : "encerrada"}`,
+            snap.recordingActive ? "danger" : "cyan"
+          );
+          changed = true;
+        }
+
+        const prevPlayers = buildPlayerMap(prev);
+        const nextPlayers = buildPlayerMap(snap);
+
+        for (const [id, player] of nextPlayers.entries()) {
+          if (!prevPlayers.has(id)) {
+            addFeedItem(
+              `Jogador entrou em ${snap.name || snap.roomId}: ${player.playerName || id}`,
+              "ok"
+            );
+            changed = true;
+          }
+        }
+
+        for (const [id, player] of prevPlayers.entries()) {
+          if (!nextPlayers.has(id)) {
+            addFeedItem(
+              `Jogador saiu de ${snap.name || snap.roomId}: ${player.playerName || id}`,
+              "danger"
+            );
+            changed = true;
+          }
+        }
+
+        if (
+          prev.playerCount !== snap.playerCount ||
+          prev.host !== snap.host ||
+          prev.name !== snap.name
+        ) {
+          changed = true;
+        }
+
+        if (changed) changedIds.add(snap.roomId);
+      });
+
+      for (const [roomId, oldRoom] of state.prevRoomsMap.entries()) {
+        if (!nextMap.has(roomId)) {
+          addFeedItem(`Sala removida: ${oldRoom.name || oldRoom.roomId}`, "danger");
+          changedIds.add(roomId);
+        }
+      }
+
+      state.prevRoomsMap = nextMap;
+      return changedIds;
+    }
+
     function addLogLine(text) {
       const line = String(text || "").trim();
       if (!line) return;
 
-      const div = document.createElement("div");
-      div.className = "logLine";
-      div.textContent = line;
-      el.logsBox.appendChild(div);
-
-      while (el.logsBox.children.length > 300) {
-        el.logsBox.removeChild(el.logsBox.firstChild);
+      state.logLines.push(line);
+      if (state.logLines.length > 300) {
+        state.logLines = state.logLines.slice(-300);
       }
+
+      renderLogs();
+    }
+
+    function renderLogs() {
+      if (!state.logLines.length) {
+        el.logsBox.innerHTML = `<div class="logLine">Sem logs disponíveis no momento.</div>`;
+        return;
+      }
+
+      el.logsBox.innerHTML = state.logLines.map(line => `
+        <div class="logLine">${escapeHtml(line)}</div>
+      `).join("");
 
       el.logsBox.scrollTop = el.logsBox.scrollHeight;
     }
@@ -1040,16 +1271,16 @@
     async function loadLogsSnapshot() {
       try {
         const data = await fetchJson("/logs");
-        if (!Array.isArray(data)) return;
-
-        el.logsBox.innerHTML = "";
-        data.filter(Boolean).slice(-120).forEach(addLogLine);
-
-        if (!el.logsBox.children.length) {
-          el.logsBox.innerHTML = `<div class="logLine">Sem logs disponíveis no momento.</div>`;
+        if (Array.isArray(data)) {
+          state.logLines = data.filter(Boolean).slice(-160);
+          renderLogs();
+          return;
         }
-      } catch (err) {
-        el.logsBox.innerHTML = `<div class="logLine">Não foi possível carregar /logs.</div>`;
+        state.logLines = [];
+        renderLogs();
+      } catch {
+        state.logLines = ["Não foi possível carregar /logs neste momento."];
+        renderLogs();
       }
     }
 
@@ -1061,14 +1292,13 @@
       try {
         const source = new EventSource(SERVER_BASE + "/logs/stream");
         state.eventSource = source;
-
         el.logStatus.textContent = "Conectado ao stream";
 
         source.addEventListener("bootstrap", (event) => {
           try {
             const lines = JSON.parse(event.data);
-            el.logsBox.innerHTML = "";
-            lines.forEach(addLogLine);
+            state.logLines = Array.isArray(lines) ? lines.slice(-160) : [];
+            renderLogs();
           } catch {}
         });
 
@@ -1077,10 +1307,10 @@
         });
 
         source.onerror = () => {
-          el.logStatus.textContent = "Stream indisponível, usando fallback";
+          el.logStatus.textContent = "Stream instável, mantendo fallback";
         };
-      } catch (err) {
-        el.logStatus.textContent = "Stream não disponível";
+      } catch {
+        el.logStatus.textContent = "Stream indisponível";
       }
     }
 
@@ -1094,61 +1324,67 @@
         renderHealth(health);
 
         const rooms = Array.isArray(roomsRes.rooms) ? roomsRes.rooms : [];
+        const changedIds = detectRoomEvents(rooms);
+
         state.rooms = rooms;
         computeStats(rooms);
-        renderRooms(rooms);
+        renderRooms(rooms, changedIds || new Set());
 
         state.lastUpdatedAt = new Date();
         el.footerUpdated.textContent = state.lastUpdatedAt.toLocaleString("pt-BR");
       } catch (err) {
         renderHealth(null);
         el.roomList.innerHTML = `
-          <div class="emptyState">
+          <div class="empty">
             Não foi possível carregar os dados do backend.<br>
-            Verifique se o Railway está online e se a URL do servidor está correta.
+            Verifique se o servidor do Railway está online e se a URL configurada está correta.
           </div>
         `;
         el.footerUpdated.textContent = "falha ao atualizar";
       }
     }
 
-    function startAutoRefresh() {
-      stopAutoRefresh();
-      state.refreshTimer = setInterval(() => {
+    function startLoop() {
+      stopLoop();
+      state.timer = setInterval(() => {
         if (state.autoRefresh) {
           refreshAll();
         }
-      }, 4000);
+      }, state.refreshMs);
     }
 
-    function stopAutoRefresh() {
-      if (state.refreshTimer) {
-        clearInterval(state.refreshTimer);
-        state.refreshTimer = null;
-      }
+    function stopLoop() {
+      if (state.timer) clearInterval(state.timer);
+      state.timer = null;
     }
 
-    el.refreshBtn.addEventListener("click", () => {
-      refreshAll();
-    });
+    el.refreshBtn.addEventListener("click", refreshAll);
 
     el.toggleAutoBtn.addEventListener("click", () => {
       state.autoRefresh = !state.autoRefresh;
       el.toggleAutoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
     });
 
+    el.clearFeedBtn.addEventListener("click", () => {
+      state.events = [];
+      renderFeed();
+      el.metaEvents.textContent = "0";
+    });
+
     el.clearLogsBtn.addEventListener("click", () => {
-      el.logsBox.innerHTML = `<div class="logLine">Logs limpos visualmente.</div>`;
+      state.logLines = [];
+      renderLogs();
     });
 
     el.searchInput.addEventListener("input", () => {
-      renderRooms(state.rooms || []);
+      renderRooms(state.rooms || [], new Set());
     });
 
+    renderFeed();
     refreshAll();
     loadLogsSnapshot();
     connectLogStream();
-    startAutoRefresh();
+    startLoop();
   </script>
 </body>
 </html>
