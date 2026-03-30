@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+  <title>Admin Server | O SextoLugar</title>
+
+  <style>
+    :root{
+      --bg:#060708;
+      --bg-2:#0b0d10;
+      --panel:#0f1318;
+      --panel-2:#131922;
+      --panel-3:#0d1117;
+      --line:rgba(255,255,255,.08);
+      --line-strong:rgba(230,192,123,.22);
+      --gold:#e6c07b;
+      --gold-2:#c99a4b;
+      --text:#eef2f7;
+      --muted:#97a0ad;
+      --ok:#6fda8b;
+      --warn:#ffcc66;
+      --danger:#ff6b6b;
+      --cyan:#7bd7ff;
+      --shadow:0 20px 60px rgba(0,0,0,.42);
+      --radius-xl:24px;
+      --radius-lg:18px;
+      --radius-md:14px;
+      --radius-sm:10px;
+    }
+
+    *{ box-sizing:border-box; }
+
+    html,body{
+      margin:0;
+      min-height:100%;
+      background:
+        radial-gradient(1200px 480px at 50% -10%, rgba(230,192,123,.08), transparent 55%),
+        radial-gradient(900px 420px at 0% 0%, rgba(123,215,255,.06), transparent 45%),
+        linear-gradient(180deg, var(--bg-2) 0%, var(--bg) 100%);
+      color:var(--text);
+      font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    }
+
+    body{
+      overflow-x:hidden;
+    }
+
+    body::before{
+      content:"";
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.015), transparent 20%, transparent 80%, rgba(255,255,255,.01)),
+        radial-gradient(circle at center, transparent 60%, rgba(0,0,0,.25) 100%);
+      opacity:.9;
+    }
+
+    .page{
+      position:relative;
+      z-index:1;
+      min-height:100vh;
+      padding:
+        max(14px, env(safe-area-inset-top))
+        max(14px, env(safe-area-inset-right))
+        max(18px, env(safe-area-inset-bottom))
+        max(14px, env(safe-area-inset-left));
+    }
+
+    .shell{
+      width:min(1600px, 100%);
+      margin:0 auto;
+      display:grid;
+      gap:14px;
+    }
+
+    .topbar{
+      display:grid;
+      grid-template-columns:auto 1fr auto;
+      gap:18px;
+      align-items:center;
+      padding:16px 18px;
+      border-radius:22px;
+      border:1px solid var(--line-strong);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015)),
+        linear-gradient(180deg, rgba(18,22,28,.94), rgba(12,16,22,.97));
+      box-shadow:var(--shadow);
+      position:relative;
+      overflow:hidden;
+    }
+
+    .topbar::after{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:linear-gradient(90deg, transparent, rgba(230,192,123,.08), transparent);
+      opacity:.45;
+    }
+
+    .brand{
+      min-width:0;
+    }
+
+    .eyebrow{
+      margin:0 0 5px;
+      font-size:11px;
+      letter-spacing:.24em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+
+    .title{
+      margin:0;
+      font-size:clamp(28px, 4vw, 42px);
+      line-height:1;
+      letter-spacing:-.04em;
+      color:#f6efe4;
+      font-weight:800;
+      font-family:Georgia,"Times New Roman",serif;
+    }
+
+    .topMeta{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:14px;
+      flex-wrap:wrap;
+      color:#d8e0ea;
+      font-size:14px;
+    }
+
+    .topMeta strong{
+      color:var(--gold);
+      font-weight:800;
+    }
+
+    .topActions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+
+    .btn{
+      appearance:none;
+      border:none;
+      cursor:pointer;
+      min-height:42px;
+      padding:10px 14px;
+      border-radius:12px;
+      font:inherit;
+      font-weight:700;
+      transition:transform .12s ease, opacity .15s ease, background .15s ease, border-color .15s ease;
+    }
+
+    .btn:hover{ transform:translateY(-1px); }
+    .btn:active{ transform:translateY(0); opacity:.95; }
+
+    .btnPrimary{
+      color:#1a140d;
+      background:linear-gradient(180deg, #e7c58a, #c99a4b);
+      box-shadow:0 0 24px rgba(230,192,123,.14);
+    }
+
+    .btnGhost{
+      color:#f3f6fb;
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.10);
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns:repeat(12, minmax(0,1fr));
+      gap:14px;
+    }
+
+    .card{
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.015)),
+        linear-gradient(180deg, rgba(18,23,30,.96), rgba(12,16,22,.98));
+      border:1px solid var(--line);
+      border-radius:22px;
+      box-shadow:var(--shadow);
+      overflow:hidden;
+      min-width:0;
+      position:relative;
+    }
+
+    .card::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:radial-gradient(600px 180px at 50% 0%, rgba(230,192,123,.07), transparent 62%);
+      opacity:.7;
+    }
+
+    .cardInner{
+      position:relative;
+      z-index:1;
+      padding:18px;
+    }
+
+    .sectionEyebrow{
+      margin:0 0 10px;
+      font-size:11px;
+      letter-spacing:.22em;
+      text-transform:uppercase;
+      color:var(--gold);
+    }
+
+    .sectionTitle{
+      margin:0;
+      font-size:clamp(22px, 3vw, 32px);
+      line-height:1.05;
+      letter-spacing:-.03em;
+      color:#f4efe7;
+      font-family:Georgia,"Times New Roman",serif;
+    }
+
+    .sectionSub{
+      margin:8px 0 0;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.55;
+    }
+
+    .span-3{ grid-column:span 3; }
+    .span-4{ grid-column:span 4; }
+    .span-5{ grid-column:span 5; }
+    .span-6{ grid-column:span 6; }
+    .span-7{ grid-column:span 7; }
+    .span-8{ grid-column:span 8; }
+    .span-12{ grid-column:span 12; }
+
+    .statsRow{
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:14px;
+    }
+
+    .statCard{
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:16px;
+      padding:16px;
+      background:rgba(255,255,255,.025);
+    }
+
+    .statLabel{
+      font-size:11px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin-bottom:8px;
+    }
+
+    .statValue{
+      font-size:clamp(24px, 3vw, 36px);
+      line-height:1;
+      font-weight:800;
+      color:#f4efe7;
+      letter-spacing:-.04em;
+    }
+
+    .statHint{
+      margin-top:8px;
+      font-size:12px;
+      color:var(--muted);
+    }
+
+    .healthBox{
+      display:grid;
+      gap:14px;
+    }
+
+    .healthMain{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+      flex-wrap:wrap;
+      padding:14px 16px;
+      border-radius:16px;
+      border:1px solid rgba(255,255,255,.08);
+      background:rgba(255,255,255,.02);
+    }
+
+    .healthStatus{
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      font-size:13px;
+    }
+
+    .statusDot{
+      width:10px;
+      height:10px;
+      border-radius:50%;
+      flex:0 0 auto;
+      box-shadow:0 0 16px currentColor;
+    }
+
+    .is-ok{ color:var(--ok); }
+    .is-warn{ color:var(--warn); }
+    .is-danger{ color:var(--danger); }
+
+    .healthMeta{
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0,1fr));
+      gap:10px;
+    }
+
+    .miniInfo{
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.06);
+      background:rgba(255,255,255,.02);
+    }
+
+    .miniInfo b{
+      display:block;
+      font-size:11px;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+      color:var(--muted);
+      margin-bottom:7px;
+    }
+
+    .miniInfo span{
+      color:#edf2f7;
+      font-size:14px;
+      word-break:break-word;
+    }
+
+    .toolbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+      margin-top:14px;
+    }
+
+    .searchWrap{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      width:100%;
+    }
+
+    .input{
+      width:100%;
+      min-height:44px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(0,0,0,.20);
+      color:var(--text);
+      padding:11px 13px;
+      outline:none;
+      font:inherit;
+    }
+
+    .input::placeholder{
+      color:rgba(255,255,255,.34);
+    }
+
+    .roomList{
+      display:grid;
+      gap:12px;
+      align-content:start;
+    }
+
+    .roomCard{
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:18px;
+      background:rgba(255,255,255,.025);
+      overflow:hidden;
+    }
+
+    .roomHead{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      padding:16px 16px 12px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+      background:rgba(255,255,255,.015);
+    }
+
+    .roomHeadLeft{
+      min-width:0;
+    }
+
+    .roomName{
+      margin:0 0 6px;
+      font-size:22px;
+      line-height:1.1;
+      color:#f7efe3;
+      font-weight:800;
+      letter-spacing:-.03em;
+      font-family:Georgia,"Times New Roman",serif;
+    }
+
+    .roomCode{
+      color:var(--muted);
+      font-size:13px;
+      letter-spacing:.10em;
+      text-transform:uppercase;
+      word-break:break-word;
+    }
+
+    .badges{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-height:30px;
+      padding:0 10px;
+      border-radius:999px;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.04);
+      color:#eef2f7;
+    }
+
+    .badge.gold{
+      color:#1a140d;
+      background:linear-gradient(180deg, #e7c58a, #c99a4b);
+      border-color:transparent;
+    }
+
+    .badge.ok{
+      color:#e8fff0;
+      background:rgba(111,218,139,.12);
+      border-color:rgba(111,218,139,.24);
+    }
+
+    .badge.warn{
+      color:#fff7db;
+      background:rgba(255,204,102,.12);
+      border-color:rgba(255,204,102,.24);
+    }
+
+    .badge.danger{
+      color:#ffe7e7;
+      background:rgba(255,107,107,.12);
+      border-color:rgba(255,107,107,.24);
+    }
+
+    .roomBody{
+      padding:14px 16px 16px;
+      display:grid;
+      gap:14px;
+    }
+
+    .roomMetaGrid{
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:10px;
+    }
+
+    .playerList{
+      display:grid;
+      gap:10px;
+    }
+
+    .playerItem{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.06);
+      background:rgba(255,255,255,.02);
+    }
+
+    .playerLeft{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+    }
+
+    .avatar{
+      width:40px;
+      height:40px;
+      border-radius:12px;
+      display:grid;
+      place-items:center;
+      background:linear-gradient(180deg, #6e5832, #2e2417);
+      border:1px solid rgba(230,192,123,.32);
+      color:#fff;
+      font-weight:800;
+      flex:0 0 auto;
+    }
+
+    .playerName{
+      font-size:15px;
+      font-weight:800;
+      color:#f3ede5;
+    }
+
+    .playerMeta{
+      font-size:12px;
+      color:var(--muted);
+      margin-top:3px;
+    }
+
+    .emptyState{
+      padding:18px;
+      border-radius:16px;
+      border:1px dashed rgba(255,255,255,.10);
+      background:rgba(255,255,255,.015);
+      color:var(--muted);
+      text-align:center;
+      line-height:1.65;
+    }
+
+    .logsWrap{
+      display:grid;
+      gap:12px;
+    }
+
+    .logsBox{
+      min-height:420px;
+      max-height:65vh;
+      overflow:auto;
+      border-radius:18px;
+      border:1px solid rgba(255,255,255,.08);
+      background:
+        linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.26));
+      padding:14px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:12px;
+      line-height:1.55;
+      color:#d7dde6;
+    }
+
+    .logLine{
+      padding:8px 10px;
+      border-radius:12px;
+      background:rgba(255,255,255,.02);
+      border-left:2px solid rgba(230,192,123,.25);
+      margin-bottom:8px;
+      word-break:break-word;
+      white-space:pre-wrap;
+    }
+
+    .footer{
+      padding:4px 4px 0;
+      color:var(--muted);
+      font-size:12px;
+      letter-spacing:.06em;
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+
+    .pulse{
+      animation:pulse 1.4s ease-in-out infinite;
+    }
+
+    @keyframes pulse{
+      0%,100%{ opacity:1; }
+      50%{ opacity:.55; }
+    }
+
+    @media (max-width:1200px){
+      .span-3,.span-4,.span-5,.span-6,.span-7,.span-8{
+        grid-column:span 12;
+      }
+
+      .statsRow{
+        grid-template-columns:repeat(2, minmax(0,1fr));
+      }
+    }
+
+    @media (max-width:780px){
+      .topbar{
+        grid-template-columns:1fr;
+      }
+
+      .topMeta{
+        justify-content:flex-start;
+      }
+
+      .topActions{
+        justify-content:flex-start;
+      }
+
+      .statsRow,
+      .healthMeta,
+      .roomMetaGrid{
+        grid-template-columns:1fr;
+      }
+
+      .footer{
+        flex-direction:column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow">Painel administrativo · servidor em tempo real</p>
+          <h1 class="title">O SextoLugar Server</h1>
+        </div>
+
+        <div class="topMeta">
+          <span>Ambiente: <strong id="metaEnv">---</strong></span>
+          <span>|</span>
+          <span>Uptime: <strong id="metaUptime">---</strong></span>
+          <span>|</span>
+          <span>Salas: <strong id="metaRooms">0</strong></span>
+        </div>
+
+        <div class="topActions">
+          <button class="btn btnGhost" id="toggleAutoBtn">Auto refresh: ON</button>
+          <button class="btn btnGhost" id="clearLogsBtn">Limpar logs</button>
+          <button class="btn btnPrimary" id="refreshBtn">Atualizar agora</button>
+        </div>
+      </header>
+
+      <section class="grid">
+        <section class="card span-4">
+          <div class="cardInner">
+            <p class="sectionEyebrow">Saúde do servidor</p>
+            <h2 class="sectionTitle">Status do backend</h2>
+            <p class="sectionSub">
+              Monitoramento do Railway, disponibilidade geral, ambiente e sinal de vida do servidor.
+            </p>
+
+            <div class="healthBox" style="margin-top:16px;">
+              <div class="healthMain">
+                <div class="healthStatus" id="healthStatusWrap">
+                  <span class="statusDot is-warn" id="healthDot"></span>
+                  <span id="healthStatusText">Conectando...</span>
+                </div>
+                <div id="healthNow" class="pulse" style="color:var(--muted); font-size:13px;">
+                  verificando...
+                </div>
+              </div>
+
+              <div class="healthMeta">
+                <div class="miniInfo">
+                  <b>Servidor</b>
+                  <span id="healthService">---</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Porta</b>
+                  <span id="healthPort">---</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Iniciado em</b>
+                  <span id="healthStartedAt">---</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Firebase</b>
+                  <span id="healthFirebase">---</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card span-8">
+          <div class="cardInner">
+            <p class="sectionEyebrow">Visão geral</p>
+            <h2 class="sectionTitle">Métricas do painel</h2>
+            <p class="sectionSub">
+              Resumo das salas, jogadores ativos, sessões em andamento, vídeo ligado e gravação.
+            </p>
+
+            <div class="statsRow" style="margin-top:16px;">
+              <div class="statCard">
+                <div class="statLabel">Salas ativas</div>
+                <div class="statValue" id="statRooms">0</div>
+                <div class="statHint">salas registradas no servidor</div>
+              </div>
+
+              <div class="statCard">
+                <div class="statLabel">Jogadores online</div>
+                <div class="statValue" id="statPlayers">0</div>
+                <div class="statHint">total visível agora</div>
+              </div>
+
+              <div class="statCard">
+                <div class="statLabel">Sessões ativas</div>
+                <div class="statValue" id="statSessions">0</div>
+                <div class="statHint">rituais em andamento</div>
+              </div>
+
+              <div class="statCard">
+                <div class="statLabel">Vídeo / gravação</div>
+                <div class="statValue" id="statMedia">0 / 0</div>
+                <div class="statHint">salas com vídeo / gravação</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card span-7">
+          <div class="cardInner">
+            <p class="sectionEyebrow">Salas</p>
+            <h2 class="sectionTitle">Salas em tempo real</h2>
+            <p class="sectionSub">
+              Leitura completa do endpoint do servidor, com jogadores, host, sessão, vídeo e gravação.
+            </p>
+
+            <div class="toolbar">
+              <div class="searchWrap">
+                <input
+                  class="input"
+                  id="searchInput"
+                  type="text"
+                  placeholder="Buscar por nome da sala, código, host ou jogador..."
+                />
+              </div>
+            </div>
+
+            <div class="roomList" id="roomList" style="margin-top:16px;">
+              <div class="emptyState">Carregando salas...</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card span-5">
+          <div class="cardInner">
+            <p class="sectionEyebrow">Logs</p>
+            <h2 class="sectionTitle">Logs do servidor</h2>
+            <p class="sectionSub">
+              Se o backend expuser <code>/logs</code> ou <code>/logs/stream</code>, eles aparecem aqui em tempo real.
+            </p>
+
+            <div class="logsWrap" style="margin-top:16px;">
+              <div class="miniInfo">
+                <b>Status do stream</b>
+                <span id="logStatus">Tentando conectar...</span>
+              </div>
+
+              <div class="logsBox" id="logsBox">
+                <div class="logLine">Aguardando logs do servidor...</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <footer class="footer">
+        <div>Servidor alvo: <strong id="footerServer">---</strong></div>
+        <div>Última atualização: <strong id="footerUpdated">---</strong></div>
+      </footer>
+    </div>
+  </main>
+
+  <script>
+    const SERVER_BASE = "https://osl-video-server-production.up.railway.app";
+
+    const state = {
+      autoRefresh: true,
+      health: null,
+      rooms: [],
+      eventSource: null,
+      refreshTimer: null,
+      lastUpdatedAt: null
+    };
+
+    const el = {
+      metaEnv: document.getElementById("metaEnv"),
+      metaUptime: document.getElementById("metaUptime"),
+      metaRooms: document.getElementById("metaRooms"),
+
+      healthDot: document.getElementById("healthDot"),
+      healthStatusText: document.getElementById("healthStatusText"),
+      healthNow: document.getElementById("healthNow"),
+      healthService: document.getElementById("healthService"),
+      healthPort: document.getElementById("healthPort"),
+      healthStartedAt: document.getElementById("healthStartedAt"),
+      healthFirebase: document.getElementById("healthFirebase"),
+
+      statRooms: document.getElementById("statRooms"),
+      statPlayers: document.getElementById("statPlayers"),
+      statSessions: document.getElementById("statSessions"),
+      statMedia: document.getElementById("statMedia"),
+
+      roomList: document.getElementById("roomList"),
+      logsBox: document.getElementById("logsBox"),
+      logStatus: document.getElementById("logStatus"),
+
+      footerServer: document.getElementById("footerServer"),
+      footerUpdated: document.getElementById("footerUpdated"),
+
+      refreshBtn: document.getElementById("refreshBtn"),
+      toggleAutoBtn: document.getElementById("toggleAutoBtn"),
+      clearLogsBtn: document.getElementById("clearLogsBtn"),
+      searchInput: document.getElementById("searchInput")
+    };
+
+    el.footerServer.textContent = SERVER_BASE;
+
+    function escapeHtml(str) {
+      return String(str ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function formatDate(value) {
+      if (!value) return "---";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleString("pt-BR");
+    }
+
+    function formatRelativeUptime(sec) {
+      const total = Number(sec || 0);
+      const d = Math.floor(total / 86400);
+      const h = Math.floor((total % 86400) / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = Math.floor(total % 60);
+
+      if (d > 0) return `${d}d ${h}h ${m}m`;
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    function initials(name) {
+      const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+      if (!parts.length) return "??";
+      if (parts.length === 1) return parts[0].slice(0,2).toUpperCase();
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(SERVER_BASE + path, {
+        cache: "no-store"
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || `HTTP_${res.status}`);
+      }
+      return data;
+    }
+
+    function setHealthStatus(kind, text) {
+      el.healthDot.className = `statusDot ${kind}`;
+      el.healthStatusText.textContent = text;
+    }
+
+    function renderHealth(data) {
+      state.health = data || null;
+
+      if (!data || data.ok !== true) {
+        setHealthStatus("is-danger", "Servidor offline");
+        el.healthNow.textContent = "sem resposta";
+        el.metaEnv.textContent = "---";
+        el.metaUptime.textContent = "---";
+        el.healthService.textContent = "---";
+        el.healthPort.textContent = "---";
+        el.healthStartedAt.textContent = "---";
+        el.healthFirebase.textContent = "---";
+        return;
+      }
+
+      setHealthStatus("is-ok", "Servidor online");
+      el.healthNow.textContent = `checado em ${new Date().toLocaleTimeString("pt-BR")}`;
+      el.metaEnv.textContent = data.environment || "production";
+      el.metaUptime.textContent = formatRelativeUptime(data.uptimeSec || 0);
+      el.healthService.textContent = data.service || "osl-video-server";
+      el.healthPort.textContent = String(data.port || 3000);
+      el.healthStartedAt.textContent = formatDate(data.startedAt);
+      el.healthFirebase.textContent = data.firebaseConfigured ? "Conectado" : "Não configurado";
+    }
+
+    function computeStats(rooms) {
+      const totalRooms = rooms.length;
+      const totalPlayers = rooms.reduce((acc, room) => acc + Number(room.playerCount || 0), 0);
+      const activeSessions = rooms.filter(room => room.sessionActive).length;
+      const activeVideo = rooms.filter(room => room.videoActive).length;
+      const activeRecording = rooms.filter(room => room.recordingActive).length;
+
+      el.metaRooms.textContent = String(totalRooms);
+      el.statRooms.textContent = String(totalRooms);
+      el.statPlayers.textContent = String(totalPlayers);
+      el.statSessions.textContent = String(activeSessions);
+      el.statMedia.textContent = `${activeVideo} / ${activeRecording}`;
+    }
+
+    function roomMatchesSearch(room, term) {
+      if (!term) return true;
+      const q = term.toLowerCase();
+
+      const haystack = [
+        room.name,
+        room.roomId,
+        room.host,
+        ...(room.players || []).map(p => p.playerName)
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(q);
+    }
+
+    function renderRooms(rooms) {
+      const term = el.searchInput.value.trim().toLowerCase();
+      const filtered = rooms.filter(room => roomMatchesSearch(room, term));
+
+      if (!filtered.length) {
+        el.roomList.innerHTML = `
+          <div class="emptyState">
+            Nenhuma sala encontrada agora.<br>
+            O painel está online, mas ainda não recebeu atividade visível.
+          </div>
+        `;
+        return;
+      }
+
+      el.roomList.innerHTML = filtered.map((room) => {
+        const players = Array.isArray(room.players) ? room.players : [];
+
+        const badges = [
+          room.sessionActive
+            ? '<span class="badge ok">sessão ativa</span>'
+            : '<span class="badge">sessão parada</span>',
+          room.videoActive
+            ? '<span class="badge warn">vídeo ligado</span>'
+            : '',
+          room.recordingActive
+            ? '<span class="badge danger">gravando</span>'
+            : '',
+          room.host
+            ? '<span class="badge gold">host definido</span>'
+            : ''
+        ].filter(Boolean).join("");
+
+        const playerHtml = players.length
+          ? players.map((player) => `
+              <div class="playerItem">
+                <div class="playerLeft">
+                  <div class="avatar">${escapeHtml(initials(player.playerName))}</div>
+                  <div>
+                    <div class="playerName">${escapeHtml(player.playerName || "Jogador")}</div>
+                    <div class="playerMeta">
+                      ID: ${escapeHtml(player.playerId || "---")}
+                    </div>
+                  </div>
+                </div>
+                <div class="playerMeta">
+                  online desde ${escapeHtml(formatDate(player.joinedAt))}
+                </div>
+              </div>
+            `).join("")
+          : `<div class="emptyState">Nenhum jogador ativo nesta sala.</div>`;
+
+        return `
+          <article class="roomCard">
+            <div class="roomHead">
+              <div class="roomHeadLeft">
+                <h3 class="roomName">${escapeHtml(room.name || "Sala sem nome")}</h3>
+                <div class="roomCode">${escapeHtml(room.roomId || "---")}</div>
+              </div>
+              <div class="badges">${badges}</div>
+            </div>
+
+            <div class="roomBody">
+              <div class="roomMetaGrid">
+                <div class="miniInfo">
+                  <b>Host</b>
+                  <span>${escapeHtml(room.host || "Não definido")}</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Jogadores</b>
+                  <span>${escapeHtml(String(room.playerCount || 0))}</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Criada em</b>
+                  <span>${escapeHtml(formatDate(room.createdAt))}</span>
+                </div>
+                <div class="miniInfo">
+                  <b>Atualizada em</b>
+                  <span>${escapeHtml(formatDate(room.updatedAt))}</span>
+                </div>
+              </div>
+
+              <div class="playerList">
+                ${playerHtml}
+              </div>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function addLogLine(text) {
+      const line = String(text || "").trim();
+      if (!line) return;
+
+      const div = document.createElement("div");
+      div.className = "logLine";
+      div.textContent = line;
+      el.logsBox.appendChild(div);
+
+      while (el.logsBox.children.length > 300) {
+        el.logsBox.removeChild(el.logsBox.firstChild);
+      }
+
+      el.logsBox.scrollTop = el.logsBox.scrollHeight;
+    }
+
+    async function loadLogsSnapshot() {
+      try {
+        const data = await fetchJson("/logs");
+        if (!Array.isArray(data)) return;
+
+        el.logsBox.innerHTML = "";
+        data.filter(Boolean).slice(-120).forEach(addLogLine);
+
+        if (!el.logsBox.children.length) {
+          el.logsBox.innerHTML = `<div class="logLine">Sem logs disponíveis no momento.</div>`;
+        }
+      } catch (err) {
+        el.logsBox.innerHTML = `<div class="logLine">Não foi possível carregar /logs.</div>`;
+      }
+    }
+
+    function connectLogStream() {
+      if (state.eventSource) {
+        state.eventSource.close();
+      }
+
+      try {
+        const source = new EventSource(SERVER_BASE + "/logs/stream");
+        state.eventSource = source;
+
+        el.logStatus.textContent = "Conectado ao stream";
+
+        source.addEventListener("bootstrap", (event) => {
+          try {
+            const lines = JSON.parse(event.data);
+            el.logsBox.innerHTML = "";
+            lines.forEach(addLogLine);
+          } catch {}
+        });
+
+        source.addEventListener("log", (event) => {
+          addLogLine(event.data);
+        });
+
+        source.onerror = () => {
+          el.logStatus.textContent = "Stream indisponível, usando fallback";
+        };
+      } catch (err) {
+        el.logStatus.textContent = "Stream não disponível";
+      }
+    }
+
+    async function refreshAll() {
+      try {
+        const [health, roomsRes] = await Promise.all([
+          fetchJson("/health"),
+          fetchJson("/game/rooms")
+        ]);
+
+        renderHealth(health);
+
+        const rooms = Array.isArray(roomsRes.rooms) ? roomsRes.rooms : [];
+        state.rooms = rooms;
+        computeStats(rooms);
+        renderRooms(rooms);
+
+        state.lastUpdatedAt = new Date();
+        el.footerUpdated.textContent = state.lastUpdatedAt.toLocaleString("pt-BR");
+      } catch (err) {
+        renderHealth(null);
+        el.roomList.innerHTML = `
+          <div class="emptyState">
+            Não foi possível carregar os dados do backend.<br>
+            Verifique se o Railway está online e se a URL do servidor está correta.
+          </div>
+        `;
+        el.footerUpdated.textContent = "falha ao atualizar";
+      }
+    }
+
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      state.refreshTimer = setInterval(() => {
+        if (state.autoRefresh) {
+          refreshAll();
+        }
+      }, 4000);
+    }
+
+    function stopAutoRefresh() {
+      if (state.refreshTimer) {
+        clearInterval(state.refreshTimer);
+        state.refreshTimer = null;
+      }
+    }
+
+    el.refreshBtn.addEventListener("click", () => {
+      refreshAll();
+    });
+
+    el.toggleAutoBtn.addEventListener("click", () => {
+      state.autoRefresh = !state.autoRefresh;
+      el.toggleAutoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
+    });
+
+    el.clearLogsBtn.addEventListener("click", () => {
+      el.logsBox.innerHTML = `<div class="logLine">Logs limpos visualmente.</div>`;
+    });
+
+    el.searchInput.addEventListener("input", () => {
+      renderRooms(state.rooms || []);
+    });
+
+    refreshAll();
+    loadLogsSnapshot();
+    connectLogStream();
+    startAutoRefresh();
+  </script>
+</body>
+</html>
