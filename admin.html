@@ -2,32 +2,30 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>OSL // SYSTEM CORE</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 
   <style>
     :root{
       --bg:#020504;
-      --bg-2:#04110d;
-      --bg-3:#071a13;
-      --panel:#07110e;
-      --panel-2:#0a1713;
-      --panel-3:#0c1f18;
+      --bg2:#03110c;
+      --bg3:#072117;
+      --panel:#071410;
+      --panel-soft:#0a1b15;
       --line:rgba(0,255,156,.12);
       --line-2:rgba(0,255,156,.22);
-      --line-3:rgba(0,255,156,.38);
-      --text:#d7fff1;
-      --muted:#7eb9a7;
+      --line-3:rgba(0,255,156,.34);
+      --text:#e7fff7;
+      --muted:#8ab8aa;
       --green:#00ff9c;
-      --green-2:#00d987;
-      --green-soft:rgba(0,255,156,.08);
+      --green2:#00d985;
       --danger:#ff6b6b;
       --warn:#ffd166;
-      --radius-xl:24px;
-      --radius-lg:18px;
-      --radius-md:14px;
-      --radius-sm:12px;
-      --shadow:0 20px 70px rgba(0,0,0,.45);
+      --radius-xl:26px;
+      --radius-lg:22px;
+      --radius-md:18px;
+      --radius-sm:14px;
+      --shadow:0 18px 70px rgba(0,0,0,.42);
       --glow:0 0 18px rgba(0,255,156,.14);
     }
 
@@ -37,12 +35,12 @@
       margin:0;
       min-height:100%;
       background:
-        radial-gradient(circle at 10% 10%, rgba(0,255,156,.08), transparent 28%),
-        radial-gradient(circle at 90% 0%, rgba(0,180,120,.10), transparent 24%),
-        radial-gradient(circle at 50% 100%, rgba(0,255,156,.06), transparent 30%),
-        linear-gradient(180deg, var(--bg-3) 0%, var(--bg-2) 32%, var(--bg) 100%);
+        radial-gradient(circle at 20% 20%, rgba(0,255,156,.08), transparent 35%),
+        radial-gradient(circle at 80% 0%, rgba(0,150,90,.10), transparent 35%),
+        radial-gradient(circle at 50% 100%, rgba(0,255,156,.05), transparent 30%),
+        linear-gradient(180deg, var(--bg3) 0%, var(--bg2) 38%, var(--bg) 100%);
       color:var(--text);
-      font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       overflow-x:hidden;
     }
 
@@ -54,8 +52,8 @@
       background:
         linear-gradient(rgba(0,255,156,.018) 1px, transparent 1px),
         linear-gradient(90deg, rgba(0,255,156,.018) 1px, transparent 1px);
-      background-size:30px 30px;
-      opacity:.22;
+      background-size:32px 32px;
+      opacity:.16;
     }
 
     body::after{
@@ -63,9 +61,8 @@
       position:fixed;
       inset:0;
       pointer-events:none;
-      background:
-        radial-gradient(circle at center, transparent 55%, rgba(0,0,0,.46) 100%);
-      opacity:.8;
+      background:radial-gradient(circle at center, transparent 58%, rgba(0,0,0,.38) 100%);
+      opacity:.9;
     }
 
     .page{
@@ -75,12 +72,12 @@
       padding:
         max(12px, env(safe-area-inset-top))
         max(12px, env(safe-area-inset-right))
-        max(14px, env(safe-area-inset-bottom))
+        max(12px, env(safe-area-inset-bottom))
         max(12px, env(safe-area-inset-left));
     }
 
     .shell{
-      width:min(1680px, 100%);
+      width:min(1620px, 100%);
       margin:0 auto;
       display:grid;
       gap:14px;
@@ -89,16 +86,17 @@
     .topbar{
       display:grid;
       grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto;
-      gap:16px;
       align-items:center;
+      gap:16px;
+      min-height:110px;
       padding:18px 20px;
       border:1px solid var(--line-3);
-      border-radius:26px;
+      border-radius:28px;
       background:
-        linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.008)),
-        radial-gradient(circle at 50% 0%, rgba(0,255,156,.10), transparent 55%),
-        linear-gradient(180deg, rgba(10,26,20,.92), rgba(5,14,11,.96));
-      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.02);
+        linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.008)),
+        radial-gradient(circle at 50% 0%, rgba(0,255,156,.12), transparent 58%),
+        linear-gradient(180deg, rgba(8,26,19,.92), rgba(4,12,9,.97));
+      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.015);
       overflow:hidden;
       position:relative;
     }
@@ -108,11 +106,10 @@
       position:absolute;
       inset:0;
       pointer-events:none;
-      background:linear-gradient(90deg, transparent, rgba(0,255,156,.12), transparent);
-      opacity:.35;
+      background:linear-gradient(90deg, transparent, rgba(0,255,156,.10), transparent);
+      opacity:.32;
     }
 
-    .brand{ min-width:0; }
     .eyebrow{
       margin:0 0 8px;
       font-size:11px;
@@ -123,26 +120,26 @@
 
     .title{
       margin:0;
-      font-size:clamp(30px, 4vw, 64px);
-      line-height:.94;
-      letter-spacing:-.05em;
-      color:#eefff8;
-      text-shadow:0 0 20px rgba(0,255,156,.10);
+      line-height:.88;
+      letter-spacing:-.06em;
+      font-size:clamp(42px, 5vw, 74px);
+      color:#f2fff9;
+      text-shadow:0 0 18px rgba(0,255,156,.10);
     }
 
     .meta{
       display:flex;
-      align-items:center;
       justify-content:center;
-      gap:14px;
+      align-items:center;
       flex-wrap:wrap;
-      color:#c8f9e7;
-      font-size:14px;
+      gap:12px;
+      font-size:15px;
+      color:#d9fff0;
     }
 
     .meta strong{
       color:var(--green);
-      text-shadow:0 0 8px rgba(0,255,156,.24);
+      text-shadow:0 0 10px rgba(0,255,156,.24);
     }
 
     .topActions{
@@ -156,21 +153,22 @@
       appearance:none;
       border:none;
       cursor:pointer;
-      min-height:48px;
-      padding:12px 16px;
-      border-radius:14px;
+      min-height:52px;
+      padding:12px 18px;
+      border-radius:16px;
       font:inherit;
+      font-size:14px;
       font-weight:800;
       color:var(--text);
       background:rgba(255,255,255,.03);
       border:1px solid var(--line-2);
-      transition:transform .12s ease, border-color .15s ease, background .15s ease, opacity .15s ease;
+      transition:transform .12s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
     }
 
     .btn:hover{
       transform:translateY(-1px);
-      border-color:var(--line-3);
       background:rgba(255,255,255,.05);
+      border-color:var(--line-3);
     }
 
     .btn:active{
@@ -179,54 +177,27 @@
     }
 
     .btnPrimary{
-      background:linear-gradient(180deg, #00ff9c, #00cb7c);
+      background:linear-gradient(180deg, #00ff9c, #00d47f);
       color:#04150f;
       border-color:transparent;
-      box-shadow:0 0 28px rgba(0,255,156,.18);
+      box-shadow:0 0 24px rgba(0,255,156,.18);
     }
 
     .btnDanger{
       color:#ffdede;
       border-color:rgba(255,107,107,.18);
-      background:rgba(255,107,107,.07);
+      background:rgba(255,107,107,.08);
     }
 
     .layout{
       display:grid;
-      grid-template-columns:290px minmax(0,1fr) 360px;
+      grid-template-columns:280px minmax(0,1fr) 360px;
       gap:14px;
-      min-height:calc(100vh - 140px);
-    }
-
-    .card{
-      border:1px solid var(--line-2);
-      border-radius:22px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.008)),
-        linear-gradient(180deg, rgba(8,21,17,.94), rgba(4,12,9,.96));
-      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.01);
-      position:relative;
-      overflow:hidden;
-      min-width:0;
-      min-height:0;
-    }
-
-    .card::before{
-      content:"";
-      position:absolute;
-      inset:0;
-      pointer-events:none;
-      background:radial-gradient(500px 160px at 50% 0%, rgba(0,255,156,.09), transparent 65%);
-      opacity:.7;
-    }
-
-    .cardInner{
-      position:relative;
-      z-index:1;
-      padding:16px;
+      min-height:calc(100vh - 150px);
     }
 
     .sideCol,
+    .centerCol,
     .rightCol{
       display:grid;
       gap:14px;
@@ -234,8 +205,35 @@
       min-height:0;
     }
 
-    .navTitle,
-    .sectionLabel{
+    .card{
+      position:relative;
+      overflow:hidden;
+      border:1px solid var(--line-2);
+      border-radius:26px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.006)),
+        linear-gradient(180deg, rgba(6,18,14,.94), rgba(3,11,8,.97));
+      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.012);
+      min-height:0;
+      min-width:0;
+    }
+
+    .card::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      pointer-events:none;
+      background:radial-gradient(480px 140px at 50% 0%, rgba(0,255,156,.08), transparent 66%);
+      opacity:.7;
+    }
+
+    .cardInner{
+      position:relative;
+      z-index:1;
+      padding:18px;
+    }
+
+    .label{
       margin:0 0 14px;
       font-size:11px;
       letter-spacing:.30em;
@@ -246,17 +244,17 @@
 
     .navButtons{
       display:grid;
-      gap:10px;
+      gap:12px;
     }
 
     .navBtn{
       width:100%;
       text-align:left;
-      padding:14px 16px;
-      border-radius:14px;
+      padding:16px 18px;
+      border-radius:18px;
       border:1px solid var(--line-2);
       background:rgba(255,255,255,.02);
-      color:#d9fff2;
+      color:#e4fff6;
       cursor:pointer;
       font:inherit;
       font-size:16px;
@@ -265,21 +263,21 @@
 
     .navBtn:hover,
     .navBtn.active{
-      background:linear-gradient(180deg, rgba(0,255,156,.14), rgba(0,255,156,.06));
+      background:linear-gradient(180deg, rgba(0,255,156,.14), rgba(0,255,156,.05));
       border-color:var(--line-3);
       box-shadow:var(--glow);
     }
 
-    .miniStat{
+    .miniStack{
       display:grid;
       gap:12px;
     }
 
     .miniBox{
       border:1px solid var(--line);
-      border-radius:16px;
-      background:rgba(255,255,255,.02);
+      border-radius:18px;
       padding:14px;
+      background:rgba(255,255,255,.02);
     }
 
     .miniBox b{
@@ -293,68 +291,56 @@
 
     .miniBox span{
       display:block;
-      font-size:14px;
       line-height:1.7;
+      font-size:14px;
+      color:#edfff8;
       word-break:break-word;
-      color:#effff8;
     }
 
-    .centerCol{
-      display:grid;
-      gap:14px;
-      min-height:0;
-      align-content:start;
-    }
-
-    .statsGrid{
+    .metricsCard .metricsGrid{
       display:grid;
       grid-template-columns:repeat(3, minmax(0,1fr));
       gap:14px;
     }
 
-    .stat{
-      padding:18px;
-      border-radius:18px;
+    .metric{
       border:1px solid var(--line);
+      border-radius:22px;
+      padding:16px;
       background:rgba(255,255,255,.02);
       min-width:0;
     }
 
-    .statLabel{
+    .metricLabel{
       font-size:11px;
-      letter-spacing:.22em;
+      letter-spacing:.24em;
       text-transform:uppercase;
       color:var(--muted);
-      margin-bottom:10px;
+      margin-bottom:12px;
     }
 
-    .statValue{
-      font-size:clamp(30px, 4vw, 46px);
-      line-height:1;
+    .metricValue{
+      font-size:clamp(34px, 4vw, 52px);
       font-weight:900;
-      color:#effff8;
-      text-shadow:0 0 14px rgba(0,255,156,.10);
+      line-height:1;
+      color:#f2fff9;
+      text-shadow:0 0 14px rgba(0,255,156,.08);
     }
 
-    .statHint{
-      margin-top:10px;
+    .metricHint{
+      margin-top:12px;
       color:var(--muted);
       font-size:12px;
-      line-height:1.5;
+      line-height:1.55;
     }
 
-    .panelSection{
-      display:none;
-    }
-
-    .panelSection.active{
-      display:block;
-    }
+    .panelSection{ display:none; }
+    .panelSection.active{ display:block; }
 
     .panelHeader{
       display:flex;
-      align-items:flex-start;
       justify-content:space-between;
+      align-items:flex-start;
       gap:12px;
       flex-wrap:wrap;
       margin-bottom:14px;
@@ -362,10 +348,10 @@
 
     .panelHeader h2{
       margin:0 0 6px;
-      font-size:clamp(28px, 3vw, 50px);
-      line-height:.95;
-      color:#eefff8;
-      letter-spacing:-.04em;
+      font-size:clamp(30px, 3vw, 56px);
+      line-height:.92;
+      letter-spacing:-.05em;
+      color:#f3fff9;
     }
 
     .panelHeader p{
@@ -377,10 +363,10 @@
 
     .search{
       width:100%;
-      min-height:52px;
-      border-radius:14px;
+      min-height:56px;
+      border-radius:16px;
       border:1px solid var(--line-2);
-      background:rgba(0,0,0,.22);
+      background:rgba(0,0,0,.20);
       color:var(--text);
       padding:14px 16px;
       outline:none;
@@ -389,7 +375,7 @@
     }
 
     .search::placeholder{
-      color:rgba(215,255,241,.34);
+      color:rgba(231,255,247,.32);
     }
 
     .roomsList,
@@ -403,16 +389,16 @@
 
     .rowCard{
       border:1px solid var(--line);
-      border-radius:18px;
+      border-radius:22px;
       background:rgba(255,255,255,.02);
-      padding:14px;
+      padding:16px;
     }
 
     .rowTitle{
       margin:0 0 8px;
-      color:#eefff8;
-      font-size:20px;
-      line-height:1.1;
+      font-size:22px;
+      line-height:1.05;
+      color:#f1fff8;
     }
 
     .rowMeta{
@@ -431,10 +417,10 @@
       border-radius:999px;
       border:1px solid var(--line-2);
       background:rgba(255,255,255,.03);
+      color:#ddfff3;
       font-size:11px;
       letter-spacing:.14em;
       text-transform:uppercase;
-      color:#d9fff1;
     }
 
     .badge.ok{
@@ -463,7 +449,7 @@
 
     .subBox{
       border:1px solid rgba(0,255,156,.10);
-      border-radius:14px;
+      border-radius:16px;
       padding:12px;
       background:rgba(255,255,255,.015);
       min-width:0;
@@ -479,8 +465,8 @@
     }
 
     .subBox span{
-      color:#eafff7;
       font-size:14px;
+      color:#eefff9;
       word-break:break-word;
     }
 
@@ -492,32 +478,21 @@
 
     .playerLine{
       display:flex;
-      align-items:center;
       justify-content:space-between;
+      align-items:center;
       gap:12px;
       flex-wrap:wrap;
       padding:12px;
-      border-radius:14px;
+      border-radius:16px;
       border:1px solid rgba(0,255,156,.10);
       background:rgba(255,255,255,.015);
-    }
-
-    .emptyState{
-      margin-top:14px;
-      padding:18px;
-      border-radius:16px;
-      border:1px dashed var(--line-2);
-      background:rgba(255,255,255,.015);
-      color:var(--muted);
-      text-align:center;
-      line-height:1.7;
     }
 
     .chatEntry{
-      padding:14px;
-      border-radius:16px;
       border:1px solid rgba(0,255,156,.10);
+      border-radius:18px;
       background:rgba(255,255,255,.02);
+      padding:14px;
     }
 
     .chatMeta{
@@ -529,9 +504,9 @@
     }
 
     .chatText{
-      color:#f2fff9;
-      line-height:1.65;
       font-size:14px;
+      line-height:1.65;
+      color:#effff8;
       word-break:break-word;
     }
 
@@ -542,31 +517,31 @@
     }
 
     .videoBox{
-      padding:14px;
-      border-radius:16px;
       border:1px solid rgba(0,255,156,.10);
+      border-radius:18px;
       background:rgba(255,255,255,.02);
+      padding:14px;
     }
 
     .videoBox h3{
       margin:0 0 10px;
-      font-size:18px;
+      font-size:20px;
       color:#effff8;
     }
 
     .sysRows{
       display:grid;
-      gap:10px;
+      gap:12px;
     }
 
     .sysRow{
-      padding:14px;
-      border-radius:14px;
       border:1px solid rgba(0,255,156,.10);
+      border-radius:18px;
       background:rgba(255,255,255,.02);
-      line-height:1.6;
-      color:#effff8;
+      padding:14px;
+      line-height:1.65;
       font-size:14px;
+      color:#effff8;
     }
 
     .logsCard{
@@ -584,21 +559,22 @@
 
     .logsBox{
       min-height:420px;
-      max-height:calc(100vh - 280px);
+      max-height:calc(100vh - 260px);
       overflow:auto;
       display:grid;
       gap:10px;
       align-content:start;
+      padding-right:2px;
     }
 
     .logLine{
-      padding:12px 14px;
-      border-radius:14px;
-      border:1px solid rgba(0,255,156,.12);
+      border:1px solid rgba(0,255,156,.14);
+      border-radius:16px;
       background:rgba(255,255,255,.02);
-      color:#e7fff7;
-      line-height:1.6;
+      padding:12px 14px;
       font-size:13px;
+      line-height:1.65;
+      color:#eafff7;
       word-break:break-word;
       box-shadow:inset 3px 0 0 rgba(0,255,156,.38);
     }
@@ -607,10 +583,21 @@
     .logLine.warn{ box-shadow:inset 3px 0 0 rgba(255,209,102,.60); }
     .logLine.error{ box-shadow:inset 3px 0 0 rgba(255,107,107,.60); }
 
+    .emptyState{
+      border:1px dashed var(--line-2);
+      border-radius:18px;
+      background:rgba(255,255,255,.015);
+      padding:22px 18px;
+      text-align:center;
+      color:var(--muted);
+      line-height:1.7;
+      margin-top:14px;
+    }
+
     .footer{
       display:flex;
-      align-items:center;
       justify-content:space-between;
+      align-items:center;
       gap:12px;
       flex-wrap:wrap;
       color:var(--muted);
@@ -634,7 +621,7 @@
       }
 
       .logsBox{
-        max-height:420px;
+        max-height:360px;
       }
     }
 
@@ -643,7 +630,7 @@
         grid-template-columns:1fr;
       }
 
-      .statsGrid{
+      .metricsCard .metricsGrid{
         grid-template-columns:repeat(2, minmax(0,1fr));
       }
 
@@ -656,19 +643,24 @@
       }
     }
 
-    @media (max-width:720px){
+    @media (max-width:760px){
       .page{
         padding:
           max(10px, env(safe-area-inset-top))
           max(10px, env(safe-area-inset-right))
-          max(12px, env(safe-area-inset-bottom))
+          max(10px, env(safe-area-inset-bottom))
           max(10px, env(safe-area-inset-left));
       }
 
       .topbar{
         grid-template-columns:1fr;
-        border-radius:18px;
+        min-height:auto;
+        border-radius:22px;
         padding:16px;
+      }
+
+      .title{
+        font-size:54px;
       }
 
       .meta{
@@ -679,20 +671,8 @@
         justify-content:flex-start;
       }
 
-      .card{
-        border-radius:18px;
-      }
-
-      .statsGrid{
+      .metricsCard .metricsGrid{
         grid-template-columns:1fr;
-      }
-
-      .roomGrid{
-        grid-template-columns:1fr;
-      }
-
-      .title{
-        font-size:44px;
       }
 
       .navButtons{
@@ -701,8 +681,6 @@
 
       .navBtn{
         text-align:center;
-        padding:12px;
-        font-size:14px;
       }
 
       .logsTools{
@@ -713,27 +691,31 @@
         width:100%;
       }
 
-      .logsBox{
-        min-height:280px;
-        max-height:340px;
+      .roomGrid{
+        grid-template-columns:1fr;
       }
     }
 
     @media (max-width:520px){
+      .title{
+        font-size:44px;
+      }
+
       .navButtons{
         grid-template-columns:1fr;
       }
 
       .panelHeader h2{
-        font-size:34px;
+        font-size:38px;
       }
 
-      .title{
-        font-size:36px;
+      .rowTitle{
+        font-size:20px;
       }
 
-      .meta{
-        font-size:13px;
+      .logsBox{
+        min-height:280px;
+        max-height:320px;
       }
     }
   </style>
@@ -743,7 +725,7 @@
     <div class="shell">
 
       <header class="topbar">
-        <div class="brand">
+        <div>
           <p class="eyebrow">Painel administrativo · núcleo do sistema</p>
           <h1 class="title">OSL // SYSTEM CORE</h1>
         </div>
@@ -767,7 +749,7 @@
         <aside class="sideCol">
           <section class="card">
             <div class="cardInner">
-              <p class="navTitle">Navegação</p>
+              <p class="label">Navegação</p>
 
               <div class="navButtons">
                 <button class="navBtn active" data-section="dashboard">Dashboard</button>
@@ -780,8 +762,8 @@
           </section>
 
           <section class="card">
-            <div class="cardInner miniStat">
-              <p class="sectionLabel">Servidor alvo</p>
+            <div class="cardInner miniStack">
+              <p class="label">Servidor alvo</p>
 
               <div class="miniBox">
                 <b>URL</b>
@@ -802,45 +784,46 @@
         </aside>
 
         <section class="centerCol">
-          <section class="card">
+
+          <section class="card metricsCard">
             <div class="cardInner">
-              <p class="sectionLabel">Métricas em tempo real</p>
+              <p class="label">Métricas em tempo real</p>
 
-              <div class="statsGrid">
-                <div class="stat">
-                  <div class="statLabel">Salas</div>
-                  <div class="statValue" id="statRooms">0</div>
-                  <div class="statHint">salas registradas</div>
+              <div class="metricsGrid">
+                <div class="metric">
+                  <div class="metricLabel">Salas</div>
+                  <div class="metricValue" id="statRooms">0</div>
+                  <div class="metricHint">salas registradas</div>
                 </div>
 
-                <div class="stat">
-                  <div class="statLabel">Jogadores</div>
-                  <div class="statValue" id="statPlayers">0</div>
-                  <div class="statHint">online agora</div>
+                <div class="metric">
+                  <div class="metricLabel">Jogadores</div>
+                  <div class="metricValue" id="statPlayers">0</div>
+                  <div class="metricHint">online agora</div>
                 </div>
 
-                <div class="stat">
-                  <div class="statLabel">Sessões</div>
-                  <div class="statValue" id="statSessions">0</div>
-                  <div class="statHint">rituais ativos</div>
+                <div class="metric">
+                  <div class="metricLabel">Sessões</div>
+                  <div class="metricValue" id="statSessions">0</div>
+                  <div class="metricHint">rituais ativos</div>
                 </div>
 
-                <div class="stat">
-                  <div class="statLabel">Vídeo</div>
-                  <div class="statValue" id="statVideo">0</div>
-                  <div class="statHint">salas com vídeo</div>
+                <div class="metric">
+                  <div class="metricLabel">Vídeo</div>
+                  <div class="metricValue" id="statVideo">0</div>
+                  <div class="metricHint">salas com vídeo</div>
                 </div>
 
-                <div class="stat">
-                  <div class="statLabel">Gravação</div>
-                  <div class="statValue" id="statRecord">0</div>
-                  <div class="statHint">salas gravando</div>
+                <div class="metric">
+                  <div class="metricLabel">Gravação</div>
+                  <div class="metricValue" id="statRecord">0</div>
+                  <div class="metricHint">salas gravando</div>
                 </div>
 
-                <div class="stat">
-                  <div class="statLabel">Eventos</div>
-                  <div class="statValue" id="statEvents">0</div>
-                  <div class="statHint">ciclos processados</div>
+                <div class="metric">
+                  <div class="metricLabel">Eventos</div>
+                  <div class="metricValue" id="statEvents">0</div>
+                  <div class="metricHint">ciclos processados</div>
                 </div>
               </div>
             </div>
@@ -856,7 +839,6 @@
               </div>
 
               <input class="search" id="searchInput" type="text" placeholder="Buscar por sala, código, host ou jogador..." />
-
               <div class="roomsList" id="dashboardContent"></div>
             </div>
           </section>
@@ -866,7 +848,7 @@
               <div class="panelHeader">
                 <div>
                   <h2>Salas</h2>
-                  <p>Monitoramento completo das salas detectadas.</p>
+                  <p>Monitoramento completo das salas ativas e seus jogadores.</p>
                 </div>
               </div>
 
@@ -892,7 +874,7 @@
               <div class="panelHeader">
                 <div>
                   <h2>Vídeo</h2>
-                  <p>Estado visual das salas com vídeo e gravação.</p>
+                  <p>Estado das salas com vídeo e gravação em tempo real.</p>
                 </div>
               </div>
 
@@ -905,19 +887,20 @@
               <div class="panelHeader">
                 <div>
                   <h2>Sistema</h2>
-                  <p>Saúde do backend, integridade e estado geral.</p>
+                  <p>Saúde do backend, integridade do ciclo e ambiente atual.</p>
                 </div>
               </div>
 
-              <div class="sysRows" id="systemContent"></div>
+              <div class="systemList" id="systemContent"></div>
             </div>
           </section>
+
         </section>
 
         <aside class="rightCol">
           <section class="card logsCard">
             <div class="cardInner">
-              <p class="sectionLabel">Logs do sistema</p>
+              <p class="label">Logs do sistema</p>
 
               <div class="logsTools">
                 <button class="btn" id="clearLogsBtn">Limpar logs</button>
@@ -1032,9 +1015,7 @@
       };
 
       state.visualEvents.push(entry);
-      while (state.visualEvents.length > 300) {
-        state.visualEvents.shift();
-      }
+      while (state.visualEvents.length > 300) state.visualEvents.shift();
 
       renderLogs();
     }
@@ -1048,15 +1029,12 @@
         text: text || ""
       });
 
-      while (state.chatEvents.length > 120) {
-        state.chatEvents.pop();
-      }
-
+      while (state.chatEvents.length > 150) state.chatEvents.pop();
       renderChat();
     }
 
     function renderLogs() {
-      const items = [...state.visualEvents].slice(-220).reverse();
+      const items = [...state.visualEvents].slice(-240).reverse();
 
       if (!items.length) {
         el.logsBox.innerHTML = `<div class="logLine info">Sem logs visuais no momento.</div>`;
@@ -1079,8 +1057,8 @@
 
     function roomMatches(room, term) {
       if (!term) return true;
-      const q = term.toLowerCase();
 
+      const q = term.toLowerCase();
       const haystack = [
         room.roomId,
         room.name,
@@ -1092,189 +1070,12 @@
     }
 
     function computeStats(rooms) {
-      const totalRooms = rooms.length;
-      const totalPlayers = rooms.reduce((acc, room) => acc + Number(room.playerCount || 0), 0);
-      const totalSessions = rooms.filter(r => r.sessionActive).length;
-      const totalVideo = rooms.filter(r => r.videoActive).length;
-      const totalRecord = rooms.filter(r => r.recordingActive).length;
-
-      el.statRooms.textContent = String(totalRooms);
-      el.statPlayers.textContent = String(totalPlayers);
-      el.statSessions.textContent = String(totalSessions);
-      el.statVideo.textContent = String(totalVideo);
-      el.statRecord.textContent = String(totalRecord);
+      el.statRooms.textContent = String(rooms.length);
+      el.statPlayers.textContent = String(rooms.reduce((a, r) => a + Number(r.playerCount || 0), 0));
+      el.statSessions.textContent = String(rooms.filter(r => r.sessionActive).length);
+      el.statVideo.textContent = String(rooms.filter(r => r.videoActive).length);
+      el.statRecord.textContent = String(rooms.filter(r => r.recordingActive).length);
       el.statEvents.textContent = String(state.eventCount);
-    }
-
-    function renderDashboard() {
-      const rooms = state.rooms || [];
-      if (!rooms.length) {
-        el.dashboardContent.innerHTML = `
-          <div class="emptyState">
-            O painel está online.<br>
-            Ainda não há dados suficientes para montar a visão consolidada.
-          </div>
-        `;
-        return;
-      }
-
-      const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
-      const sessions = rooms.filter(r => r.sessionActive).length;
-      const withVideo = rooms.filter(r => r.videoActive).length;
-      const withRecord = rooms.filter(r => r.recordingActive).length;
-
-      el.dashboardContent.innerHTML = `
-        <div class="rowCard">
-          <h3 class="rowTitle">Resumo global</h3>
-          <div class="roomGrid">
-            <div class="subBox"><b>Salas</b><span>${rooms.length}</span></div>
-            <div class="subBox"><b>Jogadores</b><span>${totalPlayers}</span></div>
-            <div class="subBox"><b>Rituais ativos</b><span>${sessions}</span></div>
-            <div class="subBox"><b>Vídeo / gravação</b><span>${withVideo} / ${withRecord}</span></div>
-          </div>
-        </div>
-
-        ${rooms.slice(0, 4).map(room => `
-          <div class="rowCard">
-            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
-            <div class="rowMeta">
-              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
-              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
-              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
-              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
-            </div>
-            <div class="roomGrid">
-              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
-              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
-              <div class="subBox"><b>Criada</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
-              <div class="subBox"><b>Atualizada</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
-            </div>
-          </div>
-        `).join("")}
-      `;
-    }
-
-    function renderRooms() {
-      const term = el.searchInput.value.trim().toLowerCase();
-      const rooms = (state.rooms || []).filter(room => roomMatches(room, term));
-
-      if (!rooms.length) {
-        el.roomsContent.innerHTML = `
-          <div class="emptyState">
-            Nenhuma sala encontrada agora.
-          </div>
-        `;
-        return;
-      }
-
-      el.roomsContent.innerHTML = rooms.map(room => {
-        const players = Array.isArray(room.players) ? room.players : [];
-
-        return `
-          <div class="rowCard">
-            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
-
-            <div class="rowMeta">
-              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
-              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Sessão parada"}</span>
-              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ligado" : "Vídeo desligado"}</span>
-              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
-            </div>
-
-            <div class="roomGrid">
-              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
-              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
-              <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
-              <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
-            </div>
-
-            <div class="playersWrap">
-              ${
-                players.length
-                  ? players.map(player => `
-                    <div class="playerLine">
-                      <div><strong>${escapeHtml(player.playerName || "Jogador")}</strong></div>
-                      <div>${escapeHtml(formatDate(player.joinedAt))}</div>
-                    </div>
-                  `).join("")
-                  : `<div class="emptyState">Nenhum jogador visível nesta sala.</div>`
-              }
-            </div>
-          </div>
-        `;
-      }).join("");
-    }
-
-    function renderVideo() {
-      const rooms = state.rooms || [];
-
-      if (!rooms.length) {
-        el.videoContent.innerHTML = `<div class="emptyState">Sem atividade de vídeo detectada.</div>`;
-        return;
-      }
-
-      el.videoContent.innerHTML = `
-        <div class="videoGrid">
-          ${rooms.map(room => `
-            <div class="videoBox">
-              <h3>${escapeHtml(room.name || room.roomId || "Sala")}</h3>
-              <div class="rowMeta">
-                <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
-                <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
-                <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
-              </div>
-              <div class="subBox">
-                <b>Participantes</b>
-                <span>${escapeHtml(String(room.playerCount || 0))}</span>
-              </div>
-            </div>
-          `).join("")}
-        </div>
-      `;
-    }
-
-    function renderChat() {
-      const items = state.chatEvents || [];
-
-      if (!items.length) {
-        el.chatContent.innerHTML = `
-          <div class="emptyState">
-            Nenhuma mensagem de chat detectada ainda.<br>
-            Quando o sistema registrar mensagens, elas aparecerão aqui.
-          </div>
-        `;
-        return;
-      }
-
-      el.chatContent.innerHTML = items.map(item => `
-        <div class="chatEntry">
-          <div class="chatMeta">
-            ${escapeHtml(item.source)} ${item.roomId ? "• " + escapeHtml(item.roomId) : ""} • ${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}
-          </div>
-          <div class="chatText">${escapeHtml(item.text)}</div>
-        </div>
-      `).join("");
-    }
-
-    function renderSystem() {
-      const h = state.health || null;
-
-      if (!h) {
-        el.systemContent.innerHTML = `
-          <div class="sysRow">Sem dados de health no momento.</div>
-        `;
-        return;
-      }
-
-      el.systemContent.innerHTML = `
-        <div class="sysRow"><strong>Serviço:</strong> ${escapeHtml(h.service || "osl-video-server")}</div>
-        <div class="sysRow"><strong>Online:</strong> ${h.ok ? "Sim" : "Não"}</div>
-        <div class="sysRow"><strong>Ambiente:</strong> ${escapeHtml(h.environment || "---")}</div>
-        <div class="sysRow"><strong>Uptime:</strong> ${escapeHtml(formatUptime(h.uptimeSec || 0))}</div>
-        <div class="sysRow"><strong>Iniciado em:</strong> ${escapeHtml(formatDate(h.startedAt))}</div>
-        <div class="sysRow"><strong>Agora:</strong> ${escapeHtml(formatDate(h.now))}</div>
-        <div class="sysRow"><strong>Firebase:</strong> ${h.firebaseConfigured ? "Conectado" : "Não configurado"}</div>
-      `;
     }
 
     function normalizeRoom(room) {
@@ -1367,6 +1168,174 @@
       state.previousRoomsMap = nextMap;
     }
 
+    function renderDashboard() {
+      const rooms = state.rooms || [];
+
+      if (!rooms.length) {
+        el.dashboardContent.innerHTML = `
+          <div class="emptyState">
+            O painel está online. Use a navegação lateral para abrir as áreas de salas, chat, vídeo e sistema.
+          </div>
+        `;
+        return;
+      }
+
+      const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
+      const activeSessions = rooms.filter(r => r.sessionActive).length;
+      const activeVideo = rooms.filter(r => r.videoActive).length;
+      const activeRecord = rooms.filter(r => r.recordingActive).length;
+
+      el.dashboardContent.innerHTML = `
+        <div class="rowCard">
+          <h3 class="rowTitle">Resumo global</h3>
+
+          <div class="roomGrid">
+            <div class="subBox"><b>Salas</b><span>${rooms.length}</span></div>
+            <div class="subBox"><b>Jogadores</b><span>${totalPlayers}</span></div>
+            <div class="subBox"><b>Rituais ativos</b><span>${activeSessions}</span></div>
+            <div class="subBox"><b>Vídeo / gravação</b><span>${activeVideo} / ${activeRecord}</span></div>
+          </div>
+        </div>
+
+        ${rooms.slice(0, 4).map(room => `
+          <div class="rowCard">
+            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
+
+            <div class="rowMeta">
+              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
+              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
+              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
+              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+            </div>
+
+            <div class="roomGrid">
+              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
+              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
+              <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
+              <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
+            </div>
+          </div>
+        `).join("")}
+      `;
+    }
+
+    function renderRooms() {
+      const term = el.searchInput.value.trim().toLowerCase();
+      const rooms = (state.rooms || []).filter(room => roomMatches(room, term));
+
+      if (!rooms.length) {
+        el.roomsContent.innerHTML = `<div class="emptyState">Nenhuma sala encontrada agora.</div>`;
+        return;
+      }
+
+      el.roomsContent.innerHTML = rooms.map(room => `
+        <div class="rowCard">
+          <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
+
+          <div class="rowMeta">
+            <span class="badge">${escapeHtml(room.roomId || "---")}</span>
+            <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Sessão parada"}</span>
+            <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ligado" : "Vídeo desligado"}</span>
+            <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+          </div>
+
+          <div class="roomGrid">
+            <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
+            <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
+            <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
+            <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
+          </div>
+
+          <div class="playersWrap">
+            ${
+              room.players.length
+                ? room.players.map(player => `
+                  <div class="playerLine">
+                    <div><strong>${escapeHtml(player.playerName || "Jogador")}</strong></div>
+                    <div>${escapeHtml(formatDate(player.joinedAt))}</div>
+                  </div>
+                `).join("")
+                : `<div class="emptyState">Nenhum jogador visível nesta sala.</div>`
+            }
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function renderChat() {
+      const items = state.chatEvents || [];
+
+      if (!items.length) {
+        el.chatContent.innerHTML = `
+          <div class="emptyState">
+            Nenhuma mensagem detectada ainda.<br>
+            Quando o sistema registrar chat ou eventos textuais, eles aparecerão aqui.
+          </div>
+        `;
+        return;
+      }
+
+      el.chatContent.innerHTML = items.map(item => `
+        <div class="chatEntry">
+          <div class="chatMeta">
+            ${escapeHtml(item.source)} ${item.roomId ? "• " + escapeHtml(item.roomId) : ""} • ${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}
+          </div>
+          <div class="chatText">${escapeHtml(item.text)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderVideo() {
+      const rooms = state.rooms || [];
+
+      if (!rooms.length) {
+        el.videoContent.innerHTML = `<div class="emptyState">Sem atividade de vídeo detectada.</div>`;
+        return;
+      }
+
+      el.videoContent.innerHTML = `
+        <div class="videoGrid">
+          ${rooms.map(room => `
+            <div class="videoBox">
+              <h3>${escapeHtml(room.name || room.roomId || "Sala")}</h3>
+
+              <div class="rowMeta">
+                <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
+                <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+                <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
+              </div>
+
+              <div class="subBox">
+                <b>Participantes</b>
+                <span>${escapeHtml(String(room.playerCount || 0))}</span>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderSystem() {
+      const h = state.health;
+
+      if (!h) {
+        el.systemContent.innerHTML = `<div class="emptyState">Sem dados de sistema no momento.</div>`;
+        return;
+      }
+
+      el.systemContent.innerHTML = `
+        <div class="sysRows">
+          <div class="sysRow"><strong>Serviço:</strong> ${escapeHtml(h.service || "osl-video-server")}</div>
+          <div class="sysRow"><strong>Status:</strong> ${h.ok ? "Online" : "Offline"}</div>
+          <div class="sysRow"><strong>Ambiente:</strong> ${escapeHtml(h.environment || "---")}</div>
+          <div class="sysRow"><strong>Uptime:</strong> ${escapeHtml(formatUptime(h.uptimeSec || 0))}</div>
+          <div class="sysRow"><strong>Iniciado em:</strong> ${escapeHtml(formatDate(h.startedAt))}</div>
+          <div class="sysRow"><strong>Agora:</strong> ${escapeHtml(formatDate(h.now))}</div>
+          <div class="sysRow"><strong>Firebase:</strong> ${h.firebaseConfigured ? "Conectado" : "Não configurado"}</div>
+        </div>
+      `;
+    }
+
     function parseLogLine(raw) {
       const line = String(raw || "").trim();
       if (!line) return;
@@ -1387,18 +1356,55 @@
           const method = String(data.method || "");
           const statusCode = data.statusCode;
 
-          if (path.includes("/game/room/create")) logVisual(`HTTP ${method} ${path} → sala criada (${statusCode})`, type);
-          else if (path.includes("/game/player/join")) logVisual(`HTTP ${method} ${path} → entrada de jogador (${statusCode})`, type);
-          else if (path.includes("/game/player/leave")) logVisual(`HTTP ${method} ${path} → saída de jogador (${statusCode})`, type);
-          else if (path.includes("/game/session/start")) logVisual(`HTTP ${method} ${path} → ritual iniciado (${statusCode})`, type);
-          else if (path.includes("/game/session/end")) logVisual(`HTTP ${method} ${path} → ritual encerrado (${statusCode})`, type);
-          else if (path.includes("/game/video")) logVisual(`HTTP ${method} ${path} → atualização de vídeo (${statusCode})`, type);
-          else if (path.includes("/game/recording")) logVisual(`HTTP ${method} ${path} → atualização de gravação (${statusCode})`, type);
-          else if (path.includes("/health")) logVisual(`Health carregado`, "info");
-          return;
+          if (path.includes("/game/room/create")) {
+            logVisual(`HTTP ${method} ${path} → sala criada (${statusCode})`, type);
+            addChatEvent("SYSTEM", "Sala criada via backend.", "");
+            return;
+          }
+
+          if (path.includes("/game/player/join")) {
+            logVisual(`HTTP ${method} ${path} → entrada de jogador (${statusCode})`, type);
+            addChatEvent("SYSTEM", "Jogador entrou em uma sala.", "");
+            return;
+          }
+
+          if (path.includes("/game/player/leave")) {
+            logVisual(`HTTP ${method} ${path} → saída de jogador (${statusCode})`, type);
+            addChatEvent("SYSTEM", "Jogador saiu de uma sala.", "");
+            return;
+          }
+
+          if (path.includes("/game/session/start")) {
+            logVisual(`HTTP ${method} ${path} → ritual iniciado (${statusCode})`, type);
+            addChatEvent("RITUAL", "Ritual iniciado.", "");
+            return;
+          }
+
+          if (path.includes("/game/session/end")) {
+            logVisual(`HTTP ${method} ${path} → ritual encerrado (${statusCode})`, type);
+            addChatEvent("RITUAL", "Ritual encerrado.", "");
+            return;
+          }
+
+          if (path.includes("/game/video")) {
+            logVisual(`HTTP ${method} ${path} → atualização de vídeo (${statusCode})`, type);
+            addChatEvent("VÍDEO", "Estado de vídeo alterado.", "");
+            return;
+          }
+
+          if (path.includes("/game/recording")) {
+            logVisual(`HTTP ${method} ${path} → atualização de gravação (${statusCode})`, type);
+            addChatEvent("GRAVAÇÃO", "Estado de gravação alterado.", "");
+            return;
+          }
+
+          if (path.includes("/health")) {
+            logVisual(`Health carregado`, "info");
+            return;
+          }
         }
 
-        if (message.toLowerCase().includes("message") || message.toLowerCase().includes("chat")) {
+        if (message.toLowerCase().includes("chat") || message.toLowerCase().includes("message")) {
           addChatEvent("LOG", message, data.roomId || data.room || "");
           logVisual(`Chat detectado por log: ${message}`, type);
           return;
@@ -1410,7 +1416,11 @@
 
       const lower = line.toLowerCase();
 
-      if (lower.includes("message") || lower.includes("chat")) {
+      if (
+        lower.includes("chat") ||
+        lower.includes("message") ||
+        lower.includes("mensagem")
+      ) {
         addChatEvent("LOG", line, "");
       }
 
@@ -1429,9 +1439,7 @@
     }
 
     function connectLogStream() {
-      if (state.logsEventSource) {
-        state.logsEventSource.close();
-      }
+      if (state.logsEventSource) state.logsEventSource.close();
 
       try {
         const source = new EventSource(SERVER + "/logs/stream");
@@ -1441,9 +1449,7 @@
           if (state.logsPaused) return;
           try {
             const lines = JSON.parse(event.data);
-            if (Array.isArray(lines)) {
-              lines.slice(-100).forEach(parseLogLine);
-            }
+            if (Array.isArray(lines)) lines.slice(-120).forEach(parseLogLine);
           } catch {}
         });
 
@@ -1453,10 +1459,10 @@
         });
 
         source.onerror = () => {
-          logVisual("Stream de logs indisponível, mantendo fallback", "warn");
+          logVisual("Stream de logs indisponível, mantendo fallback.", "warn");
         };
       } catch {
-        logVisual("Falha ao conectar no stream de logs", "error");
+        logVisual("Falha ao conectar no stream de logs.", "error");
       }
     }
 
@@ -1485,9 +1491,9 @@
         computeStats(rooms);
         renderDashboard();
         renderRooms();
+        renderChat();
         renderVideo();
         renderSystem();
-        renderChat();
 
         el.lastUpdated.textContent = new Date().toLocaleString("pt-BR");
         el.cycleStatus.textContent = "Sincronizado";
@@ -1553,8 +1559,8 @@
     el.clearEventsBtn.addEventListener("click", () => {
       state.chatEvents = [];
       state.eventCount = 0;
-      el.statEvents.textContent = "0";
       renderChat();
+      el.statEvents.textContent = "0";
       logVisual("Eventos e cache de chat limpos pelo operador.", "warn");
     });
 
