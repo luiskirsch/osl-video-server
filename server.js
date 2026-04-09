@@ -721,7 +721,9 @@ async function claimOrValidateLicenseOwnership({ licenseCode, uid, email }) {
 
     const license = snap.data();
 
-    if (license.status !== "active") {
+    // Aceita status ausente/null como ativo — só bloqueia se explicitamente inativo
+    const s = license.status;
+    if (s && s !== "active") {
       return {
         ok: false,
         status: 401,
