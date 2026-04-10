@@ -150,6 +150,111 @@ const PRODUCT_TITLE = "O SextoLugar — Ritual Completo";
 const PRODUCT_PRICE = 29.9;
 const PRODUCT_CURRENCY = "BRL";
 
+const PRODUCT_CATALOG = {
+  "osl_ritual_completo": {
+    title: "O SextoLugar — Ritual Completo",
+    description: "Experiência digital imersiva com cartas psicológicas e interação em grupo ao vivo",
+    price: 29.90,
+    type: "license"
+  },
+  "carta-bloqueada": {
+    title: "O SextoLugar — Carta Desbloqueada",
+    description: "Desbloqueie a próxima carta da sessão",
+    price: 2.90,
+    type: "consumable"
+  },
+  "carta-final": {
+    title: "O SextoLugar — Carta de Revelação Final",
+    description: "Carta especial de revelação final para a sessão",
+    price: 4.90,
+    type: "consumable"
+  },
+  "segunda-chance": {
+    title: "O SextoLugar — Segunda Chance",
+    description: "Continue a sessão com mais 3 cartas",
+    price: 1.90,
+    type: "consumable"
+  },
+  "gravacao-simples": {
+    title: "O SextoLugar — Gravação da Sessão",
+    description: "Grave e guarde sua sessão",
+    price: 6.90,
+    type: "consumable"
+  },
+  "gravacao-download": {
+    title: "O SextoLugar — Gravação + Download",
+    description: "Grave, guarde e baixe sua sessão",
+    price: 9.90,
+    type: "consumable"
+  },
+  "gravacao-cortes": {
+    title: "O SextoLugar — Gravação + Cortes Automáticos",
+    description: "Gravação com cortes automáticos dos momentos mais intensos",
+    price: 14.90,
+    type: "consumable"
+  },
+  "sala-premium": {
+    title: "O SextoLugar — Sala Premium",
+    description: "Sala premium com recursos avançados",
+    price: 4.90,
+    type: "consumable"
+  },
+  "modo-ritual": {
+    title: "O SextoLugar — Modo Ritual",
+    description: "Sessão em Modo Ritual com trilha e rituais guiados",
+    price: 6.90,
+    type: "consumable"
+  },
+  "pacote-conexao": {
+    title: "O SextoLugar — Pacote Conexão",
+    description: "12 cartas leves e emocionais para conexão genuína",
+    price: 9.90,
+    type: "pack"
+  },
+  "pacote-verdades": {
+    title: "O SextoLugar — Pacote Verdades",
+    description: "15 cartas de verdades com desconforto leve",
+    price: 12.90,
+    type: "pack"
+  },
+  "pacote-conflito": {
+    title: "O SextoLugar — Pacote Conflito",
+    description: "15 cartas de provocações e conflito honesto",
+    price: 14.90,
+    type: "pack"
+  },
+  "pacote-segredos": {
+    title: "O SextoLugar — Pacote Segredos",
+    description: "18 cartas intensas e psicológicas",
+    price: 19.90,
+    type: "pack"
+  },
+  "pacote-casais": {
+    title: "O SextoLugar — Pacote Casais",
+    description: "18 cartas nichadas para casais",
+    price: 19.90,
+    type: "pack"
+  },
+  "tema-sala": {
+    title: "O SextoLugar — Tema da Sala",
+    description: "Personalização visual da sala",
+    price: 4.90,
+    type: "cosmetic"
+  },
+  "estilo-carta": {
+    title: "O SextoLugar — Estilo das Cartas",
+    description: "Estilo visual personalizado para as cartas",
+    price: 3.90,
+    type: "cosmetic"
+  },
+  "efeitos-visuais": {
+    title: "O SextoLugar — Efeitos Visuais",
+    description: "Efeitos visuais especiais na sala",
+    price: 2.90,
+    type: "cosmetic"
+  }
+};
+
 const LICENSE_VALIDITY_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 const ACCESS_VALIDITY_MS = 8 * 60 * 60 * 1000;
 
@@ -1918,6 +2023,7 @@ app.post(
       .slice(0, 160);
 
     const refCodeInput = String(req.body?.refCode || "").trim().toUpperCase();
+    const produtoInput = String(req.body?.produto || "").trim();
 
     if (!nome) {
       return sendError(res, 400, "NOME_OBRIGATORIO");
@@ -1926,6 +2032,13 @@ app.post(
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return sendError(res, 400, "EMAIL_INVALIDO");
     }
+
+    // Resolve product from catalog, fallback to main product
+    const catalogEntry = PRODUCT_CATALOG[produtoInput] || PRODUCT_CATALOG[PRODUCT_ID];
+    const productId = produtoInput && PRODUCT_CATALOG[produtoInput] ? produtoInput : PRODUCT_ID;
+    const productTitle = catalogEntry.title;
+    const productDescription = catalogEntry.description;
+    const productPrice = catalogEntry.price;
 
     let referralData = null;
 
@@ -1946,14 +2059,13 @@ app.post(
     const body = {
       items: [
         {
-          id: PRODUCT_ID,
-          title: PRODUCT_TITLE,
-          description:
-            "Experiência digital imersiva com cartas psicológicas e interação em grupo ao vivo",
+          id: productId,
+          title: productTitle,
+          description: productDescription,
           category_id: "entertainment",
           quantity: 1,
           currency_id: PRODUCT_CURRENCY,
-          unit_price: PRODUCT_PRICE
+          unit_price: productPrice
         }
       ],
       payer: {
@@ -1961,7 +2073,7 @@ app.post(
         email
       },
       metadata: {
-        product_id: PRODUCT_ID,
+        product_id: productId,
         customer_name: nome,
         customer_email: email,
         ref_code: referralData?.data?.refCode || "",
@@ -2008,7 +2120,7 @@ app.post(
         buyerName: nome,
         refCode: referralData.data.refCode,
         referrerUid: referralData.id,
-        amount: PRODUCT_PRICE
+        amount: productPrice
       });
     }
 
@@ -2017,6 +2129,7 @@ app.post(
       url: data.init_point,
       sandbox_url: data.sandbox_init_point || null,
       ref: externalReference,
+      produto: productId,
       referralApplied: !!referralData
     });
   })
@@ -2046,11 +2159,46 @@ app.get("/status-pagamento/:ref", (req, res) => {
       approved: true,
       paymentId: pagamento.paymentId,
       status: pagamento.status,
-      ref: pagamento.ref
+      ref: pagamento.ref,
+      produto: pagamento.produto || null
     });
   } catch (error) {
     logError("status_pagamento_error", error);
     return sendError(res, 500, "ERRO_INTERNO_STATUS_PAGAMENTO");
+  }
+});
+
+app.get("/verificar-compra/:ref", (req, res) => {
+  try {
+    const ref = String(req.params.ref || "").trim();
+
+    if (!ref) {
+      return sendError(res, 400, "REF_OBRIGATORIA");
+    }
+
+    const pagamento = pagamentosAprovados.get(ref);
+
+    if (!pagamento) {
+      return res.json({ ok: true, found: false, approved: false });
+    }
+
+    const productId = pagamento.produto || PRODUCT_ID;
+    const catalogEntry = PRODUCT_CATALOG[productId] || PRODUCT_CATALOG[PRODUCT_ID];
+
+    return res.json({
+      ok: true,
+      found: true,
+      approved: true,
+      paymentId: pagamento.paymentId,
+      ref: pagamento.ref,
+      produto: productId,
+      tipo: catalogEntry.type,
+      titulo: catalogEntry.title,
+      valor: catalogEntry.price
+    });
+  } catch (error) {
+    logError("verificar_compra_error", error);
+    return sendError(res, 500, "ERRO_INTERNO_VERIFICAR_COMPRA");
   }
 });
 
@@ -2091,9 +2239,20 @@ app.post(
     await approveReferralRewardFromPayment(payment);
 
     const transactionAmount = Number(payment.transaction_amount || 0);
-    if (Math.abs(transactionAmount - PRODUCT_PRICE) > 0.01) {
+    const paidProductId = String(payment.metadata?.product_id || PRODUCT_ID);
+    const paidCatalogEntry = PRODUCT_CATALOG[paidProductId];
+
+    // Only issue licenses for license-type products
+    if (!paidCatalogEntry || paidCatalogEntry.type !== "license") {
+      return sendError(res, 400, "PRODUTO_NAO_GERA_LICENCA", {
+        produto: paidProductId
+      });
+    }
+
+    if (Math.abs(transactionAmount - paidCatalogEntry.price) > 0.01) {
       return sendError(res, 400, "VALOR_DIVERGENTE", {
-        valor_recebido: transactionAmount
+        valor_recebido: transactionAmount,
+        valor_esperado: paidCatalogEntry.price
       });
     }
 
@@ -2705,11 +2864,13 @@ app.post(
       const ref = String(payment.external_reference || "").trim();
 
       if (status === "approved" && ref) {
+        const productIdFromWebhook = String(payment.metadata?.product_id || PRODUCT_ID);
         pagamentosAprovados.set(ref, {
           approved: true,
           paymentId: String(payment.id),
           status,
           ref,
+          produto: productIdFromWebhook,
           updatedAt: Date.now()
         });
 
