@@ -2203,6 +2203,81 @@ app.get("/verificar-compra/:ref", (req, res) => {
 });
 
 /* =========================
+   ACCOUNT PURCHASES ROUTES
+========================= */
+
+// Verifica Firebase ID token e retorna uid
+async function verifyFirebaseToken(req, res) {
+  const bearer = getBearerToken(req);
+  if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
+  try {
+    const decoded = await admin.auth().verifyIdToken(bearer);
+    return decoded.uid;
+  } catch (e) {
+    sendError(res, 401, "TOKEN_INVALIDO");
+    return null;
+  }
+}
+
+// POST /registrar-compra — salva compra no Firestore do usuário
+app.post(
+  "/registrar-compra",
+  asyncHandler(async (req, res) => {
+    if (!ensureDb(res)) return;
+
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+
+    const ref = String(req.body?.ref || "").trim();
+    if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");
+
+    const pagamento = pagamentosAprovados.get(ref);
+    if (!pagamento || !pagamento.approved) {
+      return sendError(res, 400, "COMPRA_NAO_APROVADA");
+    }
+
+    const productId = pagamento.produto || PRODUCT_ID;
+    const catalogEntry = PRODUCT_CATALOG[productId];
+    if (!catalogEntry || catalogEntry.type === "license") {
+      return sendError(res, 400, "PRODUTO_NAO_REGISTRAVEL");
+    }
+
+    const compraEntry = {
+      ref,
+      produto: productId,
+      titulo: catalogEntry.title,
+      tipo: catalogEntry.type,
+      valor: catalogEntry.price,
+      ts: Date.now()
+    };
+
+    const userRef = db.collection("users").doc(uid);
+    await userRef.set(
+      { compras: admin.firestore.FieldValue.arrayUnion(compraEntry) },
+      { merge: true }
+    );
+
+    return res.json({ ok: true, compra: compraEntry });
+  })
+);
+
+// GET /minhas-compras — retorna compras do usuário autenticado
+app.get(
+  "/minhas-compras",
+  asyncHandler(async (req, res) => {
+    if (!ensureDb(res)) return;
+
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+
+    const userSnap = await db.collection("users").doc(uid).get();
+    const compras = userSnap.exists ? (userSnap.data().compras || []) : [];
+
+    return res.json({ ok: true, compras });
+  })
+);
+
+/* =========================
    LICENSE / ACCESS ROUTES
 ========================= */
 
