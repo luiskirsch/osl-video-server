@@ -3055,7 +3055,6 @@ app.get(
 
 app.get(
   "/token",
-  requireGameAccess,
   asyncHandler(async (req, res) => {
     const room = req.query.room;
     const user = req.query.user;
