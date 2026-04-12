@@ -483,6 +483,15 @@ function getBearerToken(req) {
 }
 
 function requireGameAccess(req, res, next) {
+  // Owner bypass: ADMIN_SECRET in X-Admin-Secret header skips license check
+  if (ADMIN_SECRET) {
+    const adminKey = String(req.headers["x-admin-secret"] || "").trim();
+    if (adminKey && adminKey === ADMIN_SECRET) {
+      req.gameAccess = { token_type: "game_access", product: PRODUCT_ID, bypass: true };
+      return next();
+    }
+  }
+
   const accessToken = getBearerToken(req);
 
   if (!accessToken) {
