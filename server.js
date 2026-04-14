@@ -12,7 +12,7 @@ process.on("unhandledRejection", (reason) => {
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
-const { AccessToken } = require("livekit-server-sdk");
+const { AccessToken, EgressClient } = require("livekit-server-sdk");
 const admin = require("firebase-admin");
 const helmet = require("helmet");
 const morgan = require("morgan");
@@ -130,6 +130,16 @@ const PORT = Number(process.env.PORT || 3000);
 
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "";
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
+const LIVEKIT_URL = process.env.LIVEKIT_URL || "wss://osextolugar-eqa7q1iz.livekit.cloud";
+
+// S3-compatible storage for recordings (Cloudflare R2, AWS S3, DigitalOcean Spaces, etc.)
+const S3_ACCESS_KEY    = process.env.S3_ACCESS_KEY    || "";
+const S3_SECRET_KEY    = process.env.S3_SECRET_KEY    || "";
+const S3_BUCKET        = process.env.S3_BUCKET        || "";
+const S3_REGION        = process.env.S3_REGION        || "auto";
+const S3_ENDPOINT      = process.env.S3_ENDPOINT      || ""; // e.g. https://xxx.r2.cloudflarestorage.com
+const S3_PUBLIC_URL    = process.env.S3_PUBLIC_URL    || ""; // public base URL for downloads
+const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://preludiojogos.com.br/recording-layout.html";
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || "";
 
 const LICENSE_SECRET =
@@ -266,6 +276,16 @@ const REFERRAL_COMMISSION_PERCENT = 0.31;
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
 const pagamentosAprovados = new Map();
+
+// LiveKit Egress client (recording)
+const egressClient = (LIVEKIT_API_KEY && LIVEKIT_API_SECRET)
+  ? new EgressClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+  : null;
+
+// roomId → { egressId, type, ref, email, startedAt, filepath }
+const activeRecordings = new Map();
+// roomId → { filepath, downloadUrl, completedAt, type, ref, email }
+const completedRecordings = new Map();
 
 /* =========================
    DISCORD CONFIG
@@ -1810,6 +1830,190 @@ broadcastPanelUpdate();
   }
 });
 
+/* =========================
+   RECORDING — LiveKit Egress
+========================= */
+
+function recordingS3Config() {
+  return {
+    accessKey: S3_ACCESS_KEY,
+    secret: S3_SECRET_KEY,
+    region: S3_REGION,
+    endpoint: S3_ENDPOINT || undefined,
+    bucket: S3_BUCKET,
+    forcePathStyle: !!S3_ENDPOINT // required for Cloudflare R2 / custom endpoints
+  };
+}
+
+function recordingDownloadUrl(filepath) {
+  if (!S3_PUBLIC_URL) return null;
+  const base = S3_PUBLIC_URL.replace(/\/$/, "");
+  return `${base}/${filepath}`;
+}
+
+async function startRoomRecording(roomId, type, ref, email) {
+  if (!egressClient) throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
+  if (!S3_ACCESS_KEY || !S3_BUCKET) throw new Error("S3_NOT_CONFIGURED");
+
+  const nRoom = normalizeRoomId(roomId);
+  if (activeRecordings.has(nRoom)) throw new Error("GRAVACAO_JA_ATIVA");
+
+  const ts = Date.now();
+  const filepath = `recordings/${nRoom}/${ts}-${type}.mp4`;
+  const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(nRoom)}`;
+
+  const egress = await egressClient.startWebEgress(nRoom, {
+    url: layoutUrl,
+    audioOnly: false,
+    videoOnly: false,
+    awaitStartSignal: false,
+    fileOutputs: [{
+      fileType: 1, // MP4
+      filepath,
+      s3: recordingS3Config()
+    }]
+  });
+
+  const job = { egressId: egress.egressId, type, ref, email, startedAt: ts, filepath };
+  activeRecordings.set(nRoom, job);
+
+  // Sync panel room flag
+  const room = panelRooms.get(nRoom);
+  if (room) { room.recordingActive = true; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
+
+  logInfo("recording_started", { roomId: nRoom, egressId: egress.egressId, type });
+  return job;
+}
+
+async function stopRoomRecording(roomId) {
+  const nRoom = normalizeRoomId(roomId);
+  const job = activeRecordings.get(nRoom);
+  if (!job) return null;
+
+  try {
+    await egressClient.stopEgress(job.egressId);
+  } catch (err) {
+    logError("stop_egress_error", err, { roomId: nRoom, egressId: job.egressId });
+  }
+
+  activeRecordings.delete(nRoom);
+
+  const downloadUrl = recordingDownloadUrl(job.filepath);
+  const completed = { ...job, downloadUrl, completedAt: Date.now() };
+  completedRecordings.set(nRoom, completed);
+
+  // Keep last 100 completed recordings in memory
+  if (completedRecordings.size > 100) {
+    const oldest = completedRecordings.keys().next().value;
+    completedRecordings.delete(oldest);
+  }
+
+  // Sync panel room flag
+  const room = panelRooms.get(nRoom);
+  if (room) { room.recordingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
+
+  logInfo("recording_stopped", { roomId: nRoom, egressId: job.egressId, type: job.type });
+  return completed;
+}
+
+// POST /recording/start — frontend calls after payment is confirmed
+app.post(
+  "/recording/start",
+  asyncHandler(async (req, res) => {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const ref    = String(req.body?.ref    || "").trim();
+    const type   = String(req.body?.type   || "gravacao-simples").trim();
+
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!ref)    return sendError(res, 400, "REF_OBRIGATORIA");
+
+    // Verify payment was actually approved
+    const payment = pagamentosAprovados.get(ref);
+    if (!payment || !payment.approved) {
+      return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
+    }
+    if (!String(payment.produto || "").startsWith("gravacao-")) {
+      return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
+    }
+
+    if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
+    if (!S3_ACCESS_KEY || !S3_BUCKET) return sendError(res, 503, "S3_NAO_CONFIGURADO");
+
+    const email = String(payment.email || req.body?.email || "").trim();
+
+    try {
+      const job = await startRoomRecording(roomId, type, ref, email);
+      return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
+    } catch (err) {
+      if (err.message === "GRAVACAO_JA_ATIVA") return sendError(res, 409, "GRAVACAO_JA_ATIVA");
+      logError("recording_start_error", err, { roomId });
+      return sendError(res, 500, "ERRO_INICIAR_GRAVACAO");
+    }
+  })
+);
+
+// POST /recording/stop
+app.post(
+  "/recording/stop",
+  asyncHandler(async (req, res) => {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+    if (!activeRecordings.has(roomId)) {
+      return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");
+    }
+
+    try {
+      const completed = await stopRoomRecording(roomId);
+      return res.json({
+        ok: true,
+        downloadUrl: completed.downloadUrl || null,
+        filepath: completed.filepath,
+        type: completed.type
+      });
+    } catch (err) {
+      logError("recording_stop_error", err, { roomId });
+      return sendError(res, 500, "ERRO_PARAR_GRAVACAO");
+    }
+  })
+);
+
+// GET /recording/status/:roomId
+app.get("/recording/status/:roomId", (req, res) => {
+  try {
+    const nRoom = normalizeRoomId(req.params.roomId);
+    const active = activeRecordings.get(nRoom);
+    const completed = completedRecordings.get(nRoom);
+
+    if (active) {
+      return res.json({
+        ok: true,
+        active: true,
+        egressId: active.egressId,
+        type: active.type,
+        startedAt: active.startedAt,
+        downloadUrl: null
+      });
+    }
+
+    if (completed && Date.now() - completed.completedAt < 2 * 60 * 60 * 1000) {
+      return res.json({
+        ok: true,
+        active: false,
+        completed: true,
+        type: completed.type,
+        downloadUrl: completed.downloadUrl || null,
+        completedAt: completed.completedAt
+      });
+    }
+
+    return res.json({ ok: true, active: false, completed: false });
+  } catch (err) {
+    logError("recording_status_error", err);
+    return sendError(res, 500, "ERRO_STATUS_GRAVACAO");
+  }
+});
+
 app.get("/game/room/:roomId", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.params.roomId);
@@ -2033,6 +2237,7 @@ app.post(
 
     const refCodeInput = String(req.body?.refCode || "").trim().toUpperCase();
     const produtoInput = String(req.body?.produto || "").trim();
+    const roomIdInput  = String(req.body?.roomId  || "").trim().toUpperCase();
 
     if (!nome) {
       return sendError(res, 400, "NOME_OBRIGATORIO");
@@ -2086,7 +2291,8 @@ app.post(
         customer_name: nome,
         customer_email: email,
         ref_code: referralData?.data?.refCode || "",
-        referrer_uid: referralData?.id || ""
+        referrer_uid: referralData?.id || "",
+        room_id: roomIdInput || ""
       },
       external_reference: externalReference,
       notification_url: `${BACKEND_BASE_URL}/webhook`,
@@ -2955,6 +3161,8 @@ app.post(
           status,
           ref,
           produto: productIdFromWebhook,
+          email: String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase(),
+          roomId: String(payment.metadata?.room_id || "").trim().toUpperCase(),
           updatedAt: Date.now()
         });
 
