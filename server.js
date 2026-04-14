@@ -185,23 +185,17 @@ const PRODUCT_CATALOG = {
     price: 1.90,
     type: "consumable"
   },
-  "gravacao-simples": {
-    title: "O SextoLugar — Gravação da Sessão",
-    description: "Grave e guarde sua sessão",
+  "gravacao-download": {
+    title: "O SextoLugar — Gravação + Download",
+    description: "Grave sua sessão e baixe o arquivo MP4",
     price: 6.90,
     type: "consumable"
   },
-  "gravacao-download": {
-    title: "O SextoLugar — Gravação + Download",
-    description: "Grave, guarde e baixe sua sessão",
-    price: 9.90,
-    type: "consumable"
-  },
-  "gravacao-cortes": {
-    title: "O SextoLugar — Gravação + Cortes Automáticos",
-    description: "Gravação com cortes automáticos dos momentos mais intensos",
+  "gravacao-mensal": {
+    title: "O SextoLugar — Gravação Livre Mensal",
+    description: "Grave sessões ilimitadas por 30 dias",
     price: 14.90,
-    type: "consumable"
+    type: "subscription"
   },
   "sala-premium": {
     title: "O SextoLugar — Sala Premium",
@@ -1916,33 +1910,71 @@ async function stopRoomRecording(roomId) {
   return completed;
 }
 
+// GET /recording/pass/:email — verifica se email tem passe mensal ativo
+app.get("/recording/pass/:email", asyncHandler(async (req, res) => {
+  const email = String(req.params.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  if (!db)    return res.json({ ok: true, active: false });
+
+  try {
+    const doc = await db.collection("recording_passes").doc(email).get();
+    if (!doc.exists) return res.json({ ok: true, active: false });
+
+    const pass = doc.data();
+    const active = pass.expiresAt > Date.now();
+    return res.json({
+      ok: true,
+      active,
+      expiresAt: pass.expiresAt || null,
+      type: pass.type || "gravacao-mensal"
+    });
+  } catch (err) {
+    logError("recording_pass_check_error", err);
+    return res.json({ ok: true, active: false });
+  }
+}));
+
 // POST /recording/start — frontend calls after payment is confirmed
 app.post(
   "/recording/start",
   asyncHandler(async (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
-    const ref    = String(req.body?.ref    || "").trim();
-    const type   = String(req.body?.type   || "gravacao-simples").trim();
+    const ref    = String(req.body?.ref   || "").trim();
+    const email  = String(req.body?.email || "").trim().toLowerCase();
 
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-    if (!ref)    return sendError(res, 400, "REF_OBRIGATORIA");
-
-    // Verify payment was actually approved
-    const payment = pagamentosAprovados.get(ref);
-    if (!payment || !payment.approved) {
-      return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
-    }
-    if (!String(payment.produto || "").startsWith("gravacao-")) {
-      return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
-    }
-
     if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
     if (!S3_ACCESS_KEY || !S3_BUCKET) return sendError(res, 503, "S3_NAO_CONFIGURADO");
 
-    const email = String(payment.email || req.body?.email || "").trim();
+    let authorizedEmail = email;
+    let authorizedType  = "gravacao-download";
+
+    // Caminho 1: passe mensal ativo
+    if (email && db) {
+      try {
+        const doc = await db.collection("recording_passes").doc(email).get();
+        if (doc.exists && doc.data().expiresAt > Date.now()) {
+          authorizedType  = "gravacao-mensal";
+          authorizedEmail = email;
+          // passe mensal: não precisa de ref
+        } else if (!ref) {
+          return sendError(res, 402, "PASSE_MENSAL_EXPIRADO_OU_INEXISTENTE");
+        }
+      } catch (_) {}
+    }
+
+    // Caminho 2: pagamento avulso (gravacao-download)
+    if (authorizedType !== "gravacao-mensal") {
+      if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");
+      const payment = pagamentosAprovados.get(ref);
+      if (!payment || !payment.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
+      if (payment.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
+      authorizedEmail = payment.email || email;
+      authorizedType  = "gravacao-download";
+    }
 
     try {
-      const job = await startRoomRecording(roomId, type, ref, email);
+      const job = await startRoomRecording(roomId, authorizedType, ref, authorizedEmail);
       return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
     } catch (err) {
       if (err.message === "GRAVACAO_JA_ATIVA") return sendError(res, 409, "GRAVACAO_JA_ATIVA");
@@ -3155,16 +3187,33 @@ app.post(
 
       if (status === "approved" && ref) {
         const productIdFromWebhook = String(payment.metadata?.product_id || PRODUCT_ID);
+        const approvedEmail = String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase();
+        const approvedRoomId = String(payment.metadata?.room_id || "").trim().toUpperCase();
+
         pagamentosAprovados.set(ref, {
           approved: true,
           paymentId: String(payment.id),
           status,
           ref,
           produto: productIdFromWebhook,
-          email: String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase(),
-          roomId: String(payment.metadata?.room_id || "").trim().toUpperCase(),
+          email: approvedEmail,
+          roomId: approvedRoomId,
           updatedAt: Date.now()
         });
+
+        // Passe mensal de gravação — salva no Firestore com validade de 30 dias
+        if (productIdFromWebhook === "gravacao-mensal" && approvedEmail && db) {
+          const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+          db.collection("recording_passes").doc(approvedEmail).set({
+            email: approvedEmail,
+            paymentId: String(payment.id),
+            ref,
+            activatedAt: Date.now(),
+            expiresAt,
+            type: "gravacao-mensal"
+          }, { merge: false }).catch(err => logError("recording_pass_save_error", err));
+          logInfo("recording_pass_activated", { email: approvedEmail, expiresAt });
+        }
 
         if (db) {
           try {
