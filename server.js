@@ -1861,6 +1861,8 @@ async function startRoomRecording(roomId, type, ref, email) {
     audioOnly: false,
     videoOnly: false,
     awaitStartSignal: false,
+    videoWidth: 1080,
+    videoHeight: 1920,
     fileOutputs: [{
       fileType: 1, // MP4
       filepath,
