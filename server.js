@@ -1936,6 +1936,102 @@ app.get("/recording/pass/:email", asyncHandler(async (req, res) => {
   }
 }));
 
+// POST /recording/auto-start — starts recording automatically when ritual begins (no payment required)
+app.post(
+  "/recording/auto-start",
+  asyncHandler(async (req, res) => {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!egressClient) return res.json({ ok: false, reason: "EGRESS_NAO_CONFIGURADO" });
+    if (!S3_ACCESS_KEY || !S3_BUCKET) return res.json({ ok: false, reason: "S3_NAO_CONFIGURADO" });
+
+    // If already recording, just return ok
+    if (activeRecordings.has(roomId)) {
+      const job = activeRecordings.get(roomId);
+      return res.json({ ok: true, already: true, egressId: job.egressId, startedAt: job.startedAt });
+    }
+
+    try {
+      const job = await startRoomRecording(roomId, "pending", null, null);
+      return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
+    } catch (err) {
+      logError("recording_auto_start_error", err, { roomId });
+      return res.json({ ok: false, reason: err.message });
+    }
+  })
+);
+
+// POST /recording/discard — stops recording and discards it (no download URL saved)
+app.post(
+  "/recording/discard",
+  asyncHandler(async (req, res) => {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+    const nRoom = normalizeRoomId(roomId);
+    const job = activeRecordings.get(nRoom);
+    if (!job) return res.json({ ok: true, was_active: false });
+
+    try {
+      await egressClient.stopEgress(job.egressId);
+    } catch (err) {
+      logError("recording_discard_stop_error", err, { roomId: nRoom });
+    }
+
+    activeRecordings.delete(nRoom);
+    const room = panelRooms.get(nRoom);
+    if (room) { room.recordingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
+    logInfo("recording_discarded", { roomId: nRoom, egressId: job.egressId });
+    return res.json({ ok: true, was_active: true });
+  })
+);
+
+// POST /recording/claim — after payment confirmed, stops recording and returns download URL
+app.post(
+  "/recording/claim",
+  asyncHandler(async (req, res) => {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const ref    = String(req.body?.ref   || "").trim();
+    const email  = String(req.body?.email || "").trim().toLowerCase();
+    const type   = String(req.body?.type  || "gravacao-download").trim();
+
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
+
+    // Verify payment was approved
+    const pag = pagamentosAprovados.get(ref);
+    if (!pag || !pag.approved) {
+      return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
+    }
+
+    const nRoom = normalizeRoomId(roomId);
+
+    // If recording still active, stop it now
+    if (activeRecordings.has(nRoom)) {
+      // Tag the recording with the buyer's info before stopping
+      const job = activeRecordings.get(nRoom);
+      job.email = pag.email || email;
+      job.type  = type;
+      job.ref   = ref;
+      try {
+        const completed = await stopRoomRecording(nRoom);
+        return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+      } catch (err) {
+        logError("recording_claim_stop_error", err, { roomId: nRoom });
+        return sendError(res, 500, "ERRO_PARAR_GRAVACAO");
+      }
+    }
+
+    // If already stopped (completed), return existing URL
+    const completed = completedRecordings.get(nRoom);
+    if (completed) {
+      return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+    }
+
+    return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");
+  })
+);
+
 // POST /recording/start — frontend calls after payment is confirmed
 app.post(
   "/recording/start",
