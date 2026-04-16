@@ -1361,16 +1361,16 @@ function cleanupPanelRooms() {
  * Remove do mapa ANTES das operações assíncronas para evitar duplo-fechamento.
  */
 async function closeRoom(roomId, reason = "manual") {
-  const room = panelRooms.get(roomId);
-  if (!room) return;
+  // Remove do mapa se estiver rastreado (impede double-close)
+  const wasTracked = panelRooms.has(roomId);
+  if (wasTracked) {
+    panelRooms.delete(roomId);
+    broadcastPanelUpdate();
+  }
 
-  // Remove do mapa imediatamente para impedir double-close
-  panelRooms.delete(roomId);
-  broadcastPanelUpdate();
+  logInfo("room_closing", { roomId, reason, wasTracked });
 
-  logInfo("room_closing", { roomId, reason });
-
-  // Para gravação ativa
+  // Para gravação ativa (independente de panelRooms)
   if (activeRecordings.has(roomId)) {
     try {
       await stopRoomRecording(roomId);
@@ -1379,16 +1379,16 @@ async function closeRoom(roomId, reason = "manual") {
     }
   }
 
-  // Atualiza Firestore (status → "closed")
+  // Atualiza Firestore — SEMPRE, mesmo se a sala não estava em memória
   if (db) {
     try {
       await db.collection("salas").doc(roomId).update({
         status: "closed",
+        arenaActive: false,
         closedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
     } catch (err) {
-      // Sala pode não existir no Firestore; apenas loga
       logWarn("close_room_firestore_skip", { roomId, detail: err.message });
     }
   }
@@ -1747,8 +1747,9 @@ app.post("/game/player/join", (req, res) => {
 
 app.post("/game/player/leave", (req, res) => {
   try {
-    const roomId = normalizeRoomId(req.body?.roomId);
-    const playerId = normalizePlayerId(req.body?.playerId);
+    const roomId        = normalizeRoomId(req.body?.roomId);
+    const playerId      = normalizePlayerId(req.body?.playerId);
+    const isHostLeaving = req.body?.isHost === true;
 
     if (!roomId || !playerId) {
       return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
@@ -1757,6 +1758,11 @@ app.post("/game/player/leave", (req, res) => {
     const room = panelRooms.get(roomId);
 
     if (!room) {
+      // Sala não está em memória (servidor reiniciou ou nunca rastreou).
+      // Se era o host saindo, fecha no Firestore diretamente.
+      if (isHostLeaving) {
+        closeRoom(roomId, "host_left_untracked"); // fire-and-forget
+      }
       return res.json({ ok: true, room: null });
     }
 
@@ -1766,9 +1772,8 @@ app.post("/game/player/leave", (req, res) => {
     cleanupPanelRoomPlayers(room);
 
     const remaining = Object.keys(room.players || {}).length;
-    if (remaining === 0) {
-      // Sala vazia: fechar (fire-and-forget — remove do mapa antes de retornar)
-      closeRoom(roomId, "empty");
+    if (remaining === 0 || isHostLeaving) {
+      closeRoom(roomId, isHostLeaving ? "host_left" : "empty"); // fire-and-forget
       return res.json({ ok: true, room: null });
     }
 
