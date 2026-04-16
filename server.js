@@ -1241,6 +1241,7 @@ async function syncDiscordRolesForUid(uid) {
 
 const PANEL_ROOM_TTL_MS = 1000 * 60 * 60 * 6;
 const PANEL_PLAYER_TTL_MS = 1000 * 60 * 2;
+const INACTIVITY_CLOSE_MS = 1000 * 60 * 60; // 1 hora sem heartbeat → fecha a sala
 const panelRooms = new Map();
 const panelClients = new Set();
 
@@ -1291,6 +1292,7 @@ function getOrCreatePanelRoom(roomId, roomName = "", host = "") {
       host: String(host || "").trim(),
       createdAt: nowIso(),
       updatedAt: nowIso(),
+      lastActivityAt: nowIso(),
       sessionActive: false,
       videoActive: false,
       recordingActive: false,
@@ -1328,9 +1330,19 @@ function cleanupPanelRooms() {
   for (const [roomId, room] of panelRooms.entries()) {
     cleanupPanelRoomPlayers(room);
 
+    const lastActivity = new Date(
+      room.lastActivityAt || room.updatedAt || room.createdAt
+    ).getTime();
     const lastUpdated = new Date(room.updatedAt || room.createdAt).getTime();
     const playerCount = Object.keys(room.players || {}).length;
 
+    // Fechar sala por inatividade (1 hora sem heartbeat do frontend)
+    if (lastActivity && now - lastActivity > INACTIVITY_CLOSE_MS) {
+      closeRoom(roomId, "inactivity"); // fire-and-forget, já remove do mapa
+      continue;
+    }
+
+    // Remover sala antiga sem jogadores (TTL padrão de 6 h)
     if (
       (!lastUpdated || now - lastUpdated > PANEL_ROOM_TTL_MS) &&
       playerCount === 0 &&
@@ -1339,10 +1351,49 @@ function cleanupPanelRooms() {
       !room.recordingActive
     ) {
       panelRooms.delete(roomId);
-
       broadcastPanelUpdate();
     }
   }
+}
+
+/**
+ * Fecha uma sala: para gravação, atualiza Firestore, remove do mapa e notifica o painel.
+ * Remove do mapa ANTES das operações assíncronas para evitar duplo-fechamento.
+ */
+async function closeRoom(roomId, reason = "manual") {
+  const room = panelRooms.get(roomId);
+  if (!room) return;
+
+  // Remove do mapa imediatamente para impedir double-close
+  panelRooms.delete(roomId);
+  broadcastPanelUpdate();
+
+  logInfo("room_closing", { roomId, reason });
+
+  // Para gravação ativa
+  if (activeRecordings.has(roomId)) {
+    try {
+      await stopRoomRecording(roomId);
+    } catch (err) {
+      logError("close_room_stop_recording_error", err, { roomId });
+    }
+  }
+
+  // Atualiza Firestore (status → "closed")
+  if (db) {
+    try {
+      await db.collection("salas").doc(roomId).update({
+        status: "closed",
+        closedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (err) {
+      // Sala pode não existir no Firestore; apenas loga
+      logWarn("close_room_firestore_skip", { roomId, detail: err.message });
+    }
+  }
+
+  logInfo("room_closed", { roomId, reason });
 }
 
 function serializePanelRoom(room) {
@@ -1714,6 +1765,13 @@ app.post("/game/player/leave", (req, res) => {
 
     cleanupPanelRoomPlayers(room);
 
+    const remaining = Object.keys(room.players || {}).length;
+    if (remaining === 0) {
+      // Sala vazia: fechar (fire-and-forget — remove do mapa antes de retornar)
+      closeRoom(roomId, "empty");
+      return res.json({ ok: true, room: null });
+    }
+
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
@@ -1721,6 +1779,24 @@ app.post("/game/player/leave", (req, res) => {
   } catch (error) {
     logError("game_player_leave_error", error);
     return sendError(res, 500, "ERRO_GAME_PLAYER_LEAVE");
+  }
+});
+
+app.post("/game/room/heartbeat", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+    const room = panelRooms.get(roomId);
+    if (!room) return res.json({ ok: true });
+
+    room.lastActivityAt = nowIso();
+    room.updatedAt = nowIso();
+
+    return res.json({ ok: true });
+  } catch (error) {
+    logError("game_room_heartbeat_error", error);
+    return sendError(res, 500, "ERRO_GAME_ROOM_HEARTBEAT");
   }
 });
 
