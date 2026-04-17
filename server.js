@@ -14,6 +14,7 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { AccessToken, EgressClient } = require("livekit-server-sdk");
 const admin = require("firebase-admin");
+const Anthropic = require("@anthropic-ai/sdk");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const fs = require("fs");
@@ -147,6 +148,8 @@ const LICENSE_SECRET =
 
 const ACCESS_TOKEN_SECRET =
   process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DE_ACESSO";
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 const BACKEND_BASE_URL =
   process.env.BACKEND_BASE_URL ||
@@ -3640,6 +3643,57 @@ app.post(
     logInfo("admin_licenca_desvinculada", { licenseCode });
 
     return res.json({ ok: true, licenseCode });
+  })
+);
+
+/* =========================
+   AI
+========================= */
+
+app.post(
+  "/ai/evaluate-response",
+  requireGameAccess,
+  asyncHandler(async (req, res) => {
+    const { cardText, playerMessage } = req.body || {};
+
+    if (!cardText || !playerMessage) {
+      return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+    }
+
+    if (!ANTHROPIC_API_KEY) {
+      return res.json({ ok: true, valid: true, confidence: 50 });
+    }
+
+    const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+    const msg = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 120,
+      messages: [
+        {
+          role: "user",
+          content: `Você é árbitro do jogo "O SextoLugar". Avalie objetivamente se a resposta do jogador atende ao pedido da carta.
+Pedido da carta: "${cardText.slice(0, 400)}"
+Resposta do jogador: "${playerMessage.slice(0, 600)}"
+Responda APENAS com JSON válido, sem markdown: {"valid": true, "confidence": 85}`
+        }
+      ]
+    });
+
+    let result = { valid: true, confidence: 70 };
+    try {
+      const text = msg.content[0]?.text || "{}";
+      const match = text.match(/\{[^}]+\}/);
+      if (match) result = JSON.parse(match[0]);
+    } catch (_) {}
+
+    logInfo("ai_evaluate_response", {
+      valid: result.valid,
+      confidence: result.confidence,
+      requestId: req.requestId
+    });
+
+    return res.json({ ok: true, valid: !!result.valid, confidence: result.confidence ?? 70 });
   })
 );
 
