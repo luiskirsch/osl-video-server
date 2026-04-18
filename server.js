@@ -1245,8 +1245,11 @@ async function syncDiscordRolesForUid(uid) {
 const PANEL_ROOM_TTL_MS = 1000 * 60 * 60 * 6;
 const PANEL_PLAYER_TTL_MS = 1000 * 60 * 2;
 const INACTIVITY_CLOSE_MS = 1000 * 60 * 60; // 1 hora sem heartbeat → fecha a sala
+const MAX_ROOM_PLAYERS = 5;
 const panelRooms = new Map();
 const panelClients = new Set();
+const roomHostSseClients = new Map(); // roomId → SSE res do anfitrião
+const pendingJoinRequests = new Map(); // `${roomId}:${playerId}` → { roomId, playerId, playerName, requestedAt }
 
 function broadcastPanelUpdate() {
   try {
@@ -1280,6 +1283,42 @@ function normalizePlayerId(value) {
 
 function normalizePlayerName(value) {
   return String(value || "").trim().slice(0, 80);
+}
+
+function isPlayerNameTaken(name, excludePlayerId = null) {
+  const lower = name.toLowerCase();
+  for (const room of panelRooms.values()) {
+    for (const player of Object.values(room.players)) {
+      if (player.playerName.toLowerCase() === lower && player.playerId !== excludePlayerId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function suggestPlayerName(name) {
+  let i = 2;
+  while (isPlayerNameTaken(`${name}${i}`)) i++;
+  return `${name}${i}`;
+}
+
+function notifyRoomHost(roomId, event, data) {
+  const hostSse = roomHostSseClients.get(roomId);
+  if (!hostSse) return false;
+  try {
+    hostSse.write(`event: ${event}\n`);
+    hostSse.write(`data: ${JSON.stringify(data)}\n\n`);
+    return true;
+  } catch {
+    roomHostSseClients.delete(roomId);
+    return false;
+  }
+}
+
+function getRoomPlayerCount(room) {
+  cleanupPanelRoomPlayers(room);
+  return Object.keys(room.players || {}).length;
 }
 
 function getOrCreatePanelRoom(roomId, roomName = "", host = "") {
@@ -1395,6 +1434,12 @@ async function closeRoom(roomId, reason = "manual") {
       logWarn("close_room_firestore_skip", { roomId, detail: err.message });
     }
   }
+
+  // Limpa pedidos pendentes e SSE do anfitrião
+  for (const key of pendingJoinRequests.keys()) {
+    if (key.startsWith(`${roomId}:`)) pendingJoinRequests.delete(key);
+  }
+  roomHostSseClients.delete(roomId);
 
   logInfo("room_closed", { roomId, reason });
 }
@@ -1703,10 +1748,14 @@ app.post("/game/room/create", (req, res) => {
       return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
     }
 
+    if (panelRooms.has(roomId)) {
+      return res.status(409).json({ ok: false, code: "SALA_JA_EXISTE" });
+    }
+
     const room = getOrCreatePanelRoom(roomId, name, host);
-    
-broadcastPanelUpdate();
-    
+
+    broadcastPanelUpdate();
+
     return res.json({
       ok: true,
       room: serializePanelRoom(room)
@@ -1721,22 +1770,42 @@ app.post("/game/player/join", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     const playerId = normalizePlayerId(req.body?.playerId);
-    const playerName = normalizePlayerName(req.body?.playerName);
+    const playerName = normalizePlayerName(req.body?.playerName) || "Jogador";
 
     if (!roomId || !playerId) {
       return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
     }
 
-    const room = getOrCreatePanelRoom(roomId);
+    const room = panelRooms.get(roomId);
+    if (!room) {
+      return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" });
+    }
+
+    // Não recontabiliza o mesmo jogador já presente
+    const isRejoin = !!room.players[playerId];
+
+    if (!isRejoin) {
+      if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) {
+        return res.status(409).json({ ok: false, code: "SALA_CHEIA" });
+      }
+
+      if (isPlayerNameTaken(playerName, playerId)) {
+        const suggestion = suggestPlayerName(playerName);
+        return res.status(409).json({ ok: false, code: "NOME_JA_EM_USO", suggestion });
+      }
+    }
 
     room.players[playerId] = {
       playerId,
-      playerName: playerName || "Jogador",
+      playerName,
       joinedAt: room.players[playerId]?.joinedAt || nowIso(),
       lastSeen: nowIso()
     };
 
     room.updatedAt = nowIso();
+
+    // Remove pendência aprovada se existir
+    pendingJoinRequests.delete(`${roomId}:${playerId}`);
 
     return res.json({
       ok: true,
@@ -1787,6 +1856,136 @@ app.post("/game/player/leave", (req, res) => {
   } catch (error) {
     logError("game_player_leave_error", error);
     return sendError(res, 500, "ERRO_GAME_PLAYER_LEAVE");
+  }
+});
+
+// SSE dedicado para o anfitrião receber notificações em tempo real (pedidos de entrada)
+app.get("/game/room/:roomId/host-sse", (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive"
+  });
+
+  roomHostSseClients.set(roomId, res);
+
+  const heartbeat = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    if (roomHostSseClients.get(roomId) === res) roomHostSseClients.delete(roomId);
+  });
+});
+
+// Jogador pede para entrar numa sala cujo código já existe (adivinhou o nome)
+app.post("/game/room/request-join", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const roomName = String(req.body?.roomName || "").trim();
+    const playerId = normalizePlayerId(req.body?.playerId);
+    const playerName = normalizePlayerName(req.body?.playerName) || "Jogador";
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const room = panelRooms.get(roomId);
+    if (!room) {
+      return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" });
+    }
+
+    if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) {
+      return res.status(409).json({ ok: false, code: "SALA_CHEIA" });
+    }
+
+    if (roomName.toLowerCase() !== (room.name || "").toLowerCase()) {
+      return res.status(403).json({ ok: false, code: "NOME_SALA_INCORRETO" });
+    }
+
+    if (isPlayerNameTaken(playerName, playerId)) {
+      const suggestion = suggestPlayerName(playerName);
+      return res.status(409).json({ ok: false, code: "NOME_JA_EM_USO", suggestion });
+    }
+
+    const key = `${roomId}:${playerId}`;
+    pendingJoinRequests.set(key, { roomId, playerId, playerName, requestedAt: nowIso() });
+
+    const notified = notifyRoomHost(roomId, "join_request", { roomId, playerId, playerName });
+
+    return res.json({ ok: true, status: "pending", hostOnline: notified });
+  } catch (error) {
+    logError("game_room_request_join_error", error);
+    return sendError(res, 500, "ERRO_GAME_ROOM_REQUEST_JOIN");
+  }
+});
+
+// Anfitrião aprova pedido de entrada
+app.post("/game/room/approve-join", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const playerId = normalizePlayerId(req.body?.playerId);
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const key = `${roomId}:${playerId}`;
+    const pending = pendingJoinRequests.get(key);
+    if (!pending) {
+      return res.status(404).json({ ok: false, code: "PEDIDO_NAO_ENCONTRADO" });
+    }
+
+    const room = panelRooms.get(roomId);
+    if (!room) {
+      pendingJoinRequests.delete(key);
+      return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" });
+    }
+
+    if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) {
+      pendingJoinRequests.delete(key);
+      return res.status(409).json({ ok: false, code: "SALA_CHEIA" });
+    }
+
+    room.players[playerId] = {
+      playerId,
+      playerName: pending.playerName,
+      joinedAt: nowIso(),
+      lastSeen: nowIso()
+    };
+    room.updatedAt = nowIso();
+    pendingJoinRequests.delete(key);
+
+    broadcastPanelUpdate();
+
+    return res.json({ ok: true, room: serializePanelRoom(room) });
+  } catch (error) {
+    logError("game_room_approve_join_error", error);
+    return sendError(res, 500, "ERRO_GAME_ROOM_APPROVE_JOIN");
+  }
+});
+
+// Anfitrião rejeita pedido de entrada
+app.post("/game/room/deny-join", (req, res) => {
+  try {
+    const roomId = normalizeRoomId(req.body?.roomId);
+    const playerId = normalizePlayerId(req.body?.playerId);
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const key = `${roomId}:${playerId}`;
+    const existed = pendingJoinRequests.delete(key);
+
+    return res.json({ ok: true, removed: existed });
+  } catch (error) {
+    logError("game_room_deny_join_error", error);
+    return sendError(res, 500, "ERRO_GAME_ROOM_DENY_JOIN");
   }
 });
 
