@@ -2202,6 +2202,12 @@ app.get("/recording/pass/:email", asyncHandler(async (req, res) => {
   if (!db)    return res.json({ ok: true, active: false });
 
   try {
+    // Usuários com prestígio (nível 50) têm acesso permanente a gravações
+    const usersSnap = await db.collection("users").where("email", "==", email).limit(1).get();
+    if (!usersSnap.empty && usersSnap.docs[0].data().prestige === true) {
+      return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
+    }
+
     const doc = await db.collection("recording_passes").doc(email).get();
     if (!doc.exists) return res.json({ ok: true, active: false });
 
