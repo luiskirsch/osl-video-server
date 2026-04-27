@@ -1,0 +1,21 @@
+# Pastas de dependências (MUITO PESADO)
+node_modules/
+.git/
+
+# Imagens e arquivos de mídia (O Claude não precisa "ler" o código binário de imagens)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.mp4
+*.mp3
+
+# Arquivos de sistema e logs
+.DS_Store
+*.log
+dist/
+build/
+
+# Pasta do próprio VS Code
+.vscode/
