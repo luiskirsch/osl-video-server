@@ -7,7 +7,7 @@ const {
   RECORDING_LAYOUT_URL
 } = require("../config");
 const {
-  panelRooms, activeRecordings, completedRecordings,
+  panelRooms, activeRecordings, completedRecordings, activeStreams,
   broadcastPanelUpdate
 } = require("../game/state");
 
@@ -118,9 +118,85 @@ async function stopRoomRecording(roomId) {
   return completed;
 }
 
+// --- Live streaming via RTMP ---
+
+function buildRtmpUrl(platform, streamKey) {
+  const key = String(streamKey || "").trim();
+  if (!key) throw new Error("STREAM_KEY_VAZIA");
+  const p = String(platform || "").trim().toLowerCase();
+  switch (p) {
+    case "youtube":  return `rtmp://a.rtmp.youtube.com/live2/${key}`;
+    case "twitch":   return `rtmp://live.twitch.tv/app/${key}`;
+    case "facebook": return `rtmps://live-api-s.facebook.com:443/rtmp/${key}`;
+    case "kick":     return `rtmps://fa723fc1b171.global-contribute.live-video.net/app/${key}`;
+    case "tiktok":   // TikTok exige aprovação prévia — usuário cola URL completa
+    case "custom":   return key.startsWith("rtmp") ? key : `rtmp://${key}`;
+    default: throw new Error(`PLATAFORMA_NAO_SUPORTADA:${p}`);
+  }
+}
+
+async function startRoomStreaming(roomId, platforms) {
+  if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
+  if (activeStreams.has(roomId))  throw new Error("STREAM_JA_ATIVO");
+  if (!Array.isArray(platforms) || platforms.length === 0) {
+    throw new Error("PLATAFORMAS_OBRIGATORIAS");
+  }
+
+  const urls = platforms.map(p => buildRtmpUrl(p.name, p.streamKey));
+
+  const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
+
+  const egress = await egressClient.startWebEgress(roomId, {
+    url: layoutUrl,
+    audioOnly: false,
+    videoOnly: false,
+    awaitStartSignal: false,
+    videoWidth: 1080,
+    videoHeight: 1920,
+    streamOutputs: [{
+      protocol: 1, // RTMP
+      urls
+    }]
+  });
+
+  const job = {
+    egressId:  egress.egressId,
+    platforms: platforms.map(p => ({ name: p.name })), // não persiste streamKey
+    urlCount:  urls.length,
+    startedAt: Date.now()
+  };
+  activeStreams.set(roomId, job);
+
+  const room = panelRooms.get(roomId);
+  if (room) { room.streamingActive = true; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
+
+  logInfo("streaming_started", { roomId, egressId: egress.egressId, platforms: job.platforms });
+  return job;
+}
+
+async function stopRoomStreaming(roomId) {
+  const job = activeStreams.get(roomId);
+  if (!job) return null;
+
+  try {
+    await egressClient.stopEgress(job.egressId);
+  } catch (err) {
+    logError("stop_streaming_egress_error", err, { roomId, egressId: job.egressId });
+  }
+
+  activeStreams.delete(roomId);
+
+  const room = panelRooms.get(roomId);
+  if (room) { room.streamingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
+
+  logInfo("streaming_stopped", { roomId, egressId: job.egressId, durationMs: Date.now() - job.startedAt });
+  return { ...job, stoppedAt: Date.now() };
+}
+
 module.exports = {
   egressClient,
   recordingS3Config, recordingDownloadUrl,
   generateLiveKitToken,
-  startRoomRecording, stopRoomRecording
+  startRoomRecording, stopRoomRecording,
+  startRoomStreaming, stopRoomStreaming, buildRtmpUrl
 };

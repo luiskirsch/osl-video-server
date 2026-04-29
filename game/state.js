@@ -27,6 +27,9 @@ const activeRecordings = new Map();
 // roomId → { ...job, downloadUrl, completedAt }
 const completedRecordings = new Map();
 
+// roomId → { egressId, platforms, urls, startedAt }
+const activeStreams = new Map();
+
 // ref → { approved, paymentId, status, ref, produto, email, roomId, updatedAt }
 const pagamentosAprovados = new Map();
 
@@ -97,7 +100,7 @@ function notifyRoomHost(roomId, event, data) {
 module.exports = {
   PANEL_ROOM_TTL_MS, PANEL_PLAYER_TTL_MS, INACTIVITY_CLOSE_MS, MAX_ROOM_PLAYERS,
   panelRooms, panelClients, roomHostSseClients, pendingJoinRequests,
-  activeRecordings, completedRecordings, pagamentosAprovados,
+  activeRecordings, completedRecordings, activeStreams, pagamentosAprovados,
   cleanupPanelRoomPlayers, serializePanelRoom,
   broadcastPanelUpdate, notifyRoomHost
 };

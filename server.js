@@ -21,6 +21,7 @@ const { createRequestId } = require("./utils");
 const healthRouter    = require("./routes/health");
 const gameRouter      = require("./routes/game");
 const recordingRouter = require("./routes/recording");
+const streamingRouter = require("./routes/streaming");
 const discordRouter   = require("./routes/discord");
 const paymentsRouter  = require("./routes/payments");
 const licenseRouter   = require("./routes/license");
@@ -68,6 +69,7 @@ app.use(morgan(":method :url :status :response-time ms reqId=:request-id", {
 app.use(healthRouter);
 app.use(gameRouter);
 app.use(recordingRouter);
+app.use(streamingRouter);
 app.use(discordRouter);
 app.use(paymentsRouter);
 app.use(licenseRouter);
