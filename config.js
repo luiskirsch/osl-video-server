@@ -1,5 +1,12 @@
 const PORT = Number(process.env.PORT || 3000);
 
+// Logical environment (independent of NODE_ENV which is mostly about
+// optimization). Set APP_ENV=staging on the Railway staging service so
+// /health reports it and downstream code can branch when needed.
+const APP_ENV = (process.env.APP_ENV || "production").toLowerCase();
+const IS_STAGING    = APP_ENV === "staging";
+const IS_PRODUCTION = APP_ENV === "production";
+
 const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || "";
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
 const LIVEKIT_URL        = process.env.LIVEKIT_URL        || "wss://osextolugar-eqa7q1iz.livekit.cloud";
@@ -147,6 +154,7 @@ const DISCORD_API_BASE = "https://discord.com/api/v10";
 
 module.exports = {
   PORT,
+  APP_ENV, IS_STAGING, IS_PRODUCTION,
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL, MP_ACCESS_TOKEN,

@@ -14,7 +14,7 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT } = require("./config");
+const { PORT, APP_ENV } = require("./config");
 const { createRequestId } = require("./utils");
 
 // --- Rotas ---
@@ -103,7 +103,7 @@ app.use((err, req, res, next) => {
 
 // --- Startup ---
 const server = app.listen(PORT, "0.0.0.0", () => {
-  logInfo("server_started", { port: PORT });
+  logInfo("server_started", { port: PORT, appEnv: APP_ENV });
 });
 
 function shutdown(signal) {

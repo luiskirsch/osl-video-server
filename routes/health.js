@@ -1,16 +1,25 @@
 const express = require("express");
 const fs      = require("fs");
 const { APP_START_TIME, LOG_FILE } = require("../logger");
-const { PORT } = require("../config");
+const { PORT, APP_ENV } = require("../config");
 const { getDb } = require("../services/firestore");
 
 const router = express.Router();
+
+function firebaseProjectId() {
+  const db = getDb();
+  if (!db) return null;
+  // firebase-admin firestore exposes the projectId on the underlying app options
+  try { return db.app?.options?.projectId || db._settings?.projectId || null; }
+  catch { return null; }
+}
 
 router.get("/", (req, res) => {
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
     message: "Servidor do O SextoLugar está online.",
+    appEnv: APP_ENV,
     port: PORT
   });
 });
@@ -19,11 +28,13 @@ router.get("/health", (req, res) => {
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
+    appEnv: APP_ENV,
+    nodeEnv: process.env.NODE_ENV || "development",
     uptimeSec: Math.round(process.uptime()),
     startedAt: new Date(APP_START_TIME).toISOString(),
     now: new Date().toISOString(),
     firebaseConfigured: !!getDb(),
-    environment: process.env.NODE_ENV || "development"
+    firebaseProjectId: firebaseProjectId()
   });
 });
 
