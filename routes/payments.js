@@ -157,6 +157,15 @@ router.post("/webhook", asyncHandler(async (req, res) => {
         logInfo("recording_pass_activated", { email: approvedEmail, expiresAt });
       }
 
+      if (productIdFromWebhook === "streaming-mensal" && approvedEmail && db) {
+        const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+        db.collection("streaming_passes").doc(approvedEmail).set({
+          email: approvedEmail, paymentId: String(payment.id), ref,
+          activatedAt: Date.now(), expiresAt, type: "streaming-mensal"
+        }, { merge: false }).catch(err => logError("streaming_pass_save_error", err));
+        logInfo("streaming_pass_activated", { email: approvedEmail, expiresAt });
+      }
+
       if (db) {
         try {
           await approveReferralRewardFromPayment(payment);

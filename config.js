@@ -71,6 +71,12 @@ const PRODUCT_CATALOG = {
     price: 14.90,
     type: "subscription"
   },
+  "streaming-mensal": {
+    title: "O SextoLugar — Stream Pass Mensal",
+    description: "Transmita ao vivo (YouTube, Twitch, Facebook, Kick, TikTok) sem limite por 30 dias",
+    price: 14.90,
+    type: "subscription"
+  },
   "sala-premium": {
     title: "O SextoLugar — Sala Premium",
     description: "Sala premium com recursos avançados",
