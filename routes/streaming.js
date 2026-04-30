@@ -41,8 +41,11 @@ router.post("/streaming/start", asyncHandler(async (req, res) => {
     if (err.message === "STREAM_JA_ATIVO") return sendError(res, 409, "STREAM_JA_ATIVO");
     if (err.message?.startsWith("PLATAFORMA_NAO_SUPORTADA")) return sendError(res, 400, err.message);
     if (err.message?.startsWith("LAYOUT_NAO_SUPORTADO"))     return sendError(res, 400, err.message);
+    if (err.message?.includes("room does not exist")) {
+      return sendError(res, 409, "SALA_LIVEKIT_VAZIA", { hint: "Abra Câmera ou Mic antes de iniciar POV/Grid (Cards funciona sem)" });
+    }
     logError("streaming_start_error", err, { roomId });
-    return sendError(res, 500, "ERRO_INICIAR_STREAMING", { detail: err.message });
+    return sendError(res, 500, "ERRO_INICIAR_STREAMING");
   }
 }));
 
