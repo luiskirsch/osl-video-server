@@ -42,7 +42,7 @@ router.post("/streaming/start", asyncHandler(async (req, res) => {
     if (err.message?.startsWith("PLATAFORMA_NAO_SUPORTADA")) return sendError(res, 400, err.message);
     if (err.message?.startsWith("LAYOUT_NAO_SUPORTADO"))     return sendError(res, 400, err.message);
     logError("streaming_start_error", err, { roomId });
-    return sendError(res, 500, "ERRO_INICIAR_STREAMING");
+    return sendError(res, 500, "ERRO_INICIAR_STREAMING", { detail: err.message });
   }
 }));
 
