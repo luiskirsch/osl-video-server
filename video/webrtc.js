@@ -146,10 +146,10 @@ async function startRoomStreaming(roomId, platforms) {
 
   const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
 
-  // SDK v2: primeiro arg é URL; segundo é o output object
+  // SDK v2: primeiro arg é URL; segundo é o output (singular, oneof)
   const egress = await egressClient.startWebEgress(
     layoutUrl,
-    { streamOutputs: [{ protocol: 1, urls }] }
+    { stream: { protocol: 1, urls } }
   );
 
   const job = {
