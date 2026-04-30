@@ -65,19 +65,24 @@ async function startRoomRecording(roomId, type, ref, email) {
   const filepath = `recordings/${roomId}/${ts}-${type}.mp4`;
   const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
 
-  const egress = await egressClient.startWebEgress(roomId, {
-    url: layoutUrl,
-    audioOnly: false,
-    videoOnly: false,
-    awaitStartSignal: false,
-    videoWidth: 1080,
-    videoHeight: 1920,
-    fileOutputs: [{
-      fileType: 1,
-      filepath,
-      s3: recordingS3Config()
-    }]
-  });
+  // SDK v2: primeiro arg é a URL. Antes passávamos roomId aqui — a SDK aceitava
+  // silenciosamente, mas o egress browser tentava carregar "SL-XXXX" como URL
+  // e renderizava em branco (causava o "layout bugado" do recording).
+  const egress = await egressClient.startWebEgress(
+    layoutUrl,
+    {
+      audioOnly: false,
+      videoOnly: false,
+      awaitStartSignal: false,
+      videoWidth: 1080,
+      videoHeight: 1920,
+      fileOutputs: [{
+        fileType: 1,
+        filepath,
+        s3: recordingS3Config()
+      }]
+    }
+  );
 
   const job = { egressId: egress.egressId, type, ref, email, startedAt: ts, filepath };
   activeRecordings.set(roomId, job);
