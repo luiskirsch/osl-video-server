@@ -167,31 +167,109 @@ router.post("/streaming/stop", asyncHandler(async (req, res) => {
     const job = await stopRoomStreaming(roomId);
     const durationMs = job ? (job.stoppedAt - job.startedAt) : 0;
 
-    // Debita minutos da quota free tier (apenas se o auth foi "free")
     const email = activeJob.email;
-    if (email && activeJob.authType === "free") {
+    const minutes = Math.ceil(durationMs / 60000);
+
+    if (email) {
       const db = getDb();
       if (db) {
-        const minutes = Math.ceil(durationMs / 60000);
-        const docRef = db.collection("streaming_usage").doc(`${email}_${todayKey()}`);
+        // Debita minutos da quota free tier (apenas se o auth foi "free")
+        if (activeJob.authType === "free") {
+          const docRef = db.collection("streaming_usage").doc(`${email}_${todayKey()}`);
+          try {
+            const cur = await docRef.get();
+            const usedMin = cur.exists ? Number(cur.data().minutesUsed || 0) : 0;
+            await docRef.set({
+              email, date: todayKey(),
+              minutesUsed: usedMin + minutes,
+              lastSessionEnd: Date.now()
+            }, { merge: true });
+          } catch (err) {
+            logError("streaming_usage_debit_error", err, { email, minutes });
+          }
+        }
+
+        // Phase 4: agrega stats por usuário (todos os tiers, prestige incluso)
         try {
-          const cur = await docRef.get();
-          const usedMin = cur.exists ? Number(cur.data().minutesUsed || 0) : 0;
-          await docRef.set({
-            email, date: todayKey(),
-            minutesUsed: usedMin + minutes,
-            lastSessionEnd: Date.now()
+          const statsRef = db.collection("streaming_stats").doc(email);
+          const cur = await statsRef.get();
+          const prev = cur.exists ? cur.data() : {};
+          await statsRef.set({
+            email,
+            totalMinutes: Number(prev.totalMinutes || 0) + minutes,
+            totalSessions: Number(prev.totalSessions || 0) + 1,
+            firstStreamAt: prev.firstStreamAt || (job?.startedAt || Date.now()),
+            lastStreamAt: Date.now()
           }, { merge: true });
         } catch (err) {
-          logError("streaming_usage_debit_error", err, { email, minutes });
+          logError("streaming_stats_update_error", err, { email });
+        }
+
+        // Phase 4: histórico individual de sessão
+        try {
+          await db.collection("streaming_history").doc(email).collection("sessions").add({
+            startedAt: job?.startedAt || Date.now() - durationMs,
+            endedAt:   Date.now(),
+            durationMs,
+            durationMin: minutes,
+            platforms: (activeJob.platforms || []).map(p => p.name),
+            layout:    activeJob.layout || "cards",
+            authType:  activeJob.authType || "unknown"
+          });
+        } catch (err) {
+          logError("streaming_history_save_error", err, { email });
         }
       }
     }
 
-    return res.json({ ok: true, durationMs });
+    return res.json({ ok: true, durationMs, minutes });
   } catch (err) {
     logError("streaming_stop_error", err, { roomId });
     return sendError(res, 500, "ERRO_PARAR_STREAMING");
+  }
+}));
+
+// GET /streaming/stats/:email — agregado total do usuário (Phase 4)
+router.get("/streaming/stats/:email", asyncHandler(async (req, res) => {
+  const email = String(req.params.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  const db = getDb();
+  if (!db) return res.json({ ok: true, totalMinutes: 0, totalSessions: 0 });
+  try {
+    const doc = await db.collection("streaming_stats").doc(email).get();
+    if (!doc.exists) return res.json({ ok: true, totalMinutes: 0, totalSessions: 0 });
+    const d = doc.data();
+    return res.json({
+      ok: true,
+      totalMinutes:  Number(d.totalMinutes || 0),
+      totalSessions: Number(d.totalSessions || 0),
+      firstStreamAt: d.firstStreamAt || null,
+      lastStreamAt:  d.lastStreamAt  || null
+    });
+  } catch (err) {
+    logError("streaming_stats_fetch_error", err);
+    return res.json({ ok: true, totalMinutes: 0, totalSessions: 0 });
+  }
+}));
+
+// GET /streaming/history/:email?limit=20 — últimas sessões (Phase 4)
+router.get("/streaming/history/:email", asyncHandler(async (req, res) => {
+  const email = String(req.params.email || "").trim().toLowerCase();
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  const db = getDb();
+  if (!db) return res.json({ ok: true, sessions: [] });
+  try {
+    const snap = await db
+      .collection("streaming_history").doc(email).collection("sessions")
+      .orderBy("endedAt", "desc")
+      .limit(limit)
+      .get();
+    const sessions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return res.json({ ok: true, sessions });
+  } catch (err) {
+    logError("streaming_history_fetch_error", err);
+    return res.json({ ok: true, sessions: [] });
   }
 }));
 
