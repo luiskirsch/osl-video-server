@@ -135,7 +135,14 @@ function buildRtmpUrl(platform, streamKey) {
   }
 }
 
-async function startRoomStreaming(roomId, platforms) {
+// Mapeia layoutId do frontend → layout built-in do LiveKit (room composite)
+// "cards" não está aqui porque usa Web Egress com URL custom (recording-layout.html)
+const LIVEKIT_BUILTIN_LAYOUTS = {
+  "pov-host": "single-speaker",
+  "grid":     "grid"
+};
+
+async function startRoomStreaming(roomId, platforms, layoutId = "cards") {
   if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
   if (activeStreams.has(roomId))  throw new Error("STREAM_JA_ATIVO");
   if (!Array.isArray(platforms) || platforms.length === 0) {
@@ -143,18 +150,30 @@ async function startRoomStreaming(roomId, platforms) {
   }
 
   const urls = platforms.map(p => buildRtmpUrl(p.name, p.streamKey));
+  const streamOutput = { stream: { protocol: 1, urls } };
 
-  const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
+  const layout = String(layoutId || "cards").trim();
+  let egress;
 
-  // SDK v2: primeiro arg é URL; segundo é o output (singular, oneof)
-  const egress = await egressClient.startWebEgress(
-    layoutUrl,
-    { stream: { protocol: 1, urls } }
-  );
+  if (layout === "cards") {
+    // Web Egress com layout HTML custom (recording-layout.html)
+    const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
+    egress = await egressClient.startWebEgress(layoutUrl, streamOutput);
+  } else if (LIVEKIT_BUILTIN_LAYOUTS[layout]) {
+    // Room Composite Egress com layout built-in LiveKit (single-speaker, grid)
+    egress = await egressClient.startRoomCompositeEgress(
+      roomId,
+      streamOutput,
+      { layout: LIVEKIT_BUILTIN_LAYOUTS[layout] }
+    );
+  } else {
+    throw new Error(`LAYOUT_NAO_SUPORTADO:${layout}`);
+  }
 
   const job = {
     egressId:  egress.egressId,
     platforms: platforms.map(p => ({ name: p.name })), // não persiste streamKey
+    layout,
     urlCount:  urls.length,
     startedAt: Date.now()
   };
@@ -163,7 +182,7 @@ async function startRoomStreaming(roomId, platforms) {
   const room = panelRooms.get(roomId);
   if (room) { room.streamingActive = true; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
 
-  logInfo("streaming_started", { roomId, egressId: egress.egressId, platforms: job.platforms });
+  logInfo("streaming_started", { roomId, egressId: egress.egressId, platforms: job.platforms, layout });
   return job;
 }
 
