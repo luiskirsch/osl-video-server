@@ -146,18 +146,11 @@ async function startRoomStreaming(roomId, platforms) {
 
   const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
 
-  const egress = await egressClient.startWebEgress(roomId, {
-    url: layoutUrl,
-    audioOnly: false,
-    videoOnly: false,
-    awaitStartSignal: false,
-    videoWidth: 1080,
-    videoHeight: 1920,
-    streamOutputs: [{
-      protocol: 1, // RTMP
-      urls
-    }]
-  });
+  // SDK v2: primeiro arg é URL; segundo é o output object
+  const egress = await egressClient.startWebEgress(
+    layoutUrl,
+    { streamOutputs: [{ protocol: 1, urls }] }
+  );
 
   const job = {
     egressId:  egress.egressId,
