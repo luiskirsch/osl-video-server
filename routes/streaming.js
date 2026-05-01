@@ -1,5 +1,6 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
+const admin = require("firebase-admin");
 const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { activeStreams, pagamentosAprovados } = require("../game/state");
@@ -64,36 +65,46 @@ function todayKey() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
-async function checkAuthAndQuota(email) {
-  // Retorna { allowed, type, remainingMin?, reason? }
+// Security #5: pré-debita upfront o pior caso (toda quota restante) numa transaction
+// pra que N starts concorrentes sejam serializados. /stop refunda o tempo não usado.
+async function checkAuthAndReserve(email) {
   if (!email) return { allowed: false, reason: "EMAIL_OBRIGATORIO" };
   const db = getDb();
-  if (!db) return { allowed: true, type: "no-firestore" }; // fallback se Firestore offline
+  if (!db) return { allowed: true, type: "no-firestore" };
 
   try {
-    // 1. Prestige
+    // 1. Prestige (sem reserva, sem limite de quota)
     const usersSnap = await db.collection("users").where("email", "==", email).limit(1).get();
     if (!usersSnap.empty && usersSnap.docs[0].data().prestige === true) {
-      return { allowed: true, type: "prestige" };
+      return { allowed: true, type: "prestige", reservedMin: 0 };
     }
 
     // 2. Pass mensal ativo
     const passDoc = await db.collection("streaming_passes").doc(email).get();
     if (passDoc.exists && passDoc.data().expiresAt > Date.now()) {
-      return { allowed: true, type: "pass", expiresAt: passDoc.data().expiresAt };
+      return { allowed: true, type: "pass", reservedMin: 0, expiresAt: passDoc.data().expiresAt };
     }
 
-    // 3. Free tier: verifica uso do dia
-    const usageDoc = await db.collection("streaming_usage").doc(`${email}_${todayKey()}`).get();
-    const usedMin = usageDoc.exists ? Number(usageDoc.data().minutesUsed || 0) : 0;
-    const remainingMin = Math.max(0, FREE_TIER_DAILY_LIMIT_MIN - usedMin);
-    if (remainingMin <= 0) {
-      return { allowed: false, reason: "QUOTA_DIARIA_ESGOTADA", usedMin, remainingMin: 0 };
-    }
-    return { allowed: true, type: "free", remainingMin };
+    // 3. Free tier: transação atomica check + reserve
+    const usageRef = db.collection("streaming_usage").doc(`${email}_${todayKey()}`);
+    return await db.runTransaction(async tx => {
+      const usage = await tx.get(usageRef);
+      const used = usage.exists ? Number(usage.data().minutesUsed || 0) : 0;
+      const remaining = FREE_TIER_DAILY_LIMIT_MIN - used;
+      if (remaining <= 0) {
+        return { allowed: false, reason: "QUOTA_DIARIA_ESGOTADA", usedMin: used, remainingMin: 0 };
+      }
+      const reservedMin = Math.min(FREE_TIER_DAILY_LIMIT_MIN, remaining);
+      tx.set(usageRef, {
+        email, date: todayKey(),
+        minutesUsed: used + reservedMin,
+        lastReservation: Date.now()
+      }, { merge: true });
+      return { allowed: true, type: "free", reservedMin, remainingMin: 0 };
+    });
   } catch (err) {
-    logError("streaming_auth_check_error", err);
-    return { allowed: true, type: "auth-error-fallback" }; // não bloqueia em caso de erro do DB
+    logError("streaming_auth_reserve_error", err);
+    return { allowed: true, type: "auth-error-fallback", reservedMin: 0 };
   }
 }
 
@@ -104,14 +115,17 @@ async function checkAuthAndQuota(email) {
 //   platforms: [{ name: "youtube"|"twitch"|"facebook"|"kick"|"tiktok"|"custom", streamKey }],
 //   layoutId: "cards" | "pov-host" | "grid"     (opcional, default "cards")
 // }
-router.post("/streaming/start", startLimiter, asyncHandler(async (req, res) => {
+// Security #4: /streaming/start agora exige Firebase Bearer token. Email é
+// extraído do token (não do body) — impede attacker de iniciar stream usando
+// o pass/quota de outro usuário só fornecendo o email dele.
+router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(async (req, res) => {
   const roomId    = normalizeRoomId(req.body?.roomId);
-  const email     = String(req.body?.email || "").trim().toLowerCase();
+  const email     = String(req.firebaseUser?.email || "").trim().toLowerCase();
   const platforms = req.body?.platforms;
   const layoutId  = String(req.body?.layoutId || "cards").trim();
 
   if (!roomId)                            return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-  if (!email)                             return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  if (!email)                             return sendError(res, 401, "TOKEN_SEM_EMAIL");
   if (!Array.isArray(platforms) || !platforms.length) return sendError(res, 400, "PLATAFORMAS_OBRIGATORIAS");
   if (!egressClient)                      return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
@@ -120,8 +134,8 @@ router.post("/streaming/start", startLimiter, asyncHandler(async (req, res) => {
     if (!p?.streamKey) return sendError(res, 400, "STREAM_KEY_OBRIGATORIA");
   }
 
-  // Gate: prestige / pass ativo / free tier com quota
-  const auth = await checkAuthAndQuota(email);
+  // Security #5: gate atomico + reserva de quota
+  const auth = await checkAuthAndReserve(email);
   if (!auth.allowed) {
     return sendError(res, 402, auth.reason || "ACESSO_NEGADO", {
       usedMin: auth.usedMin,
@@ -130,11 +144,13 @@ router.post("/streaming/start", startLimiter, asyncHandler(async (req, res) => {
     });
   }
 
+  let job;
   try {
-    const job = await startRoomStreaming(roomId, platforms, layoutId);
-    job.email   = email;
-    job.authType = auth.type;
-    activeStreams.set(roomId, job); // sobrescreve com email pra debit no stop
+    job = await startRoomStreaming(roomId, platforms, layoutId);
+    job.email       = email;
+    job.authType    = auth.type;
+    job.reservedMin = auth.reservedMin || 0;
+    activeStreams.set(roomId, job);
     return res.json({
       ok: true,
       egressId:  job.egressId,
@@ -145,6 +161,17 @@ router.post("/streaming/start", startLimiter, asyncHandler(async (req, res) => {
       remainingMin: auth.remainingMin ?? null
     });
   } catch (err) {
+    // CRITICAL: se a reserva foi feita mas startRoomStreaming falhou, refunda
+    if (auth.type === "free" && auth.reservedMin > 0) {
+      try {
+        const db = getDb();
+        if (db) {
+          await db.collection("streaming_usage").doc(`${email}_${todayKey()}`).update({
+            minutesUsed: admin.firestore.FieldValue.increment(-auth.reservedMin)
+          });
+        }
+      } catch (_) {}
+    }
     if (err.message === "STREAM_JA_ATIVO") return sendError(res, 409, "STREAM_JA_ATIVO");
     if (err.message?.startsWith("PLATAFORMA_NAO_SUPORTADA")) return sendError(res, 400, err.message);
     if (err.message?.startsWith("LAYOUT_NAO_SUPORTADO"))     return sendError(res, 400, err.message);
@@ -180,11 +207,17 @@ router.get("/streaming/usage/:email", readLimiter, requireFirebaseAuth, requireE
 
 // POST /streaming/stop
 // body: { roomId }
-router.post("/streaming/stop", asyncHandler(async (req, res) => {
+// Security #4: exige Firebase Bearer; só o dono do stream (mesmo email) pode parar.
+router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   const activeJob = activeStreams.get(roomId);
   if (!activeJob) return sendError(res, 404, "STREAM_NAO_ENCONTRADO");
+
+  const callerEmail = String(req.firebaseUser?.email || "").toLowerCase();
+  if (activeJob.email && activeJob.email !== callerEmail) {
+    return sendError(res, 403, "NAO_E_SEU_STREAM");
+  }
 
   try {
     const job = await stopRoomStreaming(roomId);
@@ -196,19 +229,19 @@ router.post("/streaming/stop", asyncHandler(async (req, res) => {
     if (email) {
       const db = getDb();
       if (db) {
-        // Debita minutos da quota free tier (apenas se o auth foi "free")
+        // Security #5: refunda o tempo não usado da reserva (debitada upfront no /start)
         if (activeJob.authType === "free") {
-          const docRef = db.collection("streaming_usage").doc(`${email}_${todayKey()}`);
-          try {
-            const cur = await docRef.get();
-            const usedMin = cur.exists ? Number(cur.data().minutesUsed || 0) : 0;
-            await docRef.set({
-              email, date: todayKey(),
-              minutesUsed: usedMin + minutes,
-              lastSessionEnd: Date.now()
-            }, { merge: true });
-          } catch (err) {
-            logError("streaming_usage_debit_error", err, { email, minutes });
+          const reservedMin = Number(activeJob.reservedMin || 0);
+          const delta = minutes - reservedMin; // se positivo, debita mais; se negativo, refunda
+          if (delta !== 0) {
+            try {
+              await db.collection("streaming_usage").doc(`${email}_${todayKey()}`).update({
+                minutesUsed: admin.firestore.FieldValue.increment(delta),
+                lastSessionEnd: Date.now()
+              });
+            } catch (err) {
+              logError("streaming_usage_settle_error", err, { email, reservedMin, actualMin: minutes });
+            }
           }
         }
 

@@ -1,15 +1,35 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const admin  = require("firebase-admin");
-const { logInfo } = require("../logger");
+const { logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError, normalizeUid, normalizeEmail } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
 const { requireAdmin, signPayload, generateLicenseCode } = require("../services/auth");
-const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECRET, LICENSE_VALIDITY_MS } = require("../config");
+const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECRET, LICENSE_VALIDITY_MS, ADMIN_SECRET } = require("../config");
 
 const router = express.Router();
 
+// Security #6: rate limit em /admin/* — 3 tentativas/10min/IP impede brute force do secret.
+const adminLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 3,
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_ADMIN", hint: "Aguarde 10 min antes de tentar de novo" }
+});
+
+// Security #6: verifica força do ADMIN_SECRET na inicialização. Avisa se for fraco/curto.
+(function checkAdminSecretStrength() {
+  if (!ADMIN_SECRET) {
+    logWarn("admin_secret_missing", { hint: "Defina ADMIN_SECRET com 32+ chars random no Railway" });
+    return;
+  }
+  if (ADMIN_SECRET.length < 32) {
+    logWarn("admin_secret_weak", { length: ADMIN_SECRET.length, hint: "Use 32+ chars random" });
+  }
+})();
+
 // POST /admin/licenca/criar
-router.post("/admin/licenca/criar", requireAdmin, asyncHandler(async (req, res) => {
+router.post("/admin/licenca/criar", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
@@ -50,7 +70,7 @@ router.post("/admin/licenca/criar", requireAdmin, asyncHandler(async (req, res) 
 }));
 
 // POST /admin/licenca/desvincular
-router.post("/admin/licenca/desvincular", requireAdmin, asyncHandler(async (req, res) => {
+router.post("/admin/licenca/desvincular", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
