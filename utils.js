@@ -28,6 +28,11 @@ function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+// Normaliza email vindo de path param de rota Express
+function normalizePathEmail(req) {
+  return normalizeEmail(req?.params?.email);
+}
+
 function sanitizeNextPath(value) {
   const raw = String(value || "").trim();
   if (!raw.startsWith("/")) return "/painel.html";
@@ -74,7 +79,7 @@ function buildDiscordAvatarUrl(discordUser) {
 
 module.exports = {
   asyncHandler, sendError,
-  normalizeUid, normalizeEmail, sanitizeNextPath,
+  normalizeUid, normalizeEmail, normalizePathEmail, sanitizeNextPath,
   sleep, formatFirestoreDate,
   createRequestId, httpFetch,
   nowIso, buildDiscordAvatarUrl

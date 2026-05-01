@@ -4,7 +4,7 @@ const { nowIso } = require("../utils");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
-  RECORDING_LAYOUT_URL
+  RECORDING_LAYOUT_URL, MAX_COMPLETED_RECORDINGS_IN_MEMORY
 } = require("../config");
 const {
   panelRooms, activeRecordings, completedRecordings, activeStreams,
@@ -110,10 +110,15 @@ async function stopRoomRecording(roomId) {
   const completed   = { ...job, downloadUrl, completedAt: Date.now() };
   completedRecordings.set(roomId, completed);
 
-  // Buffer máximo de 100 gravações concluídas em memória
-  if (completedRecordings.size > 100) {
-    const oldest = completedRecordings.keys().next().value;
-    completedRecordings.delete(oldest);
+  // Buffer máximo de gravações concluídas em memória (D5: race-safe — encontra
+  // o mais antigo por completedAt em vez de assumir insertion order do Map).
+  while (completedRecordings.size > MAX_COMPLETED_RECORDINGS_IN_MEMORY) {
+    let oldestKey = null, oldestTs = Infinity;
+    for (const [k, v] of completedRecordings) {
+      if ((v.completedAt || 0) < oldestTs) { oldestTs = v.completedAt || 0; oldestKey = k; }
+    }
+    if (oldestKey == null) break;
+    completedRecordings.delete(oldestKey);
   }
 
   const room = panelRooms.get(roomId);

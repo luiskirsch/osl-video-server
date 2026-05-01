@@ -1,6 +1,6 @@
 const express = require("express");
 const { logError, logInfo } = require("../logger");
-const { asyncHandler, sendError, nowIso } = require("../utils");
+const { asyncHandler, sendError, nowIso, normalizePathEmail } = require("../utils");
 const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, broadcastPanelUpdate } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken } = require("../video/webrtc");
@@ -23,7 +23,7 @@ router.get("/token", asyncHandler(async (req, res) => {
 
 // GET /recording/pass/:email — verifica passe mensal ativo
 router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
-  const email = String(req.params.email || "").trim().toLowerCase();
+  const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
   if (await isPrestige(email)) {
@@ -37,7 +37,7 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
 router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-  if (!egressClient) return res.json({ ok: false, reason: "EGRESS_NAO_CONFIGURADO" });
+  if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
   if (activeRecordings.has(roomId)) {
     const job = activeRecordings.get(roomId);
@@ -49,7 +49,7 @@ router.post("/recording/auto-start", asyncHandler(async (req, res) => {
     return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
   } catch (err) {
     logError("recording_auto_start_error", err, { roomId });
-    return res.json({ ok: false, reason: err.message });
+    return sendError(res, 500, "ERRO_INICIAR_GRAVACAO_AUTO");
   }
 }));
 

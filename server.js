@@ -122,12 +122,35 @@ app.use((err, req, res, next) => {
 });
 
 // --- Startup ---
+const { startCleanupLoop, stopCleanupLoop } = require("./services/cleanup");
+const { activeStreams, activeRecordings } = require("./game/state");
+const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
+
 const server = app.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
+  startCleanupLoop();
 });
 
-function shutdown(signal) {
+async function gracefullyStopAllEgress() {
+  // H1: SIGTERM no Railway antes mata egress no meio. Aqui paramos
+  // todos jobs ativos pra finalizar arquivos S3 / streams limpinhos.
+  const promises = [];
+  for (const roomId of activeStreams.keys()) {
+    promises.push(stopRoomStreaming(roomId).catch(e => logError("shutdown_stop_stream_error", e, { roomId })));
+  }
+  for (const roomId of activeRecordings.keys()) {
+    promises.push(stopRoomRecording(roomId).catch(e => logError("shutdown_stop_recording_error", e, { roomId })));
+  }
+  if (promises.length === 0) return;
+  logInfo("shutdown_stopping_egress", { count: promises.length });
+  await Promise.allSettled(promises);
+}
+
+async function shutdown(signal) {
   logWarn("shutdown_started", { signal });
+  stopCleanupLoop();
+
+  await gracefullyStopAllEgress();
 
   server.close((err) => {
     if (err) { logError("shutdown_error", err, { signal }); process.exit(1); }
@@ -138,8 +161,8 @@ function shutdown(signal) {
   setTimeout(() => {
     logWarn("shutdown_forced", { signal });
     process.exit(1);
-  }, 10000).unref();
+  }, 15000).unref();
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT",  () => shutdown("SIGINT"));
+process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => process.exit(1)); });
+process.on("SIGINT",  () => { shutdown("SIGINT").catch(() => process.exit(1)); });

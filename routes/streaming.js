@@ -2,7 +2,7 @@ const express = require("express");
 const rateLimit = require("express-rate-limit");
 const admin = require("firebase-admin");
 const { logError, logInfo } = require("../logger");
-const { asyncHandler, sendError } = require("../utils");
+const { asyncHandler, sendError, normalizePathEmail } = require("../utils");
 const { activeStreams, pagamentosAprovados } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomStreaming, stopRoomStreaming, egressClient } = require("../video/webrtc");
@@ -34,7 +34,7 @@ const readLimiter = rateLimit({
 
 // GET /streaming/pass/:email — verifica se o email tem Stream Pass mensal ativo (ou Prestige)
 router.get("/streaming/pass/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
-  const email = String(req.params.email || "").trim().toLowerCase();
+  const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
   if (await isPrestige(email)) {
@@ -171,7 +171,7 @@ router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(
 
 // GET /streaming/usage/:email — quanto da quota free tier de hoje já foi usada
 router.get("/streaming/usage/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
-  const email = String(req.params.email || "").trim().toLowerCase();
+  const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
   const db = getDb();
   if (!db) return res.json({ ok: true, dailyLimitMin: FREE_TIER_DAILY_LIMIT_MIN, usedMin: 0, remainingMin: FREE_TIER_DAILY_LIMIT_MIN });
@@ -272,7 +272,7 @@ router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res
 
 // GET /streaming/stats/:email — agregado total do usuário (Phase 4)
 router.get("/streaming/stats/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
-  const email = String(req.params.email || "").trim().toLowerCase();
+  const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
   const db = getDb();
   if (!db) return res.json({ ok: true, totalMinutes: 0, totalSessions: 0 });
@@ -295,7 +295,7 @@ router.get("/streaming/stats/:email", readLimiter, requireFirebaseAuth, requireE
 
 // GET /streaming/history/:email?limit=20 — últimas sessões (Phase 4)
 router.get("/streaming/history/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
-  const email = String(req.params.email || "").trim().toLowerCase();
+  const email = normalizePathEmail(req);
   const rawLimit = Number(req.query.limit);
   const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");

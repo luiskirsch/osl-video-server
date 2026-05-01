@@ -1,8 +1,9 @@
 const express = require("express");
 const fs      = require("fs");
 const { APP_START_TIME, LOG_FILE } = require("../logger");
-const { PORT, APP_ENV } = require("../config");
+const { PORT, APP_ENV, LIVEKIT_API_KEY, LIVEKIT_URL } = require("../config");
 const { getDb } = require("../services/firestore");
+const { activeStreams, activeRecordings } = require("../game/state");
 
 const router = express.Router();
 
@@ -34,7 +35,11 @@ router.get("/health", (req, res) => {
     startedAt: new Date(APP_START_TIME).toISOString(),
     now: new Date().toISOString(),
     firebaseConfigured: !!getDb(),
-    firebaseProjectId: firebaseProjectId()
+    firebaseProjectId: firebaseProjectId(),
+    livekitConfigured: !!LIVEKIT_API_KEY,
+    livekitUrl: LIVEKIT_URL || null,
+    activeStreams: activeStreams.size,
+    activeRecordings: activeRecordings.size
   });
 });
 
