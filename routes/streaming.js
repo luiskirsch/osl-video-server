@@ -1,15 +1,37 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { activeStreams, pagamentosAprovados } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomStreaming, stopRoomStreaming, egressClient } = require("../video/webrtc");
-const { getDb } = require("../services/firestore");
+const { getDb, requireFirebaseAuth, requireEmailMatchesToken } = require("../services/firestore");
 
 const router = express.Router();
 
+// Security #11: rate limit pra evitar abuso de Egress LiveKit ($) e enumeração
+// Usa IP + email (quando presente) como chave pra evitar bypass simples por IP rotation.
+const startLimiter = rateLimit({
+  windowMs: 60 * 1000,        // 1 min
+  max: 6,                     // 6 starts/min/IP
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Tente de novo em 1 min" },
+  keyGenerator: (req) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    return email || (req.ip || "anon");
+  }
+});
+
+// Limit mais frouxo pra leituras (status/usage/pass/stats/history) — protege de enumeração
+const readLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,                    // 30 reads/min/IP
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO" }
+});
+
 // GET /streaming/pass/:email — verifica se o email tem Stream Pass mensal ativo (ou Prestige)
-router.get("/streaming/pass/:email", asyncHandler(async (req, res) => {
+router.get("/streaming/pass/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
@@ -82,7 +104,7 @@ async function checkAuthAndQuota(email) {
 //   platforms: [{ name: "youtube"|"twitch"|"facebook"|"kick"|"tiktok"|"custom", streamKey }],
 //   layoutId: "cards" | "pov-host" | "grid"     (opcional, default "cards")
 // }
-router.post("/streaming/start", asyncHandler(async (req, res) => {
+router.post("/streaming/start", startLimiter, asyncHandler(async (req, res) => {
   const roomId    = normalizeRoomId(req.body?.roomId);
   const email     = String(req.body?.email || "").trim().toLowerCase();
   const platforms = req.body?.platforms;
@@ -126,6 +148,7 @@ router.post("/streaming/start", asyncHandler(async (req, res) => {
     if (err.message === "STREAM_JA_ATIVO") return sendError(res, 409, "STREAM_JA_ATIVO");
     if (err.message?.startsWith("PLATAFORMA_NAO_SUPORTADA")) return sendError(res, 400, err.message);
     if (err.message?.startsWith("LAYOUT_NAO_SUPORTADO"))     return sendError(res, 400, err.message);
+    if (err.message?.startsWith("STREAM_KEY_"))              return sendError(res, 400, err.message);
     if (err.message?.includes("room does not exist")) {
       return sendError(res, 409, "SALA_LIVEKIT_VAZIA", { hint: "Abra Câmera ou Mic antes de iniciar POV/Grid (Cards funciona sem)" });
     }
@@ -135,7 +158,7 @@ router.post("/streaming/start", asyncHandler(async (req, res) => {
 }));
 
 // GET /streaming/usage/:email — quanto da quota free tier de hoje já foi usada
-router.get("/streaming/usage/:email", asyncHandler(async (req, res) => {
+router.get("/streaming/usage/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
   const db = getDb();
@@ -230,7 +253,7 @@ router.post("/streaming/stop", asyncHandler(async (req, res) => {
 }));
 
 // GET /streaming/stats/:email — agregado total do usuário (Phase 4)
-router.get("/streaming/stats/:email", asyncHandler(async (req, res) => {
+router.get("/streaming/stats/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
   const db = getDb();
@@ -253,7 +276,7 @@ router.get("/streaming/stats/:email", asyncHandler(async (req, res) => {
 }));
 
 // GET /streaming/history/:email?limit=20 — últimas sessões (Phase 4)
-router.get("/streaming/history/:email", asyncHandler(async (req, res) => {
+router.get("/streaming/history/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
   const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");

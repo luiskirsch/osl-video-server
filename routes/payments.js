@@ -1,4 +1,5 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
 const { ensureDb } = require("../services/firestore");
@@ -10,8 +11,20 @@ const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEN
 
 const router = express.Router();
 
+// Security #11: rate limit em /criar-pagamento pra evitar abuso de criação de cobranças MP
+const paymentLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,                     // 5 pedidos/min/IP+email
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Aguarde 1 min antes de criar outro pagamento" },
+  keyGenerator: (req) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    return email || (req.ip || "anon");
+  }
+});
+
 // POST /criar-pagamento
-router.post("/criar-pagamento", asyncHandler(async (req, res) => {
+router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const nome          = String(req.body?.nome    || "").trim().slice(0, 80);

@@ -36,7 +36,25 @@ app.disable("x-powered-by");
 app.set("trust proxy", true);
 
 app.use(helmet({ crossOriginResourcePolicy: false, contentSecurityPolicy: false }));
-app.use(cors());
+
+// CORS restrito (security fix #8)
+const ALLOWED_ORIGINS = [
+  "https://preludiojogos.com.br",
+  "https://www.preludiojogos.com.br",
+  "https://luiskirsch.github.io",
+  "http://localhost:3000",
+  "http://localhost:8080",
+  "http://localhost:5173"
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    // Sem Origin (server-to-server, ferramentas de teste, MP webhook) → permite
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error("CORS_BLOQUEADO"));
+  },
+  credentials: false
+}));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 

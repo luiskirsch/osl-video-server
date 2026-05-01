@@ -145,8 +145,41 @@ async function claimOrValidateLicenseOwnership({ licenseCode, uid, email }) {
   });
 }
 
+// Security #2: middleware de auth Firebase ID token
+// Aceita "Authorization: Bearer <token>"; verifica contra o projeto Firebase do server.
+async function requireFirebaseAuth(req, res, next) {
+  try {
+    if (!admin.apps.length) {
+      return res.status(503).json({ ok: false, error: "FIREBASE_ADMIN_NAO_CONFIGURADO" });
+    }
+    const authHeader = String(req.headers.authorization || "");
+    const m = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (!m) return res.status(401).json({ ok: false, error: "AUTH_HEADER_AUSENTE" });
+    const decoded = await admin.auth().verifyIdToken(m[1]);
+    req.firebaseUser = {
+      uid:   decoded.uid,
+      email: String(decoded.email || "").toLowerCase()
+    };
+    next();
+  } catch (err) {
+    return res.status(401).json({ ok: false, error: "TOKEN_INVALIDO" });
+  }
+}
+
+// Garante que o email no path bate com o do token (impede leitura cross-user)
+function requireEmailMatchesToken(req, res, next) {
+  const pathEmail  = String(req.params.email || "").trim().toLowerCase();
+  const tokenEmail = req.firebaseUser?.email;
+  if (!tokenEmail) return res.status(401).json({ ok: false, error: "TOKEN_SEM_EMAIL" });
+  if (pathEmail !== tokenEmail) {
+    return res.status(403).json({ ok: false, error: "EMAIL_NAO_BATE_COM_TOKEN" });
+  }
+  next();
+}
+
 module.exports = {
   getDb, ensureDb,
   saveDiscordLinkToUser, getUserProfileByUid, getAffiliateProfileByUid,
-  saveLicenseRecord, claimOrValidateLicenseOwnership
+  saveLicenseRecord, claimOrValidateLicenseOwnership,
+  requireFirebaseAuth, requireEmailMatchesToken
 };

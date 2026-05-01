@@ -125,17 +125,50 @@ async function stopRoomRecording(roomId) {
 
 // --- Live streaming via RTMP ---
 
+// Security #3: validação estrita de stream keys/URLs
+// Plataformas conhecidas usam só [A-Za-z0-9_-.~] (cobre todas as chaves reais).
+// Custom/TikTok aceita URL RTMP completa, validada via URL parser.
+const PLATFORM_KEY_REGEX = /^[A-Za-z0-9_\-.~]+$/;
+const KEY_MIN_LEN = 5;
+const KEY_MAX_LEN = 200;
+const CUSTOM_URL_MAX_LEN = 500;
+
+function validatePlatformKey(value) {
+  const v = String(value || "").trim();
+  if (!v) throw new Error("STREAM_KEY_VAZIA");
+  if (v.length < KEY_MIN_LEN || v.length > KEY_MAX_LEN) throw new Error("STREAM_KEY_TAMANHO_INVALIDO");
+  if (!PLATFORM_KEY_REGEX.test(v)) throw new Error("STREAM_KEY_CARACTERES_INVALIDOS");
+  return v;
+}
+
+function validateCustomRtmpUrl(value) {
+  const v = String(value || "").trim();
+  if (!v) throw new Error("STREAM_KEY_VAZIA");
+  if (v.length > CUSTOM_URL_MAX_LEN) throw new Error("STREAM_KEY_MUITO_LONGA");
+  // Bloqueia caracteres que poderiam injetar uma segunda URL ou quebrar o parse
+  if (/[\r\n\t\0\x00-\x1F'"`<>\\]/.test(v)) throw new Error("STREAM_KEY_CARACTERES_INVALIDOS");
+  let url;
+  try { url = new URL(v); } catch { throw new Error("STREAM_KEY_URL_INVALIDA"); }
+  if (url.protocol !== "rtmp:" && url.protocol !== "rtmps:") {
+    throw new Error("STREAM_KEY_PROTOCOLO_INVALIDO");
+  }
+  return v;
+}
+
 function buildRtmpUrl(platform, streamKey) {
-  const key = String(streamKey || "").trim();
-  if (!key) throw new Error("STREAM_KEY_VAZIA");
   const p = String(platform || "").trim().toLowerCase();
+
+  if (p === "custom" || p === "tiktok") {
+    // TikTok requer URL completa fornecida pela TikTok Live Studio (já é RTMP)
+    return validateCustomRtmpUrl(streamKey);
+  }
+
+  const key = validatePlatformKey(streamKey);
   switch (p) {
     case "youtube":  return `rtmp://a.rtmp.youtube.com/live2/${key}`;
     case "twitch":   return `rtmp://live.twitch.tv/app/${key}`;
     case "facebook": return `rtmps://live-api-s.facebook.com:443/rtmp/${key}`;
     case "kick":     return `rtmps://fa723fc1b171.global-contribute.live-video.net/app/${key}`;
-    case "tiktok":   // TikTok exige aprovação prévia — usuário cola URL completa
-    case "custom":   return key.startsWith("rtmp") ? key : `rtmp://${key}`;
     default: throw new Error(`PLATAFORMA_NAO_SUPORTADA:${p}`);
   }
 }
