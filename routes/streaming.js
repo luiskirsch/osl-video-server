@@ -6,7 +6,8 @@ const { asyncHandler, sendError } = require("../utils");
 const { activeStreams, pagamentosAprovados } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomStreaming, stopRoomStreaming, egressClient } = require("../video/webrtc");
-const { getDb, requireFirebaseAuth, requireEmailMatchesToken } = require("../services/firestore");
+const { getDb, requireFirebaseAuth, requireEmailMatchesToken, isPrestige, isPassActive } = require("../services/firestore");
+const { FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM } = require("../config");
 
 const router = express.Router();
 
@@ -36,30 +37,12 @@ router.get("/streaming/pass/:email", readLimiter, requireFirebaseAuth, requireEm
   const email = String(req.params.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
-  const db = getDb();
-  if (!db) return res.json({ ok: true, active: false });
-
-  try {
-    // Prestige: usuários nível 50+ têm streaming incluído permanentemente
-    const usersSnap = await db.collection("users").where("email", "==", email).limit(1).get();
-    if (!usersSnap.empty && usersSnap.docs[0].data().prestige === true) {
-      return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
-    }
-
-    const doc = await db.collection("streaming_passes").doc(email).get();
-    if (!doc.exists) return res.json({ ok: true, active: false });
-
-    const pass = doc.data();
-    const active = pass.expiresAt > Date.now();
-    return res.json({ ok: true, active, expiresAt: pass.expiresAt || null, type: pass.type || "streaming-mensal" });
-  } catch (err) {
-    logError("streaming_pass_check_error", err);
-    return res.json({ ok: true, active: false });
+  if (await isPrestige(email)) {
+    return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
   }
+  const pass = await isPassActive("streaming_passes", email);
+  return res.json({ ok: true, active: pass.active, expiresAt: pass.expiresAt, type: pass.type || "streaming-mensal" });
 }));
-
-// Quota free tier: 60 min por email por dia (UTC)
-const FREE_TIER_DAILY_LIMIT_MIN = 60;
 
 function todayKey() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -74,15 +57,14 @@ async function checkAuthAndReserve(email) {
 
   try {
     // 1. Prestige (sem reserva, sem limite de quota)
-    const usersSnap = await db.collection("users").where("email", "==", email).limit(1).get();
-    if (!usersSnap.empty && usersSnap.docs[0].data().prestige === true) {
+    if (await isPrestige(email)) {
       return { allowed: true, type: "prestige", reservedMin: 0 };
     }
 
     // 2. Pass mensal ativo
-    const passDoc = await db.collection("streaming_passes").doc(email).get();
-    if (passDoc.exists && passDoc.data().expiresAt > Date.now()) {
-      return { allowed: true, type: "pass", reservedMin: 0, expiresAt: passDoc.data().expiresAt };
+    const pass = await isPassActive("streaming_passes", email);
+    if (pass.active) {
+      return { allowed: true, type: "pass", reservedMin: 0, expiresAt: pass.expiresAt };
     }
 
     // 3. Free tier: transação atomica check + reserve
@@ -127,6 +109,9 @@ router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(
   if (!roomId)                            return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!email)                             return sendError(res, 401, "TOKEN_SEM_EMAIL");
   if (!Array.isArray(platforms) || !platforms.length) return sendError(res, 400, "PLATAFORMAS_OBRIGATORIAS");
+  if (platforms.length > MAX_PLATFORMS_PER_STREAM) {
+    return sendError(res, 400, "MUITAS_PLATAFORMAS", { max: MAX_PLATFORMS_PER_STREAM });
+  }
   if (!egressClient)                      return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
   for (const p of platforms) {
@@ -311,7 +296,8 @@ router.get("/streaming/stats/:email", readLimiter, requireFirebaseAuth, requireE
 // GET /streaming/history/:email?limit=20 — últimas sessões (Phase 4)
 router.get("/streaming/history/:email", readLimiter, requireFirebaseAuth, requireEmailMatchesToken, asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  const rawLimit = Number(req.query.limit);
+  const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 20;
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
   const db = getDb();
   if (!db) return res.json({ ok: true, sessions: [] });

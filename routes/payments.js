@@ -8,7 +8,7 @@ const { mercadoPagoFetch } = require("../services/payments");
 const { generateExternalReference } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
-const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET } = require("../config");
+const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS } = require("../config");
 
 // Security #1: valida x-signature do Mercado Pago.
 // Template oficial: "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"
@@ -208,6 +208,13 @@ router.post("/webhook", asyncHandler(async (req, res) => {
     const ref    = String(payment.external_reference || "").trim();
 
     if (status === "approved" && ref) {
+      // Idempotência: se já processamos esse paymentId, não re-processa.
+      const existing = pagamentosAprovados.get(ref);
+      if (existing && existing.paymentId === String(payment.id)) {
+        logInfo("mp_webhook_duplicate_ignored", { ref, paymentId: payment.id });
+        return res.sendStatus(200);
+      }
+
       const productIdFromWebhook = String(payment.metadata?.product_id || PRODUCT_ID);
       const approvedEmail        = String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase();
       const approvedRoomId       = String(payment.metadata?.room_id || "").trim().toUpperCase();
@@ -217,25 +224,35 @@ router.post("/webhook", asyncHandler(async (req, res) => {
         produto: productIdFromWebhook, email: approvedEmail, roomId: approvedRoomId, updatedAt: Date.now()
       });
 
-      // Passe mensal — salva no Firestore com validade de 30 dias
       const { getDb } = require("../services/firestore");
       const db = getDb();
+
+      // Passe mensal — salva no Firestore com validade configurada (PASS_VALIDITY_MS).
+      // merge:true preserva campos não-relacionados se o doc já existir (correção P1).
       if (productIdFromWebhook === "gravacao-mensal" && approvedEmail && db) {
-        const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
-        db.collection("recording_passes").doc(approvedEmail).set({
-          email: approvedEmail, paymentId: String(payment.id), ref,
-          activatedAt: Date.now(), expiresAt, type: "gravacao-mensal"
-        }, { merge: false }).catch(err => logError("recording_pass_save_error", err));
-        logInfo("recording_pass_activated", { email: approvedEmail, expiresAt });
+        const expiresAt = Date.now() + PASS_VALIDITY_MS;
+        try {
+          await db.collection("recording_passes").doc(approvedEmail).set({
+            email: approvedEmail, paymentId: String(payment.id), ref,
+            activatedAt: Date.now(), expiresAt, type: "gravacao-mensal"
+          }, { merge: true });
+          logInfo("recording_pass_activated", { email: approvedEmail, expiresAt });
+        } catch (err) {
+          logError("recording_pass_save_error", err, { email: approvedEmail });
+        }
       }
 
       if (productIdFromWebhook === "streaming-mensal" && approvedEmail && db) {
-        const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
-        db.collection("streaming_passes").doc(approvedEmail).set({
-          email: approvedEmail, paymentId: String(payment.id), ref,
-          activatedAt: Date.now(), expiresAt, type: "streaming-mensal"
-        }, { merge: false }).catch(err => logError("streaming_pass_save_error", err));
-        logInfo("streaming_pass_activated", { email: approvedEmail, expiresAt });
+        const expiresAt = Date.now() + PASS_VALIDITY_MS;
+        try {
+          await db.collection("streaming_passes").doc(approvedEmail).set({
+            email: approvedEmail, paymentId: String(payment.id), ref,
+            activatedAt: Date.now(), expiresAt, type: "streaming-mensal"
+          }, { merge: true });
+          logInfo("streaming_pass_activated", { email: approvedEmail, expiresAt });
+        } catch (err) {
+          logError("streaming_pass_save_error", err, { email: approvedEmail });
+        }
       }
 
       if (db) {

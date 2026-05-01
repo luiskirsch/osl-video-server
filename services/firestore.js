@@ -145,6 +145,32 @@ async function claimOrValidateLicenseOwnership({ licenseCode, uid, email }) {
   });
 }
 
+// --- Helpers de auth/billing reutilizados em recording.js e streaming.js ---
+
+// Verifica se o email é de um usuário Prestige (nível 50+, streaming/recording grátis)
+async function isPrestige(email) {
+  if (!db || !email) return false;
+  try {
+    const snap = await db.collection("users").where("email", "==", email).limit(1).get();
+    return !snap.empty && snap.docs[0].data().prestige === true;
+  } catch { return false; }
+}
+
+// Verifica se o email tem pass ativo na coleção (recording_passes ou streaming_passes)
+async function isPassActive(collectionName, email) {
+  if (!db || !email) return { active: false };
+  try {
+    const doc = await db.collection(collectionName).doc(email).get();
+    if (!doc.exists) return { active: false };
+    const pass = doc.data();
+    return {
+      active: pass.expiresAt > Date.now(),
+      expiresAt: pass.expiresAt || null,
+      type: pass.type || null
+    };
+  } catch { return { active: false }; }
+}
+
 // Security #2: middleware de auth Firebase ID token
 // Aceita "Authorization: Bearer <token>"; verifica contra o projeto Firebase do server.
 async function requireFirebaseAuth(req, res, next) {
@@ -181,5 +207,6 @@ module.exports = {
   getDb, ensureDb,
   saveDiscordLinkToUser, getUserProfileByUid, getAffiliateProfileByUid,
   saveLicenseRecord, claimOrValidateLicenseOwnership,
-  requireFirebaseAuth, requireEmailMatchesToken
+  requireFirebaseAuth, requireEmailMatchesToken,
+  isPrestige, isPassActive
 };

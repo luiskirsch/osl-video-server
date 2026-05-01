@@ -64,6 +64,7 @@ function serializePanelRoom(room) {
     sessionActive: !!room.sessionActive,
     videoActive: !!room.videoActive,
     recordingActive: !!room.recordingActive,
+    streamingActive: !!room.streamingActive,
     playerCount: players.length,
     players
   };

@@ -4,7 +4,7 @@ const { asyncHandler, sendError, nowIso } = require("../utils");
 const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, broadcastPanelUpdate } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken } = require("../video/webrtc");
-const { getDb } = require("../services/firestore");
+const { getDb, isPrestige, isPassActive } = require("../services/firestore");
 const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET } = require("../config");
 
 const router = express.Router();
@@ -26,25 +26,11 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
   const email = String(req.params.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
-  const db = getDb();
-  if (!db) return res.json({ ok: true, active: false });
-
-  try {
-    const usersSnap = await db.collection("users").where("email", "==", email).limit(1).get();
-    if (!usersSnap.empty && usersSnap.docs[0].data().prestige === true) {
-      return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
-    }
-
-    const doc = await db.collection("recording_passes").doc(email).get();
-    if (!doc.exists) return res.json({ ok: true, active: false });
-
-    const pass   = doc.data();
-    const active = pass.expiresAt > Date.now();
-    return res.json({ ok: true, active, expiresAt: pass.expiresAt || null, type: pass.type || "gravacao-mensal" });
-  } catch (err) {
-    logError("recording_pass_check_error", err);
-    return res.json({ ok: true, active: false });
+  if (await isPrestige(email)) {
+    return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
   }
+  const pass = await isPassActive("recording_passes", email);
+  return res.json({ ok: true, active: pass.active, expiresAt: pass.expiresAt, type: pass.type || "gravacao-mensal" });
 }));
 
 // POST /recording/auto-start — inicia gravação automaticamente quando o ritual começa
