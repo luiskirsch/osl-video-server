@@ -17,7 +17,7 @@ const S3_BUCKET            = process.env.S3_BUCKET            || "";
 const S3_REGION            = process.env.S3_REGION            || "auto";
 const S3_ENDPOINT          = process.env.S3_ENDPOINT          || "";
 const S3_PUBLIC_URL        = process.env.S3_PUBLIC_URL        || "";
-const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://preludiojogos.com.br/recording-layout.html";
+const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://preludiojogos.com/recording-layout.html";
 
 const MP_ACCESS_TOKEN    = process.env.MP_ACCESS_TOKEN    || "";
 const MP_WEBHOOK_SECRET  = process.env.MP_WEBHOOK_SECRET  || ""; // Security #1: pra validar x-signature
@@ -28,7 +28,7 @@ const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SE
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 const BACKEND_BASE_URL  = process.env.BACKEND_BASE_URL  || "https://osl-video-server-production.up.railway.app";
-const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://preludiojogos.com.br";
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://preludiojogos.com";
 
 const PRODUCT_ID       = "osl_ritual_completo";
 const PRODUCT_TITLE    = "O SextoLugar — Ritual Completo";

@@ -39,6 +39,8 @@ app.use(helmet({ crossOriginResourcePolicy: false, contentSecurityPolicy: false 
 
 // CORS restrito (security fix #8)
 const ALLOWED_ORIGINS = [
+  "https://preludiojogos.com",
+  "https://www.preludiojogos.com",
   "https://preludiojogos.com.br",
   "https://www.preludiojogos.com.br",
   "https://luiskirsch.github.io",

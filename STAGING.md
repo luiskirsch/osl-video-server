@@ -59,8 +59,8 @@ No service de staging do Railway → **Variables** → **+ New Variable** pra ca
 | Variable | Valor pra staging |
 |---|---|
 | `BACKEND_BASE_URL` | `https://osl-video-server-staging.up.railway.app` (atualiza depois com a URL final do passo 7) |
-| `FRONTEND_BASE_URL` | `https://preludiojogos.com.br/staging` |
-| `RECORDING_LAYOUT_URL` | `https://preludiojogos.com.br/staging/recording-layout.html` |
+| `FRONTEND_BASE_URL` | `https://preludiojogos.com/staging` |
+| `RECORDING_LAYOUT_URL` | `https://preludiojogos.com/staging/recording-layout.html` |
 
 #### LiveKit (mesma instância de prod — sem custo extra)
 
