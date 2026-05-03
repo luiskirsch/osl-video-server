@@ -9,6 +9,7 @@ const { generateExternalReference } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
 const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS } = require("../config");
+const { t: i18nT, detectLocale } = require("../services/i18n");
 
 // Security #1: valida x-signature do Mercado Pago.
 // Template oficial: "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"
@@ -85,9 +86,12 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
 
   const catalogEntry   = PRODUCT_CATALOG[produtoInput] || PRODUCT_CATALOG[PRODUCT_ID];
   const productId      = produtoInput && PRODUCT_CATALOG[produtoInput] ? produtoInput : PRODUCT_ID;
-  const productTitle   = catalogEntry.title;
-  const productDescription = catalogEntry.description;
-  const productPrice   = catalogEntry.price;
+  // i18n: title/description vão pra checkout do Mercado Pago localizados
+  // baseado no locale do cliente (X-Locale header / Accept-Language).
+  // Fallback PT pra PRODUCT_CATALOG (config.js) garante compat.
+  const productTitle       = i18nT(req, `products:${productId}.title`, catalogEntry.title);
+  const productDescription = i18nT(req, `products:${productId}.description`, catalogEntry.description);
+  const productPrice       = catalogEntry.price;
 
   let referralData = null;
 

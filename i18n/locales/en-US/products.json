@@ -1,0 +1,70 @@
+{
+  "osl_ritual_completo": {
+    "title": "SEXTOLUGAR — Full Ritual",
+    "description": "Immersive digital experience with psychological cards and live group interaction"
+  },
+  "carta-bloqueada": {
+    "title": "SEXTOLUGAR — Locked Card",
+    "description": "Unlock the next card in the session"
+  },
+  "carta-final": {
+    "title": "SEXTOLUGAR — Final Reveal Card",
+    "description": "Special final-reveal card for the session"
+  },
+  "segunda-chance": {
+    "title": "SEXTOLUGAR — Second Chance",
+    "description": "Continue the session with 3 extra cards"
+  },
+  "gravacao-download": {
+    "title": "SEXTOLUGAR — Recording + Download",
+    "description": "Record your session and download the MP4 file"
+  },
+  "gravacao-mensal": {
+    "title": "SEXTOLUGAR — Monthly Free Recording",
+    "description": "Unlimited recordings for 30 days"
+  },
+  "streaming-mensal": {
+    "title": "SEXTOLUGAR — Monthly Stream Pass",
+    "description": "Live broadcast (YouTube, Twitch, Facebook, Kick, TikTok) unlimited for 30 days"
+  },
+  "sala-premium": {
+    "title": "SEXTOLUGAR — Premium Room",
+    "description": "Premium room with advanced features"
+  },
+  "modo-ritual": {
+    "title": "SEXTOLUGAR — Ritual Mode",
+    "description": "Session in Ritual Mode with soundtrack and guided rituals"
+  },
+  "pacote-conexao": {
+    "title": "SEXTOLUGAR — Connection Pack",
+    "description": "12 light, emotional cards for genuine connection"
+  },
+  "pacote-verdades": {
+    "title": "SEXTOLUGAR — Truths Pack",
+    "description": "15 truth cards with mild discomfort"
+  },
+  "pacote-conflito": {
+    "title": "SEXTOLUGAR — Conflict Pack",
+    "description": "15 cards of provocations and honest conflict"
+  },
+  "pacote-segredos": {
+    "title": "SEXTOLUGAR — Secrets Pack",
+    "description": "18 intense, psychological cards"
+  },
+  "pacote-casais": {
+    "title": "SEXTOLUGAR — Couples Pack",
+    "description": "18 niche cards for couples"
+  },
+  "tema-sala": {
+    "title": "SEXTOLUGAR — Room Theme",
+    "description": "Room visual customization"
+  },
+  "estilo-carta": {
+    "title": "SEXTOLUGAR — Card Style",
+    "description": "Card visual customization"
+  },
+  "efeitos-visuais": {
+    "title": "SEXTOLUGAR — Visual Effects",
+    "description": "Ambient visual effects for the room"
+  }
+}

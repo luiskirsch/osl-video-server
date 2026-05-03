@@ -1,0 +1,70 @@
+{
+  "osl_ritual_completo": {
+    "title": "O SextoLugar — Ritual Completo",
+    "description": "Experiência digital imersiva com cartas psicológicas e interação em grupo ao vivo"
+  },
+  "carta-bloqueada": {
+    "title": "O SextoLugar — Carta Desbloqueada",
+    "description": "Desbloqueie a próxima carta da sessão"
+  },
+  "carta-final": {
+    "title": "O SextoLugar — Carta de Revelação Final",
+    "description": "Carta especial de revelação final para a sessão"
+  },
+  "segunda-chance": {
+    "title": "O SextoLugar — Segunda Chance",
+    "description": "Continue a sessão com mais 3 cartas"
+  },
+  "gravacao-download": {
+    "title": "O SextoLugar — Gravação + Download",
+    "description": "Grave sua sessão e baixe o arquivo MP4"
+  },
+  "gravacao-mensal": {
+    "title": "O SextoLugar — Gravação Livre Mensal",
+    "description": "Grave sessões ilimitadas por 30 dias"
+  },
+  "streaming-mensal": {
+    "title": "O SextoLugar — Stream Pass Mensal",
+    "description": "Transmita ao vivo (YouTube, Twitch, Facebook, Kick, TikTok) sem limite por 30 dias"
+  },
+  "sala-premium": {
+    "title": "O SextoLugar — Sala Premium",
+    "description": "Sala premium com recursos avançados"
+  },
+  "modo-ritual": {
+    "title": "O SextoLugar — Modo Ritual",
+    "description": "Sessão em Modo Ritual com trilha e rituais guiados"
+  },
+  "pacote-conexao": {
+    "title": "O SextoLugar — Pacote Conexão",
+    "description": "12 cartas leves e emocionais para conexão genuína"
+  },
+  "pacote-verdades": {
+    "title": "O SextoLugar — Pacote Verdades",
+    "description": "15 cartas de verdades com desconforto leve"
+  },
+  "pacote-conflito": {
+    "title": "O SextoLugar — Pacote Conflito",
+    "description": "15 cartas de provocações e conflito honesto"
+  },
+  "pacote-segredos": {
+    "title": "O SextoLugar — Pacote Segredos",
+    "description": "18 cartas intensas e psicológicas"
+  },
+  "pacote-casais": {
+    "title": "O SextoLugar — Pacote Casais",
+    "description": "18 cartas nichadas para casais"
+  },
+  "tema-sala": {
+    "title": "O SextoLugar — Tema da Sala",
+    "description": "Personalização visual da sala"
+  },
+  "estilo-carta": {
+    "title": "O SextoLugar — Estilo de Carta",
+    "description": "Personalização visual das cartas"
+  },
+  "efeitos-visuais": {
+    "title": "O SextoLugar — Efeitos Visuais",
+    "description": "Efeitos visuais ambientais para a sala"
+  }
+}
