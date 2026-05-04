@@ -28,6 +28,7 @@ const licenseRouter   = require("./routes/license");
 const affiliateRouter = require("./routes/affiliate");
 const adminRouter     = require("./routes/admin");
 const aiRouter        = require("./routes/ai");
+const therapyRouter   = require("./routes/therapy");
 
 // --- App ---
 const app = express();
@@ -96,6 +97,7 @@ app.use(licenseRouter);
 app.use(affiliateRouter);
 app.use(adminRouter);
 app.use(aiRouter);
+app.use(therapyRouter);
 
 // --- 404 ---
 app.use((req, res) => {
