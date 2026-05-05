@@ -1039,6 +1039,307 @@ router.delete("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) =
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// RECEITAS DIGITAIS (CFM 2.314/2022)
+//
+// Modelo de dados:
+//   therapy_receitas/{receitaId}
+//     {
+//       receitaId, therapistUid, patientId?, patientNameSnapshot,
+//       sessionId?,
+//       status: "draft" | "signed",
+//       signatureMethod?: "a1_inline" | "external_upload",
+//       // Dados do formulário (medicamento, posologia, etc) cifrados com DEK
+//       // do médico — server-blind enquanto está rascunho:
+//       formCiphertext, formIv,
+//       // PDF assinado fica em plaintext (base64) porque tem que ser
+//       // entregável ao paciente/farmácia que NÃO têm a DEK.
+//       // Gate de acesso é o deliveryToken assinado:
+//       pdfSignedBase64?, pdfSignedMime?,
+//       deliveryToken?, deliveryTokenExp?,
+//       signedAt?, createdAt, updatedAt
+//     }
+//
+// Por que o PDF assinado fica plaintext: o ICP-Brasil só faz sentido se a
+// farmácia / paciente conseguirem ler. O que protege é o token de delivery
+// (HMAC-assinado, expira, único por receita).
+// ─────────────────────────────────────────────────────────────────────────
+
+const RECEITA_FORM_CIPHERTEXT_MAX = 32 * 1024;     // 32 KB cifrado de formulário
+const RECEITA_PDF_MAX             = 1024 * 1024;   // 1 MB de PDF assinado base64
+const RECEITA_DELIVERY_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60 dias
+
+// POST /therapy/receitas — cria rascunho
+router.post("/therapy/receitas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const formCiphertext       = String(req.body?.formCiphertext || "").trim();
+  const formIv               = String(req.body?.formIv || "").trim();
+  const patientId            = String(req.body?.patientId || "").trim() || null;
+  const patientNameSnapshot  = String(req.body?.patientNameSnapshot || "").trim().slice(0, PATIENT_NAME_MAX);
+  const sessionId            = String(req.body?.sessionId || "").trim() || null;
+
+  if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
+  if (formCiphertext.length > RECEITA_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
+  if (!patientNameSnapshot)       return sendError(res, 400, "NOME_PACIENTE_OBRIGATORIO");
+
+  if (patientId) {
+    const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
+
+  const receitaId = newId("rec");
+  const db = getDb();
+  await db.collection("therapy_receitas").doc(receitaId).set({
+    receitaId,
+    therapistUid: uid,
+    patientId,
+    patientNameSnapshot,
+    sessionId,
+    status: "draft",
+    formCiphertext,
+    formIv,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "receita_created", receitaId, therapistUid: uid, patientId });
+
+  return res.json({ ok: true, receitaId });
+}));
+
+// PATCH /therapy/receitas/:id — edita rascunho (não permite após assinada)
+router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const receitaId = String(req.params.id || "").trim();
+  if (!receitaId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const formCiphertext = String(req.body?.formCiphertext || "").trim();
+  const formIv         = String(req.body?.formIv || "").trim();
+  if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
+  if (formCiphertext.length > RECEITA_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const ref = db.collection("therapy_receitas").doc(receitaId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
+
+  await ref.set({
+    formCiphertext, formIv,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/receitas/:id/assinar — recebe PDF (já assinado client-side ou
+// upload externo) + signatureMethod. Marca como signed, gera deliveryToken.
+router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const receitaId = String(req.params.id || "").trim();
+  if (!receitaId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const pdfBase64        = String(req.body?.pdfBase64 || "").trim();
+  const pdfMime          = String(req.body?.pdfMime || "application/pdf").trim();
+  const signatureMethod  = String(req.body?.signatureMethod || "").trim();
+
+  if (!pdfBase64) return sendError(res, 400, "PDF_OBRIGATORIO");
+  if (pdfBase64.length > RECEITA_PDF_MAX) return sendError(res, 413, "PDF_GRANDE_DEMAIS");
+  if (pdfMime !== "application/pdf") return sendError(res, 400, "TIPO_INVALIDO");
+  if (!["a1_inline", "external_upload"].includes(signatureMethod)) {
+    return sendError(res, 400, "METODO_INVALIDO");
+  }
+
+  const db = getDb();
+  const ref = db.collection("therapy_receitas").doc(receitaId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
+
+  // Token de delivery: assinado, expira em 60 dias, contém receitaId
+  const deliveryTokenExp = Date.now() + RECEITA_DELIVERY_VALIDITY_MS;
+  const deliveryToken = signPayload({
+    token_type: "receita_delivery",
+    receitaId,
+    iat: Date.now(),
+    exp: deliveryTokenExp
+  }, ACCESS_TOKEN_SECRET);
+
+  await ref.set({
+    status: "signed",
+    signatureMethod,
+    pdfSignedBase64: pdfBase64,
+    pdfSignedMime: pdfMime,
+    deliveryToken,
+    deliveryTokenExp,
+    signedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "receita_signed",
+    receitaId,
+    therapistUid: uid,
+    signatureMethod
+  });
+
+  return res.json({ ok: true, deliveryToken, deliveryTokenExp });
+}));
+
+// GET /therapy/receitas — lista do médico (sem PDF base64 pra não pesar)
+router.get("/therapy/receitas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.query?.patientId || "").trim();
+
+  const db = getDb();
+  let q = db.collection("therapy_receitas").where("therapistUid", "==", uid);
+  if (patientId) q = q.where("patientId", "==", patientId);
+
+  const snap = await q.limit(500).get();
+  const receitas = snap.docs
+    .map(d => {
+      const r = d.data();
+      return {
+        receitaId: r.receitaId,
+        patientId: r.patientId || null,
+        patientNameSnapshot: r.patientNameSnapshot,
+        sessionId: r.sessionId || null,
+        status: r.status,
+        signatureMethod: r.signatureMethod || null,
+        formCiphertext: r.formCiphertext,
+        formIv: r.formIv,
+        deliveryToken: r.deliveryToken || null,
+        deliveryTokenExp: r.deliveryTokenExp || null,
+        createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null,
+        signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : null
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, receitas });
+}));
+
+// GET /therapy/receitas/:id — detalhe (médico) com PDF assinado
+router.get("/therapy/receitas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const receitaId = String(req.params.id || "").trim();
+  if (!receitaId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_receitas").doc(receitaId).get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  return res.json({
+    ok: true,
+    receita: {
+      receitaId: r.receitaId,
+      patientId: r.patientId || null,
+      patientNameSnapshot: r.patientNameSnapshot,
+      sessionId: r.sessionId || null,
+      status: r.status,
+      signatureMethod: r.signatureMethod || null,
+      formCiphertext: r.formCiphertext,
+      formIv: r.formIv,
+      pdfSignedBase64: r.pdfSignedBase64 || null,
+      pdfSignedMime: r.pdfSignedMime || null,
+      deliveryToken: r.deliveryToken || null,
+      deliveryTokenExp: r.deliveryTokenExp || null,
+      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null,
+      signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : null
+    }
+  });
+}));
+
+// DELETE /therapy/receitas/:id — só rascunhos. Assinada não apaga (CFM exige
+// retenção; cliente pode ocultar visualmente, não excluir).
+router.delete("/therapy/receitas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const receitaId = String(req.params.id || "").trim();
+  if (!receitaId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_receitas").doc(receitaId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (r.status === "signed")  return sendError(res, 409, "RECEITA_ASSINADA_NAO_APAGA");
+
+  await ref.delete();
+  await logAudit({ type: "receita_deleted_draft", receitaId, therapistUid: uid });
+
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/receita/publica?t=<token> — sem auth, paciente/farmácia
+// recebem o PDF assinado. Token HMAC com expiração.
+router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.t || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "receita_delivery") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_receitas").doc(payload.receitaId).get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.status !== "signed" || !r.pdfSignedBase64) return sendError(res, 410, "RECEITA_NAO_ASSINADA");
+  // Reconfere consistência (token revogado se receita re-assinada — defesa em profundidade)
+  if (r.deliveryToken !== token) return sendError(res, 401, "TOKEN_REVOGADO");
+
+  await logAudit({
+    type: "receita_publica_access",
+    receitaId: r.receitaId,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  // Devolve metadados + PDF base64; cliente exibe / baixa.
+  return res.json({
+    ok: true,
+    receita: {
+      receitaId: r.receitaId,
+      patientNameSnapshot: r.patientNameSnapshot,
+      therapistDisplayName: (await loadTherapist(r.therapistUid))?.displayName || "",
+      pdfBase64: r.pdfSignedBase64,
+      pdfMime: r.pdfSignedMime || "application/pdf",
+      signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : null,
+      signatureMethod: r.signatureMethod || null
+    }
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // VERIFICAÇÃO DE CRP/CRM (e-Psi)
 // Profissional sobe um documento (printscreen do e-Psi, comprovante CFP/CFM)
 // como base64. Admin (allowlist) revisa e aprova ou rejeita. Status reflete
