@@ -163,6 +163,12 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
   .map(s => s.trim())
   .filter(Boolean);
 
+// Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
+const THERAPY_PLAN_AMOUNT     = Number(process.env.THERAPY_PLAN_AMOUNT || 49.90);
+const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
+const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 14);
+const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || `${process.env.FRONTEND_BASE_URL || "https://preludiojogos.com"}/staging/therapy`;
+
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
 const DISCORD_BOT_TOKEN       = process.env.DISCORD_BOT_TOKEN       || "";
@@ -188,6 +194,7 @@ module.exports = {
   REFERRAL_REWARD_COINS, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE, REFERRAL_COMMISSION_PERCENT,
   ADMIN_SECRET,
   THERAPY_ADMIN_EMAILS,
+  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE
 };

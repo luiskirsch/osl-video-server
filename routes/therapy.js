@@ -24,8 +24,11 @@ const { ensureDb, getDb } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
-  THERAPY_ADMIN_EMAILS
+  THERAPY_ADMIN_EMAILS,
+  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  MP_WEBHOOK_SECRET
 } = require("../config");
+const { mercadoPagoFetch } = require("../services/payments");
 
 const router = express.Router();
 
@@ -171,6 +174,10 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const lockedWrappedDEK   = existingData?.wrappedDEK   || wrappedDEK;
   const lockedWrappedDEKIv = existingData?.wrappedDEKIv || wrappedDEKIv;
 
+  // Trial é setado uma vez na criação; não estende em re-cadastros.
+  const trialUntil = existingData?.trialUntil
+    || (Date.now() + THERAPY_TRIAL_DAYS * 24 * 60 * 60 * 1000);
+
   await ref.set({
     uid,
     displayName,
@@ -183,6 +190,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     wrappedDEKIv:  lockedWrappedDEKIv,
     role: "therapist",
     plano: existingData?.plano || "trial",
+    trialUntil,
     consentLgpd: true,
     consentLgpdAt: existingData?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
     createdAt: existingData?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
@@ -1883,6 +1891,231 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
     .sort((a, b) => (b.at || 0) - (a.at || 0));
 
   return res.json({ ok: true, events });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLANO RECORRENTE (MercadoPago Preapproval)
+//
+// Setup necessário:
+//   1) THERAPY_PLAN_AMOUNT (env, default 49.90)
+//   2) MP_ACCESS_TOKEN (já configurado pro jogo)
+//   3) MP_WEBHOOK_SECRET (recomendado pra produção)
+//   4) No dashboard MP: criar webhook → URL: BACKEND/therapy/webhook/mp
+//      Eventos: preapproval, subscription_preapproval
+//
+// Estados em therapists/{uid}.plano:
+//   "trial"    — recém-cadastrado, dentro do trialUntil
+//   "pro"      — preapproval autorizado e ativo no MP
+//   "expired"  — trial venceu e não assinou
+//   "canceled" — assinante cancelou
+// ─────────────────────────────────────────────────────────────────────────
+
+// POST /therapy/profissional/plano/iniciar
+// Cria preapproval no MP, salva mpPreapprovalId, retorna init_point pra redirect.
+router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  // Pega e-mail do Firebase Auth (preapproval exige payer_email)
+  let payerEmail = "";
+  try {
+    const fbUser = await admin.auth().getUser(uid);
+    payerEmail = fbUser.email || "";
+  } catch { /* ignore */ }
+  if (!payerEmail) return sendError(res, 400, "EMAIL_INDISPONIVEL");
+
+  const externalRef = `EP_THERAPY_${uid}`;
+
+  const body = {
+    reason: THERAPY_PLAN_NAME,
+    auto_recurring: {
+      frequency: 1,
+      frequency_type: "months",
+      transaction_amount: THERAPY_PLAN_AMOUNT,
+      currency_id: "BRL"
+    },
+    back_url: `${THERAPY_FRONTEND_BASE}/perfil.html?mp_back=1`,
+    payer_email: payerEmail,
+    external_reference: externalRef,
+    status: "pending"
+  };
+
+  let response, data;
+  try {
+    ({ response, data } = await mercadoPagoFetch("https://api.mercadopago.com/preapproval", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }));
+  } catch (err) {
+    logError("therapy_preapproval_create_failed", err, { uid });
+    return sendError(res, 503, "MP_INDISPONIVEL");
+  }
+
+  if (!response.ok || !data?.id || !data?.init_point) {
+    logError("therapy_preapproval_create_response_invalid", new Error("MP_RESPONSE_INVALID"), { uid, status: response.status, data });
+    return sendError(res, 502, "MP_FALHOU", { detail: data?.message || null });
+  }
+
+  const db = getDb();
+  await db.collection("therapists").doc(uid).set({
+    mpPreapprovalId:     data.id,
+    mpPreapprovalStatus: data.status || "pending",
+    mpExternalRef:       externalRef,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "therapy_plano_iniciado",
+    therapistUid: uid,
+    preapprovalId: data.id
+  });
+
+  return res.json({
+    ok: true,
+    preapprovalId: data.id,
+    initPoint:     data.init_point,
+    sandboxInitPoint: data.sandbox_init_point || null,
+    status:        data.status || "pending"
+  });
+}));
+
+// POST /therapy/profissional/plano/cancelar
+router.post("/therapy/profissional/plano/cancelar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!therapist.mpPreapprovalId) return sendError(res, 404, "SEM_ASSINATURA_ATIVA");
+
+  let response, data;
+  try {
+    ({ response, data } = await mercadoPagoFetch(
+      `https://api.mercadopago.com/preapproval/${encodeURIComponent(therapist.mpPreapprovalId)}`,
+      { method: "PUT", body: JSON.stringify({ status: "cancelled" }) }
+    ));
+  } catch (err) {
+    logError("therapy_preapproval_cancel_failed", err, { uid });
+    return sendError(res, 503, "MP_INDISPONIVEL");
+  }
+
+  if (!response.ok) {
+    return sendError(res, 502, "MP_FALHOU_CANCELAR", { detail: data?.message || null });
+  }
+
+  const db = getDb();
+  await db.collection("therapists").doc(uid).set({
+    plano: "canceled",
+    mpPreapprovalStatus: "cancelled",
+    canceledAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:  admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "therapy_plano_cancelado", therapistUid: uid });
+
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/webhook/mp
+// MP avisa mudanças de preapproval/subscription. Buscamos detalhe na API
+// e atualizamos plano. Validação de assinatura conforme o Mercado Pago.
+router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
+  // Aceita topic em vários formatos (querystring, body, headers).
+  const topic = String(
+    req.query?.topic || req.query?.type || req.body?.type || req.body?.topic || ""
+  ).toLowerCase();
+  const dataId = String(
+    req.query?.["data.id"] || req.body?.data?.id || req.query?.id || req.body?.id || ""
+  ).trim();
+
+  // Validação de assinatura (best-effort — sem MP_WEBHOOK_SECRET, só loga warning)
+  if (MP_WEBHOOK_SECRET && dataId) {
+    try {
+      const sigHeader = String(req.headers["x-signature"] || "");
+      const reqId     = String(req.headers["x-request-id"] || "");
+      if (sigHeader && reqId) {
+        const parts = Object.fromEntries(sigHeader.split(",").map(p => p.trim().split("=")));
+        const ts = parts.ts, v1 = parts.v1;
+        if (ts && v1) {
+          const template = `id:${dataId};request-id:${reqId};ts:${ts};`;
+          const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET).update(template).digest("hex");
+          let match = false;
+          try { match = crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v1, "hex")); } catch {}
+          if (!match) {
+            logError("therapy_mp_webhook_sig_invalid", new Error("SIG_INVALIDA"), { dataId });
+            return sendError(res, 401, "SIG_INVALIDA");
+          }
+        }
+      }
+    } catch (e) { logError("therapy_mp_webhook_sig_error", e); }
+  }
+
+  if (!topic.includes("preapproval")) {
+    // Ignora silenciosamente eventos que não são de assinatura
+    return res.status(200).json({ ok: true, ignored: true });
+  }
+  if (!dataId) {
+    return sendError(res, 400, "DATA_ID_AUSENTE");
+  }
+
+  // Busca o estado atual do preapproval na API MP
+  let preapproval;
+  try {
+    const { response, data } = await mercadoPagoFetch(
+      `https://api.mercadopago.com/preapproval/${encodeURIComponent(dataId)}`
+    );
+    if (!response.ok) {
+      logError("therapy_mp_preapproval_fetch_failed", new Error("FETCH_FAIL"), { dataId, status: response.status });
+      return res.status(200).json({ ok: true, ignored: true, reason: "FETCH_FAIL" });
+    }
+    preapproval = data;
+  } catch (err) {
+    logError("therapy_mp_preapproval_fetch_error", err, { dataId });
+    return res.status(200).json({ ok: true, ignored: true, reason: "NETWORK" });
+  }
+
+  // Resolve UID via external_reference (formato EP_THERAPY_<uid>)
+  const ext = String(preapproval?.external_reference || "");
+  const uidMatch = ext.match(/^EP_THERAPY_(.+)$/);
+  if (!uidMatch) {
+    return res.status(200).json({ ok: true, ignored: true, reason: "EXT_REF_NAO_RECONHECIDO" });
+  }
+  const uid = uidMatch[1];
+
+  const status = String(preapproval?.status || "").toLowerCase();
+  let plano;
+  if (status === "authorized")        plano = "pro";
+  else if (status === "paused")       plano = "expired";
+  else if (status === "cancelled")    plano = "canceled";
+  else if (status === "pending")      plano = null; // ainda esperando autorização
+  else                                plano = null;
+
+  const db = getDb();
+  const update = {
+    mpPreapprovalStatus: status,
+    mpPreapprovalId:     preapproval.id,
+    nextChargeAt:        preapproval.next_payment_date ? Date.parse(preapproval.next_payment_date) : null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  if (plano) update.plano = plano;
+  if (plano === "pro") update.proSince = admin.firestore.FieldValue.serverTimestamp();
+
+  await db.collection("therapists").doc(uid).set(update, { merge: true });
+
+  await logAudit({
+    type: "therapy_mp_webhook",
+    therapistUid: uid,
+    preapprovalId: preapproval.id,
+    mpStatus: status,
+    plano: plano || "unchanged"
+  });
+
+  return res.status(200).json({ ok: true });
 }));
 
 // GET /therapy/health — diagnóstico isolado
