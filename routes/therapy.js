@@ -56,6 +56,26 @@ async function loadTherapist(uid) {
   return snap.exists ? snap.data() : null;
 }
 
+async function loadPatientAccount(uid) {
+  const db = getDb();
+  const snap = await db.collection("therapy_patient_accounts").doc(uid).get();
+  return snap.exists ? snap.data() : null;
+}
+
+// Verifica idToken vindo do body (não do header). Não escreve resposta de erro —
+// devolve null silenciosamente quando inválido. Usado em /sessao/join, onde
+// patient logado é opcional.
+async function verifyOptionalIdToken(idToken) {
+  if (!idToken) return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(String(idToken));
+    return decoded.uid;
+  } catch (error) {
+    logError("verify_optional_id_token_failed", error);
+    return null;
+  }
+}
+
 function ensureLivekit(res) {
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
     sendError(res, 503, "LIVEKIT_NAO_CONFIGURADO");
@@ -344,6 +364,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   const joinToken   = String(req.body?.joinToken   || "").trim();
   const patientName = String(req.body?.patientName || "").trim().slice(0, PATIENT_NAME_MAX);
   const consentLgpd = !!req.body?.consentLgpd;
+  const patientIdToken = String(req.body?.patientIdToken || "").trim();
 
   if (!joinToken)   return sendError(res, 400, "JOIN_TOKEN_OBRIGATORIO");
   if (!consentLgpd) return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
@@ -359,7 +380,23 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   const session = snap.data();
   if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
 
-  const finalName = patientName || session.patientName || payload.patientNameHint || "Paciente";
+  // Se paciente logado, vincula a sessão à conta dele para histórico futuro.
+  // É opcional — convidado anônimo continua entrando sem conta.
+  let patientAccountUid = null;
+  let patientAccount = null;
+  if (patientIdToken) {
+    const uid = await verifyOptionalIdToken(patientIdToken);
+    if (uid) {
+      patientAccount = await loadPatientAccount(uid);
+      if (patientAccount) patientAccountUid = uid;
+    }
+  }
+
+  const finalName = patientName
+    || (patientAccount?.displayName)
+    || session.patientName
+    || payload.patientNameHint
+    || "Paciente";
   const identity = `pat_${crypto.randomBytes(6).toString("hex")}`;
 
   const livekitToken = await issueLivekitToken({
@@ -369,17 +406,21 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     ttlMs: SESSION_TOKEN_VALIDITY_MS
   });
 
-  await db.collection("therapy_sessions").doc(payload.sessionId).set({
+  const sessionUpdate = {
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
     patientNameFinal: finalName,
     patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+  if (patientAccountUid) sessionUpdate.patientAccountUid = patientAccountUid;
+
+  await db.collection("therapy_sessions").doc(payload.sessionId).set(sessionUpdate, { merge: true });
 
   await logAudit({
     type: "patient_joined",
     sessionId: payload.sessionId,
     patientName: finalName,
+    patientAccountUid: patientAccountUid || null,
     ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
   });
 
@@ -391,7 +432,8 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     role: "patient",
     e2eeKey: session.e2eeKey || null,
     therapistDisplayName: session.therapistDisplayName || "",
-    sessionId: payload.sessionId
+    sessionId: payload.sessionId,
+    patientAccountUid: patientAccountUid || null
   });
 }));
 
@@ -650,6 +692,243 @@ router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, sessions });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// CONTA DE PACIENTE — opcional. Pacientes podem criar conta para guardar
+// suas próprias anotações cifradas E2EE entre sessões. Mesmo padrão DEK/KEK
+// dos profissionais. Server-blind (não vê plaintext nem chave).
+//
+// Coleções:
+//   therapy_patient_accounts/{uid}  — perfil + e2eeSalt + wrappedDEK
+//   therapy_patient_notes/{noteId}  — { patientAccountUid, sessionId, ciphertext, iv }
+// ─────────────────────────────────────────────────────────────────────────
+
+const PATIENT_NOTE_CIPHERTEXT_MAX = 64 * 1024; // 64 KB cifrado por nota
+
+// POST /therapy/paciente/registrar
+router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const displayName  = String(req.body?.displayName  || "").trim().slice(0, 80);
+  const e2eeSalt     = String(req.body?.e2eeSalt     || "").trim();
+  const wrappedDEK   = String(req.body?.wrappedDEK   || "").trim();
+  const wrappedDEKIv = String(req.body?.wrappedDEKIv || "").trim();
+  const consentLgpd  = !!req.body?.consentLgpd;
+
+  if (!displayName) return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!consentLgpd) return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
+  if (!e2eeSalt || e2eeSalt.length < 16 || e2eeSalt.length > 128) {
+    return sendError(res, 400, "E2EE_SALT_INVALIDO");
+  }
+  if (!wrappedDEK || !wrappedDEKIv) return sendError(res, 400, "WRAPPED_DEK_OBRIGATORIO");
+  if (wrappedDEK.length > 256 || wrappedDEKIv.length > 64) {
+    return sendError(res, 400, "WRAPPED_DEK_INVALIDO");
+  }
+
+  // Bloqueia colisão com conta de profissional (mesmo UID == mesmo e-mail).
+  const therapistDoc = await getDb().collection("therapists").doc(uid).get();
+  if (therapistDoc.exists) return sendError(res, 409, "EMAIL_PERTENCE_A_PROFISSIONAL");
+
+  const db = getDb();
+  const ref = db.collection("therapy_patient_accounts").doc(uid);
+  const existing = await ref.get();
+  const existingData = existing.exists ? existing.data() : null;
+
+  // Write-once como no profissional — trocar salt/DEK quebraria as notas.
+  const lockedSalt         = existingData?.e2eeSalt     || e2eeSalt;
+  const lockedWrappedDEK   = existingData?.wrappedDEK   || wrappedDEK;
+  const lockedWrappedDEKIv = existingData?.wrappedDEKIv || wrappedDEKIv;
+
+  await ref.set({
+    uid,
+    displayName,
+    e2eeSalt:     lockedSalt,
+    wrappedDEK:   lockedWrappedDEK,
+    wrappedDEKIv: lockedWrappedDEKIv,
+    role: "patient",
+    consentLgpd: true,
+    consentLgpdAt: existingData?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: existingData?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "patient_account_registered",
+    patientAccountUid: uid,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({
+    ok: true,
+    account: {
+      uid, displayName,
+      e2eeSalt:     lockedSalt,
+      wrappedDEK:   lockedWrappedDEK,
+      wrappedDEKIv: lockedWrappedDEKIv
+    }
+  });
+}));
+
+// GET /therapy/paciente/me
+router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+  return res.json({ ok: true, account });
+}));
+
+// GET /therapy/paciente/sessoes — sessões em que esta conta participou
+router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_sessions")
+    .where("patientAccountUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const sessions = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        sessionId: data.sessionId,
+        therapistDisplayName: data.therapistDisplayName || "",
+        status: data.status,
+        scheduledAt: data.scheduledAt || null,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, sessions });
+}));
+
+// POST /therapy/paciente/notas — salva nota cifrada do paciente
+router.post("/therapy/paciente/notas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  const sessionId  = String(req.body?.sessionId  || "").trim();
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv         = String(req.body?.iv         || "").trim();
+
+  if (!sessionId)         return sendError(res, 400, "SESSAO_OBRIGATORIA");
+  if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
+  if (ciphertext.length > PATIENT_NOTE_CIPHERTEXT_MAX) return sendError(res, 413, "NOTA_GRANDE_DEMAIS");
+
+  // Snapshot do nome do profissional pra exibição offline (paciente não tem
+  // perfil do profissional disponível pra consultar depois).
+  const db = getDb();
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  const therapistDisplayName = sessSnap.exists ? (sessSnap.data().therapistDisplayName || "") : "";
+
+  const noteId = newId("pnote");
+  await db.collection("therapy_patient_notes").doc(noteId).set({
+    noteId,
+    patientAccountUid: uid,
+    sessionId,
+    therapistDisplayName,
+    ciphertext,
+    iv,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  return res.json({ ok: true, noteId });
+}));
+
+// GET /therapy/paciente/notas?sessionId=X (opcional) — lista cifrados do paciente
+router.get("/therapy/paciente/notas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.query?.sessionId || "").trim();
+
+  const db = getDb();
+  let q = db.collection("therapy_patient_notes").where("patientAccountUid", "==", uid);
+  if (sessionId) q = q.where("sessionId", "==", sessionId);
+
+  const snap = await q.limit(1000).get();
+  const notes = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        noteId: data.noteId,
+        sessionId: data.sessionId,
+        therapistDisplayName: data.therapistDisplayName || "",
+        ciphertext: data.ciphertext,
+        iv: data.iv,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
+      };
+    })
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+  return res.json({ ok: true, notes });
+}));
+
+// PATCH /therapy/paciente/notas/:noteId — edita
+router.patch("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const noteId = String(req.params.noteId || "").trim();
+  if (!noteId) return sendError(res, 400, "NOTA_OBRIGATORIA");
+
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv         = String(req.body?.iv         || "").trim();
+  if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
+  if (ciphertext.length > PATIENT_NOTE_CIPHERTEXT_MAX) return sendError(res, 413, "NOTA_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const ref = db.collection("therapy_patient_notes").doc(noteId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "NOTA_NAO_ENCONTRADA");
+  if (snap.data().patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.set({
+    ciphertext, iv,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/paciente/notas/:noteId — apaga (hard delete; só o paciente vê)
+router.delete("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const noteId = String(req.params.noteId || "").trim();
+  if (!noteId) return sendError(res, 400, "NOTA_OBRIGATORIA");
+
+  const db = getDb();
+  const ref = db.collection("therapy_patient_notes").doc(noteId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "NOTA_NAO_ENCONTRADA");
+  if (snap.data().patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/health — diagnóstico isolado
