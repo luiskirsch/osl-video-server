@@ -1148,7 +1148,19 @@ router.delete("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) =
 
 const RECEITA_FORM_CIPHERTEXT_MAX = 32 * 1024;     // 32 KB cifrado de formulário
 const RECEITA_PDF_MAX             = 1024 * 1024;   // 1 MB de PDF assinado base64
-const RECEITA_DELIVERY_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60 dias
+const RECEITA_DELIVERY_VALIDITY_MS = 90 * 24 * 60 * 60 * 1000; // 90 dias
+
+function buildDeliveryToken(receitaId) {
+  const now = Date.now();
+  const exp = now + RECEITA_DELIVERY_VALIDITY_MS;
+  const token = signPayload({
+    token_type: "receita_delivery",
+    receitaId,
+    iat: now,
+    exp
+  }, ACCESS_TOKEN_SECRET);
+  return { token, exp };
+}
 
 // POST /therapy/receitas — cria rascunho
 router.post("/therapy/receitas", asyncHandler(async (req, res) => {
@@ -1225,8 +1237,45 @@ router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+// POST /therapy/receitas/:id/preparar-link — gera (ou reutiliza) o
+// deliveryToken ANTES da assinatura, pra que o QR já vá embutido no PDF.
+// Idempotente: token vivo é reutilizado; expirado é regenerado.
+router.post("/therapy/receitas/:id/preparar-link", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const receitaId = String(req.params.id || "").trim();
+  if (!receitaId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_receitas").doc(receitaId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "RECEITA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  let deliveryToken    = r.deliveryToken    || null;
+  let deliveryTokenExp = r.deliveryTokenExp || null;
+  const now = Date.now();
+  // Regenera se ausente OU expirado OU se faltam <14 dias (pra evitar QR já com
+  // pouca validade no PDF que vai pro paciente).
+  if (!deliveryToken || !deliveryTokenExp || deliveryTokenExp - now < 14 * 24 * 60 * 60 * 1000) {
+    const fresh = buildDeliveryToken(receitaId);
+    deliveryToken    = fresh.token;
+    deliveryTokenExp = fresh.exp;
+    await ref.set({
+      deliveryToken, deliveryTokenExp,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+  return res.json({ ok: true, deliveryToken, deliveryTokenExp });
+}));
+
 // POST /therapy/receitas/:id/assinar — recebe PDF (já assinado client-side ou
-// upload externo) + signatureMethod. Marca como signed, gera deliveryToken.
+// upload externo) + signatureMethod. Marca como signed, reutiliza deliveryToken
+// pré-gerado por /preparar-link (gera fresh se faltar, mas isso significa que
+// o QR no PDF não vai bater — frontend deve sempre chamar preparar-link antes).
 router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -1254,14 +1303,15 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
 
-  // Token de delivery: assinado, expira em 60 dias, contém receitaId
-  const deliveryTokenExp = Date.now() + RECEITA_DELIVERY_VALIDITY_MS;
-  const deliveryToken = signPayload({
-    token_type: "receita_delivery",
-    receitaId,
-    iat: Date.now(),
-    exp: deliveryTokenExp
-  }, ACCESS_TOKEN_SECRET);
+  // Reutiliza token pré-gerado se ainda válido. Senão fallback (PDF pode estar
+  // sem QR ou com QR que não bate, mas a receita continua íntegra).
+  let deliveryToken    = r.deliveryToken    || null;
+  let deliveryTokenExp = r.deliveryTokenExp || null;
+  if (!deliveryToken || !deliveryTokenExp || deliveryTokenExp < Date.now()) {
+    const fresh = buildDeliveryToken(receitaId);
+    deliveryToken    = fresh.token;
+    deliveryTokenExp = fresh.exp;
+  }
 
   await ref.set({
     status: "signed",
@@ -1406,17 +1456,29 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
     ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
   });
 
-  // Devolve metadados + PDF base64; cliente exibe / baixa.
+  // Devolve metadados + PDF base64 + dados do médico pra renderizar
+  // a página de verificação como "comprovante de autenticidade".
+  const therapist = await loadTherapist(r.therapistUid);
+  const issuer = therapist ? {
+    displayName:   therapist.displayName || "",
+    crm:           therapist.crm || "",
+    crp:           therapist.crp || "",
+    rqe:           therapist.rqe || "",
+    especialidade: therapist.especialidade || "",
+    consultorio:   therapist.consultorio || null
+  } : null;
+
   return res.json({
     ok: true,
     receita: {
       receitaId: r.receitaId,
       patientNameSnapshot: r.patientNameSnapshot,
-      therapistDisplayName: (await loadTherapist(r.therapistUid))?.displayName || "",
       pdfBase64: r.pdfSignedBase64,
       pdfMime: r.pdfSignedMime || "application/pdf",
       signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : null,
-      signatureMethod: r.signatureMethod || null
+      signatureMethod: r.signatureMethod || null,
+      deliveryTokenExp: r.deliveryTokenExp || null,
+      issuer
     }
   });
 }));
