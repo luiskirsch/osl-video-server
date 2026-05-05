@@ -154,6 +154,15 @@ const REFERRAL_COMMISSION_PERCENT  = 0.31;
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
+// Allowlist de e-mails admin do Espaço Prelúdio (verificação de CRP/CRM, etc).
+// Comma-separated. Ex.: "luis@x.com,ops@y.com". Validado contra decoded.email
+// do Firebase ID Token. Sem essa env, ninguém é admin (rejeita 403).
+const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
+  .toLowerCase()
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
 const DISCORD_BOT_TOKEN       = process.env.DISCORD_BOT_TOKEN       || "";
@@ -178,6 +187,7 @@ module.exports = {
   FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM, MAX_COMPLETED_RECORDINGS_IN_MEMORY,
   REFERRAL_REWARD_COINS, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE, REFERRAL_COMMISSION_PERCENT,
   ADMIN_SECRET,
+  THERAPY_ADMIN_EMAILS,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE
 };

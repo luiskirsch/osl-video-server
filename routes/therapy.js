@@ -21,9 +21,10 @@ const { AccessToken } = require("livekit-server-sdk");
 const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
-const { verifyFirebaseToken, signPayload, verifySignedToken } = require("../services/auth");
+const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
 const {
-  LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET
+  LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
+  THERAPY_ADMIN_EMAILS
 } = require("../config");
 
 const router = express.Router();
@@ -60,6 +61,31 @@ async function loadPatientAccount(uid) {
   const db = getDb();
   const snap = await db.collection("therapy_patient_accounts").doc(uid).get();
   return snap.exists ? snap.data() : null;
+}
+
+// Verifica que o usuário atual é admin do Espaço Prelúdio (allowlist por e-mail
+// em THERAPY_ADMIN_EMAILS). Retorna { uid, email } em caso positivo; escreve
+// 401/403 e devolve null caso contrário.
+async function verifyAdminTherapy(req, res) {
+  const bearer = getBearerToken(req);
+  if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(bearer);
+  } catch {
+    sendError(res, 401, "TOKEN_INVALIDO");
+    return null;
+  }
+  const email = String(decoded.email || "").toLowerCase();
+  if (!THERAPY_ADMIN_EMAILS.length) {
+    sendError(res, 503, "ADMIN_NAO_CONFIGURADO");
+    return null;
+  }
+  if (!THERAPY_ADMIN_EMAILS.includes(email)) {
+    sendError(res, 403, "NAO_AUTORIZADO");
+    return null;
+  }
+  return { uid: decoded.uid, email };
 }
 
 // Verifica idToken vindo do body (não do header). Não escreve resposta de erro —
@@ -1009,6 +1035,284 @@ router.delete("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) =
   if (snap.data().patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   await ref.delete();
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// VERIFICAÇÃO DE CRP/CRM (e-Psi)
+// Profissional sobe um documento (printscreen do e-Psi, comprovante CFP/CFM)
+// como base64. Admin (allowlist) revisa e aprova ou rejeita. Status reflete
+// no perfil do profissional (badge "Verificado").
+//
+// Coleções:
+//   therapy_verifications/{verificationId}
+//     { therapistUid, status, documentBase64, documentMime, notes,
+//       submittedAt, reviewedAt, reviewedBy, rejectionReason }
+//   therapists/{uid}.verificationStatus = "none" | "pending" | "verified" | "rejected"
+//   therapists/{uid}.verificationId, .verifiedAt
+// ─────────────────────────────────────────────────────────────────────────
+
+const VERIFICATION_DOC_MAX = 700 * 1024; // 700 KB de base64 (~525 KB binário)
+const VERIFICATION_ALLOWED_MIMES = new Set([
+  "image/jpeg", "image/png", "image/webp", "application/pdf"
+]);
+
+// POST /therapy/profissional/verificacao/submeter
+// Body: { documentBase64, documentMime, notes? }
+router.post("/therapy/profissional/verificacao/submeter", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  if (therapist.verificationStatus === "verified") {
+    return sendError(res, 409, "JA_VERIFICADO");
+  }
+
+  const documentBase64 = String(req.body?.documentBase64 || "").trim();
+  const documentMime   = String(req.body?.documentMime   || "").trim().toLowerCase();
+  const notes          = String(req.body?.notes || "").trim().slice(0, 500);
+
+  if (!documentBase64) return sendError(res, 400, "DOCUMENTO_OBRIGATORIO");
+  if (documentBase64.length > VERIFICATION_DOC_MAX) {
+    return sendError(res, 413, "DOCUMENTO_GRANDE_DEMAIS");
+  }
+  if (!VERIFICATION_ALLOWED_MIMES.has(documentMime)) {
+    return sendError(res, 400, "TIPO_DOCUMENTO_NAO_SUPORTADO");
+  }
+
+  const verificationId = newId("ver");
+  const db = getDb();
+
+  await db.collection("therapy_verifications").doc(verificationId).set({
+    verificationId,
+    therapistUid: uid,
+    status: "pending",
+    documentBase64,
+    documentMime,
+    notes,
+    submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+    reviewedAt: null,
+    reviewedBy: null,
+    rejectionReason: null
+  });
+
+  await db.collection("therapists").doc(uid).set({
+    verificationStatus: "pending",
+    verificationId,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "verification_submitted",
+    therapistUid: uid,
+    verificationId
+  });
+
+  return res.json({ ok: true, verificationId, status: "pending" });
+}));
+
+// GET /therapy/profissional/verificacao/status
+router.get("/therapy/profissional/verificacao/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const status = therapist.verificationStatus || "none";
+  const verificationId = therapist.verificationId || null;
+  const verifiedAt = therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null;
+
+  let lastSubmission = null;
+  if (verificationId) {
+    const snap = await getDb().collection("therapy_verifications").doc(verificationId).get();
+    if (snap.exists) {
+      const d = snap.data();
+      lastSubmission = {
+        verificationId: d.verificationId,
+        status: d.status,
+        documentMime: d.documentMime,
+        notes: d.notes || "",
+        submittedAt: d.submittedAt?.toMillis ? d.submittedAt.toMillis() : null,
+        reviewedAt: d.reviewedAt?.toMillis ? d.reviewedAt.toMillis() : null,
+        rejectionReason: d.rejectionReason || null
+        // documentBase64 NÃO retornado aqui — pesa demais e o profissional já tem.
+      };
+    }
+  }
+
+  return res.json({ ok: true, status, verifiedAt, lastSubmission });
+}));
+
+// GET /therapy/admin/verificacoes?status=pending
+// Lista submissões. Sem documentBase64 pra response não pesar.
+router.get("/therapy/admin/verificacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending").trim().toLowerCase();
+  const allowed = new Set(["pending", "verified", "rejected", "all"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  let q = db.collection("therapy_verifications");
+  if (wantStatus !== "all") q = q.where("status", "==", wantStatus);
+
+  const snap = await q.limit(500).get();
+  const items = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        verificationId: data.verificationId,
+        therapistUid: data.therapistUid,
+        status: data.status,
+        documentMime: data.documentMime,
+        notes: data.notes || "",
+        submittedAt: data.submittedAt?.toMillis ? data.submittedAt.toMillis() : null,
+        reviewedAt: data.reviewedAt?.toMillis ? data.reviewedAt.toMillis() : null,
+        reviewedBy: data.reviewedBy || null,
+        rejectionReason: data.rejectionReason || null
+      };
+    })
+    .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0));
+
+  // Anexa nome/CRP/CRM do profissional pra facilitar revisão
+  const enriched = await Promise.all(items.map(async item => {
+    const t = await loadTherapist(item.therapistUid);
+    return {
+      ...item,
+      therapist: t ? {
+        displayName: t.displayName || "",
+        crp: t.crp || "",
+        crm: t.crm || "",
+        especialidade: t.especialidade || ""
+      } : null
+    };
+  }));
+
+  return res.json({ ok: true, items: enriched });
+}));
+
+// GET /therapy/admin/verificacoes/:id — devolve com documentBase64 pra revisão
+router.get("/therapy/admin/verificacoes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const verificationId = String(req.params.id || "").trim();
+  if (!verificationId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_verifications").doc(verificationId).get();
+  if (!snap.exists) return sendError(res, 404, "VERIFICACAO_NAO_ENCONTRADA");
+  const data = snap.data();
+
+  const therapist = await loadTherapist(data.therapistUid);
+
+  return res.json({
+    ok: true,
+    item: {
+      verificationId: data.verificationId,
+      therapistUid: data.therapistUid,
+      status: data.status,
+      documentBase64: data.documentBase64,
+      documentMime: data.documentMime,
+      notes: data.notes || "",
+      submittedAt: data.submittedAt?.toMillis ? data.submittedAt.toMillis() : null,
+      reviewedAt: data.reviewedAt?.toMillis ? data.reviewedAt.toMillis() : null,
+      reviewedBy: data.reviewedBy || null,
+      rejectionReason: data.rejectionReason || null,
+      therapist: therapist ? {
+        displayName: therapist.displayName || "",
+        crp: therapist.crp || "",
+        crm: therapist.crm || "",
+        especialidade: therapist.especialidade || "",
+        bio: therapist.bio || ""
+      } : null
+    }
+  });
+}));
+
+// POST /therapy/admin/verificacoes/:id/aprovar
+router.post("/therapy/admin/verificacoes/:id/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const verificationId = String(req.params.id || "").trim();
+  if (!verificationId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_verifications").doc(verificationId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "VERIFICACAO_NAO_ENCONTRADA");
+  const data = snap.data();
+  if (data.status === "verified") return sendError(res, 409, "JA_APROVADA");
+
+  await ref.set({
+    status: "verified",
+    reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    reviewedBy: adminAuth.email
+  }, { merge: true });
+
+  await db.collection("therapists").doc(data.therapistUid).set({
+    verificationStatus: "verified",
+    verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "verification_approved",
+    therapistUid: data.therapistUid,
+    verificationId,
+    adminEmail: adminAuth.email
+  });
+
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/admin/verificacoes/:id/rejeitar
+router.post("/therapy/admin/verificacoes/:id/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const verificationId = String(req.params.id || "").trim();
+  const reason = String(req.body?.reason || "").trim().slice(0, 500);
+  if (!verificationId) return sendError(res, 400, "ID_OBRIGATORIO");
+  if (!reason)         return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_verifications").doc(verificationId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "VERIFICACAO_NAO_ENCONTRADA");
+  const data = snap.data();
+  if (data.status === "verified") return sendError(res, 409, "JA_APROVADA_NAO_DA_PRA_REJEITAR");
+
+  await ref.set({
+    status: "rejected",
+    rejectionReason: reason,
+    reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    reviewedBy: adminAuth.email
+  }, { merge: true });
+
+  await db.collection("therapists").doc(data.therapistUid).set({
+    verificationStatus: "rejected",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "verification_rejected",
+    therapistUid: data.therapistUid,
+    verificationId,
+    adminEmail: adminAuth.email,
+    reason
+  });
+
   return res.json({ ok: true });
 }));
 
