@@ -1761,6 +1761,130 @@ router.post("/therapy/admin/verificacoes/:id/rejeitar", asyncHandler(async (req,
   return res.json({ ok: true });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// AUDIT LOG VISÍVEL (LGPD Art. 18, II — direito de acesso)
+// O titular pode consultar quais eventos do sistema envolveram sua conta.
+// Filtramos a collection therapy_audit pelo UID dele.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Tipos de evento que o profissional vê
+const THERAPIST_AUDIT_TYPES = new Set([
+  "therapist_registered", "therapist_recovered", "therapist_perfil_updated",
+  "session_created", "therapist_joined", "session_completed",
+  "patient_created", "patient_updated", "patient_deleted",
+  "verification_submitted", "verification_approved", "verification_rejected",
+  "receita_created", "receita_signed", "receita_deleted_draft", "receita_publica_access"
+]);
+
+// Tipos de evento que o paciente (com conta) vê
+const PATIENT_AUDIT_TYPES = new Set([
+  "patient_account_registered", "patient_account_recovered", "patient_joined"
+]);
+
+function describeAudit(ev) {
+  // Descrição amigável em PT-BR pra exibir no painel.
+  const map = {
+    therapist_registered:        "Conta profissional criada",
+    therapist_recovered:         "Senha redefinida via chave-semente",
+    therapist_perfil_updated:    "Perfil profissional atualizado",
+    session_created:             "Consulta criada",
+    therapist_joined:            "Você entrou na sala da consulta",
+    session_completed:           "Consulta encerrada",
+    patient_created:             "Paciente cadastrado",
+    patient_updated:             "Paciente editado",
+    patient_deleted:             "Paciente apagado",
+    verification_submitted:      "Documento de verificação enviado",
+    verification_approved:       "Verificação aprovada pela equipe",
+    verification_rejected:       "Verificação recusada",
+    receita_created:             "Receita criada (rascunho)",
+    receita_signed:              "Receita assinada",
+    receita_deleted_draft:       "Rascunho de receita apagado",
+    receita_publica_access:      "Receita acessada via link público",
+    patient_account_registered:  "Conta de paciente criada",
+    patient_account_recovered:   "Senha do paciente redefinida via chave-semente",
+    patient_joined:              "Você entrou em uma consulta"
+  };
+  return map[ev.type] || ev.type;
+}
+
+// GET /therapy/profissional/audit
+router.get("/therapy/profissional/audit", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const db = getDb();
+  // Sem orderBy + where (composite index). Filtro client-side em memória.
+  const snap = await db.collection("therapy_audit")
+    .where("therapistUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const events = snap.docs
+    .map(d => {
+      const ev = d.data();
+      return {
+        id: d.id,
+        type: ev.type,
+        description: describeAudit(ev),
+        at: ev.createdAt?.toMillis ? ev.createdAt.toMillis() : null,
+        meta: {
+          sessionId:      ev.sessionId      || null,
+          patientId:      ev.patientId      || null,
+          receitaId:      ev.receitaId      || null,
+          verificationId: ev.verificationId || null,
+          ip:             ev.ip             || null,
+          adminEmail:     ev.adminEmail     || null,
+          reason:         ev.reason         || null,
+          signatureMethod: ev.signatureMethod || null,
+          patientName:    ev.patientName    || null
+        }
+      };
+    })
+    .filter(e => THERAPIST_AUDIT_TYPES.has(e.type))
+    .sort((a, b) => (b.at || 0) - (a.at || 0));
+
+  return res.json({ ok: true, events });
+}));
+
+// GET /therapy/paciente/audit
+router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_audit")
+    .where("patientAccountUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const events = snap.docs
+    .map(d => {
+      const ev = d.data();
+      return {
+        id: d.id,
+        type: ev.type,
+        description: describeAudit(ev),
+        at: ev.createdAt?.toMillis ? ev.createdAt.toMillis() : null,
+        meta: {
+          sessionId: ev.sessionId || null,
+          ip: ev.ip || null
+        }
+      };
+    })
+    .filter(e => PATIENT_AUDIT_TYPES.has(e.type))
+    .sort((a, b) => (b.at || 0) - (a.at || 0));
+
+  return res.json({ ok: true, events });
+}));
+
 // GET /therapy/health — diagnóstico isolado
 router.get("/therapy/health", (req, res) => {
   res.json({
