@@ -181,6 +181,49 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/profissional/recuperar
+// Sobrescreve e2eeSalt + wrappedDEK quando o usuário recupera com chave-semente.
+// O cliente já reconstruiu o DEK a partir da phrase + redefiniu a senha do Firebase.
+// Este endpoint apenas grava o novo wrap. Cliente NÃO envia DEK.
+// ─────────────────────────────────────────────────────────────────────────
+router.post("/therapy/profissional/recuperar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const e2eeSalt     = String(req.body?.e2eeSalt     || "").trim();
+  const wrappedDEK   = String(req.body?.wrappedDEK   || "").trim();
+  const wrappedDEKIv = String(req.body?.wrappedDEKIv || "").trim();
+
+  if (!e2eeSalt || e2eeSalt.length < 16 || e2eeSalt.length > 128) {
+    return sendError(res, 400, "E2EE_SALT_INVALIDO");
+  }
+  if (!wrappedDEK || !wrappedDEKIv) return sendError(res, 400, "WRAPPED_DEK_OBRIGATORIO");
+  if (wrappedDEK.length > 256 || wrappedDEKIv.length > 64) {
+    return sendError(res, 400, "WRAPPED_DEK_INVALIDO");
+  }
+
+  const db = getDb();
+  const ref = db.collection("therapists").doc(uid);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  await ref.set({
+    e2eeSalt, wrappedDEK, wrappedDEKIv,
+    recoveredAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:   admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "therapist_recovered",
+    therapistUid: uid,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({ ok: true });
+}));
+
 // GET /therapy/profissional/me
 router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -770,6 +813,44 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
       wrappedDEKIv: lockedWrappedDEKIv
     }
   });
+}));
+
+// POST /therapy/paciente/recuperar — sobrescreve salt + wrappedDEK do paciente
+router.post("/therapy/paciente/recuperar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const e2eeSalt     = String(req.body?.e2eeSalt     || "").trim();
+  const wrappedDEK   = String(req.body?.wrappedDEK   || "").trim();
+  const wrappedDEKIv = String(req.body?.wrappedDEKIv || "").trim();
+
+  if (!e2eeSalt || e2eeSalt.length < 16 || e2eeSalt.length > 128) {
+    return sendError(res, 400, "E2EE_SALT_INVALIDO");
+  }
+  if (!wrappedDEK || !wrappedDEKIv) return sendError(res, 400, "WRAPPED_DEK_OBRIGATORIO");
+  if (wrappedDEK.length > 256 || wrappedDEKIv.length > 64) {
+    return sendError(res, 400, "WRAPPED_DEK_INVALIDO");
+  }
+
+  const db = getDb();
+  const ref = db.collection("therapy_patient_accounts").doc(uid);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  await ref.set({
+    e2eeSalt, wrappedDEK, wrappedDEKIv,
+    recoveredAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:   admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "patient_account_recovered",
+    patientAccountUid: uid,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/paciente/me
