@@ -250,6 +250,88 @@ router.post("/therapy/profissional/recuperar", asyncHandler(async (req, res) => 
   return res.json({ ok: true });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /therapy/profissional/perfil
+// Atualiza dados extras do consultório (endereço, telefone, RQE, logo, etc).
+// Não toca em e2eeSalt/wrappedDEK (que são write-once via /registrar e
+// /recuperar). Aceita atualização parcial.
+// ─────────────────────────────────────────────────────────────────────────
+
+const LOGO_MAX_BASE64 = 300 * 1024; // ~225 KB binário
+const LOGO_ALLOWED_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const updates = {
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  // Campos top-level editáveis
+  if (req.body?.displayName !== undefined) {
+    updates.displayName = String(req.body.displayName || "").trim().slice(0, 80);
+  }
+  if (req.body?.especialidade !== undefined) {
+    updates.especialidade = String(req.body.especialidade || "").trim().slice(0, 60);
+  }
+  if (req.body?.bio !== undefined) {
+    updates.bio = String(req.body.bio || "").trim().slice(0, 500);
+  }
+  if (req.body?.crp !== undefined) {
+    updates.crp = String(req.body.crp || "").trim().toUpperCase().slice(0, 20);
+  }
+  if (req.body?.crm !== undefined) {
+    updates.crm = String(req.body.crm || "").trim().toUpperCase().slice(0, 20);
+  }
+  if (req.body?.rqe !== undefined) {
+    updates.rqe = String(req.body.rqe || "").trim().slice(0, 30);
+  }
+  if (req.body?.cnpj !== undefined) {
+    updates.cnpj = String(req.body.cnpj || "").trim().slice(0, 20);
+  }
+
+  // Consultório (objeto)
+  if (req.body?.consultorio && typeof req.body.consultorio === "object") {
+    const c = req.body.consultorio;
+    updates.consultorio = {
+      endereco:    String(c.endereco    || "").trim().slice(0, 200),
+      numero:      String(c.numero      || "").trim().slice(0, 20),
+      complemento: String(c.complemento || "").trim().slice(0, 80),
+      bairro:      String(c.bairro      || "").trim().slice(0, 80),
+      cidade:      String(c.cidade      || "").trim().slice(0, 80),
+      uf:          String(c.uf          || "").trim().toUpperCase().slice(0, 2),
+      cep:         String(c.cep         || "").trim().slice(0, 12),
+      telefone:    String(c.telefone    || "").trim().slice(0, 30)
+    };
+  }
+
+  // Logo (base64). Cliente pode mandar string vazia para remover.
+  if (req.body?.logoBase64 !== undefined) {
+    const logoBase64 = String(req.body.logoBase64 || "").trim();
+    const logoMime   = String(req.body.logoMime   || "").trim().toLowerCase();
+    if (logoBase64) {
+      if (logoBase64.length > LOGO_MAX_BASE64) return sendError(res, 413, "LOGO_GRANDE_DEMAIS");
+      if (!LOGO_ALLOWED_MIMES.has(logoMime))   return sendError(res, 400, "LOGO_TIPO_INVALIDO");
+      updates.logoBase64 = logoBase64;
+      updates.logoMime   = logoMime;
+    } else {
+      // Remove logo
+      updates.logoBase64 = admin.firestore.FieldValue.delete();
+      updates.logoMime   = admin.firestore.FieldValue.delete();
+    }
+  }
+
+  await getDb().collection("therapists").doc(uid).set(updates, { merge: true });
+  await logAudit({ type: "therapist_perfil_updated", therapistUid: uid });
+
+  return res.json({ ok: true });
+}));
+
 // GET /therapy/profissional/me
 router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
