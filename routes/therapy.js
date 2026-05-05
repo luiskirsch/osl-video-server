@@ -187,8 +187,17 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
 
   const patientName = String(req.body?.patientName || "Paciente").trim().slice(0, PATIENT_NAME_MAX);
+  const patientId   = String(req.body?.patientId || "").trim();
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
+
+  // Se patientId passado, valida ownership.
+  if (patientId) {
+    const db0 = getDb();
+    const psnap = await db0.collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
 
   const sessionId   = newId("sess");
   const livekitRoom = `therapy_${sessionId}`;
@@ -214,6 +223,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     therapistUid: uid,
     therapistDisplayName: therapist.displayName || "",
     patientName,
+    patientId: patientId || null,
     livekitRoom,
     e2eeKey,
     scheduledAt,
@@ -257,6 +267,7 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
     return {
       sessionId: data.sessionId,
       patientName: data.patientName,
+      patientId: data.patientId || null,
       status: data.status,
       scheduledAt: data.scheduledAt || null,
       livekitRoom: data.livekitRoom,
@@ -477,6 +488,154 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
 
   return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// PACIENTES — CRUD cifrado client-side. Server vê só ciphertext + iv.
+// O blob cifrado contém: { name, contact, observations, birthdate?, ... }
+// ─────────────────────────────────────────────────────────────────────────
+
+const PATIENT_CIPHERTEXT_MAX = 64 * 1024; // 64 KB cifrado por paciente
+
+// POST /therapy/pacientes — cria paciente
+router.post("/therapy/pacientes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv         = String(req.body?.iv         || "").trim();
+  if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
+  if (ciphertext.length > PATIENT_CIPHERTEXT_MAX) return sendError(res, 413, "PACIENTE_GRANDE_DEMAIS");
+
+  const patientId = newId("pat");
+  const db = getDb();
+  await db.collection("therapy_patients").doc(patientId).set({
+    patientId,
+    therapistUid: uid,
+    ciphertext,
+    iv,
+    deleted: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await logAudit({ type: "patient_created", patientId, therapistUid: uid });
+  return res.json({ ok: true, patientId });
+}));
+
+// GET /therapy/pacientes — lista pacientes do profissional
+router.get("/therapy/pacientes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_patients")
+    .where("therapistUid", "==", uid)
+    .where("deleted", "==", false)
+    .orderBy("updatedAt", "desc")
+    .limit(500)
+    .get();
+
+  const patients = snap.docs.map(d => {
+    const data = d.data();
+    return {
+      patientId: data.patientId,
+      ciphertext: data.ciphertext,
+      iv: data.iv,
+      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+      updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
+    };
+  });
+  return res.json({ ok: true, patients });
+}));
+
+// PATCH /therapy/pacientes/:patientId — atualiza ciphertext
+router.patch("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv         = String(req.body?.iv         || "").trim();
+  if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
+  if (ciphertext.length > PATIENT_CIPHERTEXT_MAX) return sendError(res, 413, "PACIENTE_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const docRef = db.collection("therapy_patients").doc(patientId);
+  const snap = await docRef.get();
+  if (!snap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await docRef.set({
+    ciphertext, iv,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "patient_updated", patientId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/pacientes/:patientId — soft delete
+router.delete("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const db = getDb();
+  const docRef = db.collection("therapy_patients").doc(patientId);
+  const snap = await docRef.get();
+  if (!snap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await docRef.set({
+    deleted: true,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "patient_deleted", patientId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/pacientes/:patientId/sessoes — todas as sessões deste paciente
+router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const db = getDb();
+  const patientSnap = await db.collection("therapy_patients").doc(patientId).get();
+  if (!patientSnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (patientSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const snap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("patientId", "==", patientId)
+    .orderBy("createdAt", "desc")
+    .limit(500)
+    .get();
+
+  const sessions = snap.docs.map(d => {
+    const data = d.data();
+    return {
+      sessionId: data.sessionId,
+      patientName: data.patientName,
+      status: data.status,
+      scheduledAt: data.scheduledAt || null,
+      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+      completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
+    };
+  });
+  return res.json({ ok: true, sessions });
 }));
 
 // GET /therapy/health — diagnóstico isolado
