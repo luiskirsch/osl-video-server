@@ -29,6 +29,7 @@ const {
   MP_WEBHOOK_SECRET
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
+const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 
 const router = express.Router();
 
@@ -1688,6 +1689,67 @@ router.get("/therapy/admin/verificacoes/:id", asyncHandler(async (req, res) => {
       } : null
     }
   });
+}));
+
+// POST /therapy/admin/verificacoes/:id/auto-validar
+// Roda o validador automatizado configurado (CFP_VALIDATOR_PROVIDER) contra
+// os dados profissionais do médico e grava o resultado na verificação.
+// Não aprova/rejeita sozinho — admin decide com base no resultado.
+router.post("/therapy/admin/verificacoes/:id/auto-validar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const verificationId = String(req.params.id || "").trim();
+  if (!verificationId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_verifications").doc(verificationId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "VERIFICACAO_NAO_ENCONTRADA");
+  const v = snap.data();
+
+  const therapist = await loadTherapist(v.therapistUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const tipo   = therapist.crm ? "CRM" : (therapist.crp ? "CRP" : null);
+  const numero = therapist.crm || therapist.crp || "";
+  if (!tipo || !numero) return sendError(res, 400, "REGISTRO_AUSENTE");
+
+  const validator = getCfpValidator();
+  let result;
+  try {
+    result = await validator.validate({
+      tipo, numero, nome: therapist.displayName || ""
+    });
+  } catch (err) {
+    logError("cfp_validator_error", err, { provider: validator.name, verificationId });
+    return sendError(res, 502, "VALIDADOR_FALHOU", { detail: err?.message || null });
+  }
+
+  await ref.set({
+    autoValidation: {
+      provider:   result.provider || "unknown",
+      verified:   !!result.verified,
+      confidence: typeof result.confidence === "number" ? result.confidence : 0,
+      error:      result.error || null,
+      raw:        result.raw || null,
+      ranAt:      admin.firestore.FieldValue.serverTimestamp(),
+      ranBy:      adminAuth.email
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "verification_auto_validated",
+    therapistUid: v.therapistUid,
+    verificationId,
+    provider: result.provider,
+    verified: !!result.verified,
+    adminEmail: adminAuth.email
+  });
+
+  return res.json({ ok: true, result });
 }));
 
 // POST /therapy/admin/verificacoes/:id/aprovar
