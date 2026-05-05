@@ -256,26 +256,29 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
   if (!uid) return;
 
   const db = getDb();
+  // Sem orderBy server-side pra evitar exigência de composite index no
+  // Firestore. Limit defensivo de 200; ordenação é feita client-side.
   const snap = await db.collection("therapy_sessions")
     .where("therapistUid", "==", uid)
-    .orderBy("createdAt", "desc")
-    .limit(100)
+    .limit(200)
     .get();
 
-  const sessions = snap.docs.map(d => {
-    const data = d.data();
-    return {
-      sessionId: data.sessionId,
-      patientName: data.patientName,
-      patientId: data.patientId || null,
-      status: data.status,
-      scheduledAt: data.scheduledAt || null,
-      livekitRoom: data.livekitRoom,
-      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
-      completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
-      joinTokenExp: data.joinTokenExp || null
-    };
-  });
+  const sessions = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        sessionId: data.sessionId,
+        patientName: data.patientName,
+        patientId: data.patientId || null,
+        status: data.status,
+        scheduledAt: data.scheduledAt || null,
+        livekitRoom: data.livekitRoom,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
+        joinTokenExp: data.joinTokenExp || null
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, sessions });
 }));
@@ -445,22 +448,24 @@ router.get("/therapy/sessao/:sessionId/notas", asyncHandler(async (req, res) => 
   if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  // Sem orderBy server-side (evita composite index). Ordena ASC por createdAt em JS.
   const snap = await db.collection("therapy_notes")
     .where("sessionId", "==", sessionId)
-    .orderBy("createdAt", "asc")
     .limit(500)
     .get();
 
-  const notes = snap.docs.map(d => {
-    const data = d.data();
-    return {
-      noteId: data.noteId,
-      kind: data.kind,
-      ciphertext: data.ciphertext,
-      iv: data.iv,
-      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null
-    };
-  });
+  const notes = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        noteId: data.noteId,
+        kind: data.kind,
+        ciphertext: data.ciphertext,
+        iv: data.iv,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null
+      };
+    })
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
   return res.json({ ok: true, notes });
 }));
@@ -530,23 +535,29 @@ router.get("/therapy/pacientes", asyncHandler(async (req, res) => {
   if (!uid) return;
 
   const db = getDb();
+  // Sem orderBy server-side; deleted filtrado em JS pra simplificar índices.
+  // Em escala (centenas de pacientes por terapeuta), ainda é trivial.
   const snap = await db.collection("therapy_patients")
     .where("therapistUid", "==", uid)
-    .where("deleted", "==", false)
-    .orderBy("updatedAt", "desc")
     .limit(500)
     .get();
 
-  const patients = snap.docs.map(d => {
-    const data = d.data();
-    return {
-      patientId: data.patientId,
-      ciphertext: data.ciphertext,
-      iv: data.iv,
-      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
-      updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
-    };
-  });
+  const patients = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        patientId: data.patientId,
+        deleted: !!data.deleted,
+        ciphertext: data.ciphertext,
+        iv: data.iv,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
+      };
+    })
+    .filter(p => !p.deleted)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .map(({ deleted, ...rest }) => rest);
+
   return res.json({ ok: true, patients });
 }));
 
@@ -617,24 +628,27 @@ router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res
   if (!patientSnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
   if (patientSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  // Sem orderBy; ordenação client-side.
   const snap = await db.collection("therapy_sessions")
     .where("therapistUid", "==", uid)
     .where("patientId", "==", patientId)
-    .orderBy("createdAt", "desc")
     .limit(500)
     .get();
 
-  const sessions = snap.docs.map(d => {
-    const data = d.data();
-    return {
-      sessionId: data.sessionId,
-      patientName: data.patientName,
-      status: data.status,
-      scheduledAt: data.scheduledAt || null,
-      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
-      completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
-    };
-  });
+  const sessions = snap.docs
+    .map(d => {
+      const data = d.data();
+      return {
+        sessionId: data.sessionId,
+        patientName: data.patientName,
+        status: data.status,
+        scheduledAt: data.scheduledAt || null,
+        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
   return res.json({ ok: true, sessions });
 }));
 
