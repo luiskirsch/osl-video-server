@@ -44,6 +44,8 @@ const ALLOWED_ORIGINS = [
   "https://www.preludiojogos.com",
   "https://preludiojogos.com.br",
   "https://www.preludiojogos.com.br",
+  "https://espacopreludio.com.br",
+  "https://www.espacopreludio.com.br",
   "https://luiskirsch.github.io",
   "http://localhost:3000",
   "http://localhost:8080",

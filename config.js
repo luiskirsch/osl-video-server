@@ -167,7 +167,7 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
 const THERAPY_PLAN_AMOUNT     = Number(process.env.THERAPY_PLAN_AMOUNT || 49.90);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 14);
-const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || `${process.env.FRONTEND_BASE_URL || "https://preludiojogos.com"}/staging/therapy`;
+const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
 
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
