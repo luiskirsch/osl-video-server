@@ -26,7 +26,7 @@ const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
-  MP_WEBHOOK_SECRET
+  MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
@@ -2185,7 +2185,9 @@ router.get("/therapy/health", (req, res) => {
   res.json({
     ok: true,
     livekitConfigured: !!(LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
-    livekitUrl: LIVEKIT_URL
+    livekitUrl: LIVEKIT_URL,
+    mpAccessTokenConfigured:   !!MP_ACCESS_TOKEN,
+    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET
   });
 });
 
