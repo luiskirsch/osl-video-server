@@ -438,6 +438,9 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
   const db = getDb();
   // Sem orderBy server-side pra evitar exigência de composite index no
   // Firestore. Limit defensivo de 200; ordenação é feita client-side.
+  // Filtro hiddenFromPainel também client-side pelo mesmo motivo (composite
+  // index). Painel só mostra sessões não ocultas; prontuário do paciente
+  // continua mostrando tudo (rota /therapy/pacientes/:id/sessoes).
   const snap = await db.collection("therapy_sessions")
     .where("therapistUid", "==", uid)
     .limit(200)
@@ -455,9 +458,11 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         livekitRoom: data.livekitRoom,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
-        joinTokenExp: data.joinTokenExp || null
+        joinTokenExp: data.joinTokenExp || null,
+        hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
+    .filter(s => !s.hiddenFromPainel)
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, sessions });
@@ -693,6 +698,40 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   }, { merge: true });
 
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
+
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/sessao/:sessionId/ocultar
+// Soft-hide: marca a sessão para não aparecer em /therapy/sessoes (painel
+// de consultas), mas mantém o registro no Firestore. Continua visível no
+// prontuário do paciente (/therapy/pacientes/:patientId/sessoes), no
+// histórico de auditoria e nos exports. Só permite ocultar sessões já
+// encerradas — sessão em andamento precisa ser encerrada antes.
+// ─────────────────────────────────────────────────────────────────────────
+router.post("/therapy/sessao/:sessionId/ocultar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sessData = sessSnap.data();
+  if (sessData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (sessData.status !== "completed") return sendError(res, 400, "SESSAO_NAO_ENCERRADA");
+
+  await db.collection("therapy_sessions").doc(sessionId).set({
+    hiddenFromPainel: true,
+    hiddenAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "session_hidden", sessionId, therapistUid: uid });
 
   return res.json({ ok: true });
 }));
