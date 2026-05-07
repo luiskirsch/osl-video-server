@@ -356,9 +356,19 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/sessao/criar
-// Cria uma consulta agendada/imediata. Devolve link com joinToken para o paciente.
-// Body: { patientName, scheduledAt?, notes? (rascunho cifrado opcional) }
+// Cria uma consulta agendada/imediata. Devolve link com joinToken para a primeira.
+// Body: { patientName, patientId?, scheduledAt?, recurrence?: { weekly: N } }
+//
+// Recorrência: weekly N (entre 2 e 52) cria N sessões espaçadas 7d a partir
+// de scheduledAt, todas com mesmo recurrenceGroupId. scheduledAt é
+// obrigatório quando recurrence está presente (sem hora-base não dá pra
+// projetar a série). Cada sessão tem seu próprio sessionId, e2eeKey,
+// livekitRoom e joinToken — series não compartilham sala (privacidade).
+// joinToken só é gerado para a primeira sessão; para as demais o terapeuta
+// pede regenerar-link perto da data (joinToken vence em 2h).
 // ─────────────────────────────────────────────────────────────────────────
+const RECURRENCE_MAX_WEEKS = 52;
+
 router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -372,6 +382,15 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
 
+  const recurrenceWeekly = Number(req.body?.recurrence?.weekly || 1);
+  const isRecurring = recurrenceWeekly >= 2;
+  if (isRecurring) {
+    if (!Number.isFinite(recurrenceWeekly) || recurrenceWeekly < 2 || recurrenceWeekly > RECURRENCE_MAX_WEEKS) {
+      return sendError(res, 400, "RECORRENCIA_INVALIDA", { hint: `Use entre 2 e ${RECURRENCE_MAX_WEEKS} semanas.` });
+    }
+    if (!scheduledAt) return sendError(res, 400, "HORARIO_OBRIGATORIO_PARA_RECORRENCIA");
+  }
+
   // Se patientId passado, valida ownership.
   if (patientId) {
     const db0 = getDb();
@@ -380,54 +399,122 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   }
 
-  const sessionId   = newId("sess");
-  const livekitRoom = `therapy_${sessionId}`;
-  // Chave E2EE da sala: 32 bytes aleatórios. LiveKit Cloud nunca a recebe — só
-  // os dois clientes (profissional e paciente). Nosso servidor a guarda apenas
-  // para entregar a ambos via HTTPS autenticado.
-  const e2eeKey = crypto.randomBytes(32).toString("base64");
+  const db = getDb();
+  const recurrenceGroupId = isRecurring ? newId("rgrp") : null;
+  const occurrences = isRecurring ? recurrenceWeekly : 1;
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+  // Cria todas as sessões em batch. firstSession recebe joinToken; demais
+  // ficam com joinTokenExp=null até o terapeuta pedir regenerate.
+  const batch = db.batch();
+  const created = [];
+  let firstJoinToken = null;
+  let firstJoinTokenExp = null;
+
+  for (let i = 0; i < occurrences; i++) {
+    const sId = newId("sess");
+    const room = `therapy_${sId}`;
+    const e2eeKey = crypto.randomBytes(32).toString("base64");
+    const at = scheduledAt ? scheduledAt + i * WEEK_MS : null;
+
+    let joinTokenExp = null;
+    if (i === 0) {
+      const joinPayload = {
+        token_type: "therapy_join",
+        sessionId: sId,
+        therapistUid: uid,
+        livekitRoom: room,
+        patientNameHint: patientName,
+        iat: Date.now(),
+        exp: Date.now() + JOIN_TOKEN_VALIDITY_MS
+      };
+      firstJoinToken    = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
+      firstJoinTokenExp = joinPayload.exp;
+      joinTokenExp = joinPayload.exp;
+    }
+
+    batch.set(db.collection("therapy_sessions").doc(sId), {
+      sessionId: sId,
+      therapistUid: uid,
+      therapistDisplayName: therapist.displayName || "",
+      patientName,
+      patientId: patientId || null,
+      livekitRoom: room,
+      e2eeKey,
+      scheduledAt: at,
+      status: "scheduled",
+      joinTokenExp,
+      recurrenceGroupId,
+      recurrenceIndex: isRecurring ? i : null,
+      recurrenceCount: isRecurring ? occurrences : null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    created.push({ sessionId: sId, scheduledAt: at });
+  }
+
+  await batch.commit();
+  await logAudit({
+    type: "session_created",
+    sessionId: created[0].sessionId,
+    therapistUid: uid,
+    recurrenceGroupId,
+    recurrenceCount: isRecurring ? occurrences : null
+  });
+
+  const first = created[0];
+  return res.json({
+    ok: true,
+    session: {
+      sessionId: first.sessionId,
+      livekitRoom: `therapy_${first.sessionId}`,
+      patientName,
+      scheduledAt: first.scheduledAt,
+      status: "scheduled",
+      joinToken: firstJoinToken,
+      joinTokenExp: firstJoinTokenExp
+    },
+    recurrence: isRecurring ? { groupId: recurrenceGroupId, count: occurrences, sessions: created } : null
+  });
+}));
+
+// POST /therapy/sessao/:sessionId/regenerar-link — terapeuta gera um joinToken
+// fresco para uma sessão (útil para sessões agendadas que passaram da janela
+// de 2h, e para gerar o link das ocorrências subsequentes de uma série).
+router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const ref = db.collection("therapy_sessions").doc(sessionId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sess = snap.data();
+  if (sess.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (sess.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+  if (sess.status === "canceled")  return sendError(res, 409, "SESSAO_CANCELADA");
 
   const joinPayload = {
     token_type: "therapy_join",
     sessionId,
     therapistUid: uid,
-    livekitRoom,
-    patientNameHint: patientName,
+    livekitRoom: sess.livekitRoom,
+    patientNameHint: sess.patientName,
     iat: Date.now(),
     exp: Date.now() + JOIN_TOKEN_VALIDITY_MS
   };
   const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
 
-  const db = getDb();
-  await db.collection("therapy_sessions").doc(sessionId).set({
-    sessionId,
-    therapistUid: uid,
-    therapistDisplayName: therapist.displayName || "",
-    patientName,
-    patientId: patientId || null,
-    livekitRoom,
-    e2eeKey,
-    scheduledAt,
-    status: "scheduled",
+  await ref.set({
     joinTokenExp: joinPayload.exp,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  }, { merge: true });
 
-  await logAudit({ type: "session_created", sessionId, therapistUid: uid });
-
-  return res.json({
-    ok: true,
-    session: {
-      sessionId,
-      livekitRoom,
-      patientName,
-      scheduledAt,
-      status: "scheduled",
-      joinToken,
-      joinTokenExp: joinPayload.exp
-    }
-  });
+  return res.json({ ok: true, joinToken, joinTokenExp: joinPayload.exp });
 }));
 
 // GET /therapy/sessoes — lista as sessões do profissional logado
@@ -463,6 +550,9 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         canceledBy: data.canceledBy || null,
         cancelReason: data.cancelReason || null,
         joinTokenExp: data.joinTokenExp || null,
+        recurrenceGroupId: data.recurrenceGroupId || null,
+        recurrenceIndex: typeof data.recurrenceIndex === "number" ? data.recurrenceIndex : null,
+        recurrenceCount: data.recurrenceCount || null,
         hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
@@ -785,7 +875,9 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
   });
 }
 
-// (a) Terapeuta autenticado cancela
+// (a) Terapeuta autenticado cancela. scope="forward" cancela esta + todas
+// as ocorrências futuras do mesmo recurrenceGroupId que ainda não estão
+// completed/canceled.
 router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -795,6 +887,7 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
 
   const reason = String(req.body?.reason || "").trim().slice(0, CANCEL_REASON_MAX);
+  const scope  = req.body?.scope === "forward" ? "forward" : "this";
 
   const db = getDb();
   const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
@@ -802,10 +895,39 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   const sessData = sessSnap.data();
   if (sessData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (sessData.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
-  if (sessData.status === "canceled")  return res.json({ ok: true, alreadyCanceled: true });
 
-  await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
-  return res.json({ ok: true });
+  // "this": só esta. Idempotente se já cancelada.
+  if (scope === "this") {
+    if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
+    await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    return res.json({ ok: true, canceledCount: 1 });
+  }
+
+  // "forward": esta + todas as ocorrências futuras do grupo. Sem grupo,
+  // cai pro comportamento "this" silenciosamente.
+  if (!sessData.recurrenceGroupId) {
+    if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
+    await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    return res.json({ ok: true, canceledCount: 1 });
+  }
+
+  const baseAt = Number(sessData.scheduledAt || 0);
+  const groupSnap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("recurrenceGroupId", "==", sessData.recurrenceGroupId)
+    .get();
+
+  let canceledCount = 0;
+  for (const doc of groupSnap.docs) {
+    const d = doc.data();
+    if (d.status === "completed" || d.status === "canceled") continue;
+    const at = Number(d.scheduledAt || 0);
+    if (baseAt && at && at < baseAt) continue; // só futuras (ou a própria)
+    await applyCancellation(db, doc.id, d, { canceledBy: "therapist", reason });
+    canceledCount++;
+  }
+
+  return res.json({ ok: true, canceledCount, scope: "forward" });
 }));
 
 // (b) Paciente cancela via link público (token assinado)
