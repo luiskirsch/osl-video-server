@@ -516,6 +516,14 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(e =>
       logError("therapy_confirmation_email_failed", e, { sessionId: created[0].sessionId })
     );
+  } else {
+    // Log explícito do skip pra debug — sem isso, criar sessão sem e-mail
+    // some silencioso e fica difícil saber por que confirmação não chegou.
+    logInfo("therapy_confirmation_email_skipped", {
+      sessionId: created[0].sessionId,
+      hasPatientEmail: Boolean(patientEmail),
+      hasJoinToken: Boolean(firstJoinToken)
+    });
   }
   await logAudit({
     type: "session_created",
