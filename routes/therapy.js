@@ -966,6 +966,97 @@ router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) =>
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// BLOQUEIOS DE HORÁRIO (blackouts)
+// O terapeuta marca períodos de indisponibilidade (férias, licença, almoço
+// recorrente etc). Renderiza como blocos cinza na agenda. Não impede a
+// criação de sessão (terapeuta pode override no popover); serve como
+// indicação visual e como fonte do feed iCal de "ocupado".
+//
+// Modelo: therapy_blackouts/{blackoutId}
+//   { therapistUid, from (ms), to (ms), reason?, createdAt, updatedAt }
+//
+// Limite: duração máxima 366 dias por blackout (defensivo). Para férias
+// recorrentes anuais, o terapeuta cria múltiplos.
+// ─────────────────────────────────────────────────────────────────────────
+const BLACKOUT_REASON_MAX = 200;
+const BLACKOUT_MAX_DURATION_MS = 366 * 24 * 60 * 60 * 1000;
+
+router.post("/therapy/agenda/blackout", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const from = Number(req.body?.from || 0);
+  const to   = Number(req.body?.to   || 0);
+  const reason = String(req.body?.reason || "").trim().slice(0, BLACKOUT_REASON_MAX);
+
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from <= 0 || to <= 0) {
+    return sendError(res, 400, "INTERVALO_INVALIDO");
+  }
+  if (to <= from) return sendError(res, 400, "INTERVALO_INVERTIDO");
+  if (to - from > BLACKOUT_MAX_DURATION_MS) return sendError(res, 400, "INTERVALO_LONGO_DEMAIS", { maxDays: 366 });
+
+  const blackoutId = newId("blk");
+  const db = getDb();
+  await db.collection("therapy_blackouts").doc(blackoutId).set({
+    blackoutId,
+    therapistUid: uid,
+    from, to,
+    reason: reason || null,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "blackout_created", blackoutId, therapistUid: uid });
+  return res.json({ ok: true, blackoutId, from, to, reason: reason || null });
+}));
+
+router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const blackoutId = String(req.params.blackoutId || "").trim();
+  if (!blackoutId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_blackouts").doc(blackoutId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "BLOQUEIO_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  await logAudit({ type: "blackout_deleted", blackoutId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+router.get("/therapy/agenda/blackouts", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_blackouts")
+    .where("therapistUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const blackouts = snap.docs
+    .map(d => {
+      const x = d.data();
+      return {
+        blackoutId: x.blackoutId,
+        from: x.from,
+        to: x.to,
+        reason: x.reason || null
+      };
+    })
+    .sort((a, b) => (a.from || 0) - (b.from || 0));
+
+  return res.json({ ok: true, blackouts });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // PACIENTES — CRUD cifrado client-side. Server vê só ciphertext + iv.
 // O blob cifrado contém: { name, contact, observations, birthdate?, ... }
 // ─────────────────────────────────────────────────────────────────────────
