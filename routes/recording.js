@@ -95,6 +95,11 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
     job.ref   = ref;
     try {
       const completed = await stopRoomRecording(roomId);
+      if (completed && completed.egressStopOk === false) {
+        return sendError(res, 502, "EGRESS_STOP_FALHOU", {
+          hint: "A gravação foi marcada como concluída, mas o egress da LiveKit pode estar pendurado. Tente parar de novo em alguns segundos."
+        });
+      }
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
     } catch (err) {
       logError("recording_claim_stop_error", err, { roomId });
@@ -161,6 +166,11 @@ router.post("/recording/stop", asyncHandler(async (req, res) => {
 
   try {
     const completed = await stopRoomRecording(roomId);
+    if (completed && completed.egressStopOk === false) {
+      return sendError(res, 502, "EGRESS_STOP_FALHOU", {
+        hint: "A gravação foi marcada como concluída, mas o egress da LiveKit pode estar pendurado. Tente parar de novo em alguns segundos."
+      });
+    }
     return res.json({ ok: true, downloadUrl: completed.downloadUrl || null, filepath: completed.filepath, type: completed.type });
   } catch (err) {
     logError("recording_stop_error", err, { roomId });

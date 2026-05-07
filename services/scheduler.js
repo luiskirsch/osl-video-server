@@ -14,6 +14,7 @@ const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
 const { sendEmail, templateReminder, buildJoinUrl, buildCancelUrl } = require("./email");
+const { processPendingReferrals } = require("./affiliate");
 
 const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1h
 const HOUR_MS = 60 * 60 * 1000;
@@ -111,14 +112,19 @@ async function runReminderTick() {
   }
 }
 
+async function runFullTick() {
+  await runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
+  // #B1: processa fila de retries de afiliado todo tick (1×/h é suficiente —
+  // backoff mínimo é 1min mas pra batch isso fica adequado).
+  await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
+}
+
 function startSchedulerLoop() {
   if (timer) return;
   // Primeiro tick depois de 1min (evita bater no startup do Firebase Admin).
   setTimeout(() => {
-    runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
-    timer = setInterval(() => {
-      runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
-    }, TICK_INTERVAL_MS);
+    runFullTick();
+    timer = setInterval(runFullTick, TICK_INTERVAL_MS);
     timer.unref();
   }, 60 * 1000);
   logInfo("scheduler_loop_started", { intervalMs: TICK_INTERVAL_MS, lookaheadHours: REMINDER_LOOKAHEAD_HOURS });

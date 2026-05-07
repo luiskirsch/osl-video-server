@@ -98,16 +98,22 @@ async function stopRoomRecording(roomId) {
   const job = activeRecordings.get(roomId);
   if (!job) return null;
 
+  // #B4: capturamos o status do stopEgress pra que o caller possa propagar
+  // 502 ao cliente. Se LiveKit Cloud está fora ou egressId é inválido, o
+  // egress real continua rodando — gastando minutos pagos. Cliente vendo
+  // 200 OK fica acreditando que parou. Agora o caller decide o que fazer.
+  let stopOk = true;
   try {
     await egressClient.stopEgress(job.egressId);
   } catch (err) {
+    stopOk = false;
     logError("stop_egress_error", err, { roomId, egressId: job.egressId });
   }
 
   activeRecordings.delete(roomId);
 
   const downloadUrl = recordingDownloadUrl(job.filepath);
-  const completed   = { ...job, downloadUrl, completedAt: Date.now() };
+  const completed   = { ...job, downloadUrl, completedAt: Date.now(), egressStopOk: stopOk };
   completedRecordings.set(roomId, completed);
 
   // Buffer máximo de gravações concluídas em memória (D5: race-safe — encontra
@@ -233,9 +239,14 @@ async function stopRoomStreaming(roomId) {
   const job = activeStreams.get(roomId);
   if (!job) return null;
 
+  // #B4: ver comentário em stopRoomRecording. Mesma motivação aqui — egress
+  // de live streaming também consome minutos pagos, e cliente precisa saber
+  // se o stop falhou pra mostrar erro ou tentar de novo.
+  let stopOk = true;
   try {
     await egressClient.stopEgress(job.egressId);
   } catch (err) {
+    stopOk = false;
     logError("stop_streaming_egress_error", err, { roomId, egressId: job.egressId });
   }
 
@@ -244,8 +255,8 @@ async function stopRoomStreaming(roomId) {
   const room = panelRooms.get(roomId);
   if (room) { room.streamingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
 
-  logInfo("streaming_stopped", { roomId, egressId: job.egressId, durationMs: Date.now() - job.startedAt });
-  return { ...job, stoppedAt: Date.now() };
+  logInfo("streaming_stopped", { roomId, egressId: job.egressId, durationMs: Date.now() - job.startedAt, egressStopOk: stopOk });
+  return { ...job, stoppedAt: Date.now(), egressStopOk: stopOk };
 }
 
 module.exports = {

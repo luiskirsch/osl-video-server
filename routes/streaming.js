@@ -200,7 +200,11 @@ router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res
   if (!activeJob) return sendError(res, 404, "STREAM_NAO_ENCONTRADO");
 
   const callerEmail = String(req.firebaseUser?.email || "").toLowerCase();
-  if (activeJob.email && activeJob.email !== callerEmail) {
+  // Sec #B5: comparação estrita rejeita também email=undefined no job, que
+  // pode ocorrer se o /start crashou entre o Map.set e o set de email
+  // (in_progress race com o cleanup loop). Sem isso, qualquer caller
+  // autenticado conseguiria parar streams órfãos de outros usuários.
+  if (activeJob.email !== callerEmail) {
     return sendError(res, 403, "NAO_E_SEU_STREAM");
   }
 
@@ -263,6 +267,15 @@ router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res
       }
     }
 
+    // #B4: se o stopEgress falhou, devolve 502 mesmo após registrar
+    // duração/quota — cliente precisa saber pra tentar de novo ou
+    // mostrar mensagem de erro. O Map já foi limpo (ver webrtc.js),
+    // mas o egress real pode estar pendurado na LiveKit.
+    if (job && job.egressStopOk === false) {
+      return sendError(res, 502, "EGRESS_STOP_FALHOU", {
+        hint: "O streaming foi marcado como encerrado, mas o egress da LiveKit pode estar consumindo minutos. Tente parar de novo em alguns segundos."
+      });
+    }
     return res.json({ ok: true, durationMs, minutes });
   } catch (err) {
     logError("streaming_stop_error", err, { roomId });

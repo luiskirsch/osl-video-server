@@ -264,7 +264,15 @@ router.post("/webhook", asyncHandler(async (req, res) => {
           await approveReferralRewardFromPayment(payment);
           logInfo("affiliate_auto_approved", { ref });
         } catch (refError) {
+          // #B1: enfileira pra retry em vez de só logar e perder. Webhook
+          // ainda devolve 200 (idempotência do MP); o scheduler retoma.
           logError("affiliate_auto_approve_error", refError, { ref });
+          try {
+            const { enqueuePendingReferral } = require("../services/affiliate");
+            await enqueuePendingReferral(payment, refError);
+          } catch (enqErr) {
+            logError("affiliate_enqueue_unhandled", enqErr, { ref });
+          }
         }
       }
 
