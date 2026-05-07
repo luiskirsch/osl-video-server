@@ -6,42 +6,29 @@ Cada item pode virar um GitHub Issue independente. Severidade: **P1** = bug late
 
 ---
 
-## P1 — Bugs latentes
+## P1 — Bugs latentes ✅ Quitados em 2026-05-07 (commit `7f5458b`)
 
-### #B1 Affiliate retry queue ausente
+Os 5 P1 abaixo (B1–B5) foram resolvidos em batch. Mantidos por contexto histórico — não estão mais pendentes.
 
-- **Severidade:** P1
-- **Arquivo:** `routes/payments.js:243-247`
-- **Problema:** Se `approveReferralRewardFromPayment(payment)` falha, o erro é logado mas o webhook retorna 200 OK. O afiliado nunca recebe a comissão e não há reprocessamento.
-- **Fix sugerido:** Implementar fila persistente (Firestore `pending_referrals/{ref}` com retry counter) e worker que reprocessa periodicamente. Ou re-throw no webhook pra que MP reenvie.
+### ~~#B1 Affiliate retry queue ausente~~ ✅
 
-### #B2 Logger silent failures + sem rotação
+- **Status:** resolvido. Fila persistente `pending_referrals/{externalReference}` com backoff exponencial (1m→5m→30m→2h→12h, 5 tentativas) processada pelo `services/scheduler.js`. Webhook em `routes/payments.js` agora chama `enqueuePendingReferral` em caso de falha em vez de só logar.
 
-- **Severidade:** P1
-- **Arquivo:** `logger.js:8-10`
-- **Problema:** `fs.appendFileSync(LOG_FILE, ...)` num try/catch que engole erros. Se disco encher, logs somem silenciosamente. Log file também cresce sem limite.
-- **Fix sugerido:** Migrar pra `winston` ou `pino` com daily rotation + size cap. Em fallback, escrever em stderr quando arquivo falhar.
+### ~~#B2 Logger silent failures + sem rotação~~ ✅
 
-### #B3 Streams órfãos não detectados via LiveKit poll
+- **Status:** resolvido. `logger.js` ganhou rotação por tamanho (10MB default → `server.log.1`) e fallback em stderr quando `appendFileSync` falha (sticky pra evitar spam). Não migramos pra winston/pino — overkill pra escala atual.
 
-- **Severidade:** P1
-- **Arquivo:** `routes/streaming.js:226-247` (stop) + `services/cleanup.js`
-- **Problema:** Se cliente crasha sem `/streaming/stop`, in-memory `activeStreams` é limpado pelo cleanup loop após 6h, mas o egress real na LiveKit pode continuar rodando — desperdício de minutos pagos.
-- **Fix sugerido:** Adicionar polling periódico (ex: a cada 15min) em `services/cleanup.js` que chama `egressClient.listEgress()` e cruza com `activeStreams` em memória. Egresses que não estão no Map são parados via `egressClient.stopEgress(id)`.
+### ~~#B3 Streams órfãos não detectados via LiveKit poll~~ ✅
 
-### #B4 Re-throw on egress stop failure
+- **Status:** resolvido. `services/cleanup.js` ganhou `pollLiveKitOrphans()` que roda 15min, chama `egressClient.listEgress({ active: true })` e cruza com `activeStreams`/`activeRecordings`. Egresses não conhecidos são parados.
 
-- **Severidade:** P1
-- **Arquivo:** `video/webrtc.js:103-105` e `:230-232`
-- **Problema:** Quando `egressClient.stopEgress(id)` falha (LiveKit fora, network), o erro é logado mas a função retorna como se sucesso — cliente recebe 200 OK e o egress continua rodando.
-- **Fix sugerido:** Mudar pra retornar `{ ok: false, reason }` em caso de falha; rota propaga 502 pra client. Trade-off: muda contrato de cliente, precisa atualizar UI.
+### ~~#B4 Re-throw on egress stop failure~~ ✅
 
-### #B5 activeJob.email pode ser undefined no /streaming/stop
+- **Status:** resolvido. `stopRoomStreaming`/`stopRoomRecording` em `video/webrtc.js` retornam `egressStopOk: false` quando o stop falha. Routes em `streaming.js`/`recording.js` propagam 502 EGRESS_STOP_FALHOU com hint de retry.
 
-- **Severidade:** P1
-- **Arquivo:** `routes/streaming.js:217-220`
-- **Problema:** Se startRoomStreaming falhou DEPOIS de `activeStreams.set` mas ANTES de setar `job.email`, `activeJob.email` é undefined. A validação `if (activeJob.email && activeJob.email !== callerEmail)` permite qualquer um parar.
-- **Fix sugerido:** Setar `email` no job ANTES de adicionar ao Map. Ou trocar condicional pra `if (activeJob.email !== callerEmail)` (que rejeita também undefined).
+### ~~#B5 activeJob.email pode ser undefined no /streaming/stop~~ ✅
+
+- **Status:** resolvido. Trocada a condicional permissiva `if (job.email && job.email !== caller)` por estrita `if (job.email !== caller)` — rejeita também `undefined`, fechando o bypass.
 
 ---
 
