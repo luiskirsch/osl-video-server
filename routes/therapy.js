@@ -26,6 +26,7 @@ const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_MIN_CANCEL_HOURS_PATIENT,
   MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
@@ -458,6 +459,9 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         livekitRoom: data.livekitRoom,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
+        canceledAt: data.canceledAt?.toMillis ? data.canceledAt.toMillis() : null,
+        canceledBy: data.canceledBy || null,
+        cancelReason: data.cancelReason || null,
         joinTokenExp: data.joinTokenExp || null,
         hiddenFromPainel: data.hiddenFromPainel === true
       };
@@ -733,6 +737,109 @@ router.post("/therapy/sessao/:sessionId/ocultar", asyncHandler(async (req, res) 
 
   await logAudit({ type: "session_hidden", sessionId, therapistUid: uid });
 
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// CANCELAMENTO de consulta agendada
+// Caminhos:
+//  (a) POST /therapy/sessao/:sessionId/cancelar — terapeuta autenticado.
+//      Cancela qualquer hora antes de "completed".
+//  (b) POST /therapy/sessao/cancelar-publico   — paciente sem conta, via
+//      cancelToken HMAC. Exige >= THERAPY_MIN_CANCEL_HOURS_PATIENT antes
+//      do scheduledAt; abaixo disso o link rejeita 409 e instrui a falar
+//      direto com o profissional (no-show fee tipicamente cobre isso).
+// Em ambos: sessão "completed" não pode ser cancelada (já aconteceu);
+// sessão "canceled" é idempotente (mesmo motivo/by → 200; diferente → 409).
+// ─────────────────────────────────────────────────────────────────────────
+const CANCEL_TOKEN_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60 dias
+const CANCEL_REASON_MAX = 500;
+
+function buildCancelToken(sessionId) {
+  const now = Date.now();
+  const exp = now + CANCEL_TOKEN_VALIDITY_MS;
+  const token = signPayload({
+    token_type: "session_cancel",
+    sessionId,
+    iat: now,
+    exp
+  }, ACCESS_TOKEN_SECRET);
+  return { token, exp };
+}
+
+async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }) {
+  const update = {
+    status: "canceled",
+    canceledAt: admin.firestore.FieldValue.serverTimestamp(),
+    canceledBy,
+    cancelReason: reason || null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  await db.collection("therapy_sessions").doc(sessionId).set(update, { merge: true });
+  await logAudit({
+    type: "session_canceled",
+    sessionId,
+    therapistUid: sessData.therapistUid,
+    canceledBy,
+    hasReason: Boolean(reason)
+  });
+}
+
+// (a) Terapeuta autenticado cancela
+router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, CANCEL_REASON_MAX);
+
+  const db = getDb();
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sessData = sessSnap.data();
+  if (sessData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (sessData.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+  if (sessData.status === "canceled")  return res.json({ ok: true, alreadyCanceled: true });
+
+  await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+  return res.json({ ok: true });
+}));
+
+// (b) Paciente cancela via link público (token assinado)
+router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.body?.cancelToken || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "session_cancel") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, CANCEL_REASON_MAX);
+
+  const db = getDb();
+  const sessRef = db.collection("therapy_sessions").doc(payload.sessionId);
+  const sessSnap = await sessRef.get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sessData = sessSnap.data();
+  if (sessData.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+  if (sessData.status === "canceled")  return res.json({ ok: true, alreadyCanceled: true });
+
+  // Janela mínima de cancelamento pelo paciente.
+  const minHoursMs = THERAPY_MIN_CANCEL_HOURS_PATIENT * 60 * 60 * 1000;
+  const sched = Number(sessData.scheduledAt || 0);
+  if (sched && sched - Date.now() < minHoursMs) {
+    return sendError(res, 409, "PRAZO_CANCELAMENTO_EXPIRADO", {
+      hint: `Cancelamentos pelo paciente exigem antecedência de ${THERAPY_MIN_CANCEL_HOURS_PATIENT}h. Fale direto com o profissional.`,
+      minHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
+    });
+  }
+
+  await applyCancellation(db, payload.sessionId, sessData, { canceledBy: "patient", reason });
   return res.json({ ok: true });
 }));
 

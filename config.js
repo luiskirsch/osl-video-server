@@ -168,6 +168,10 @@ const THERAPY_PLAN_AMOUNT     = Number(process.env.THERAPY_PLAN_AMOUNT || 49.90)
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 14);
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
+// Janela mínima (em horas) para o paciente cancelar uma sessão futura. Abaixo
+// disso, só o terapeuta pode cancelar. Default 24h alinha com a expectativa
+// clínica usual de "no-show fee" em terapia.
+const THERAPY_MIN_CANCEL_HOURS_PATIENT = Number(process.env.THERAPY_MIN_CANCEL_HOURS_PATIENT || 24);
 
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
@@ -195,6 +199,7 @@ module.exports = {
   ADMIN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_MIN_CANCEL_HOURS_PATIENT,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE
 };
