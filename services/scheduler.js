@@ -92,7 +92,7 @@ async function runReminderTick() {
         joinUrl:   buildJoinUrl(joinToken),
         cancelUrl: buildCancelUrl(cancelToken)
       });
-      const result = await sendEmail({ to: s.patientEmail, ...tpl });
+      const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
       if (!result.ok && !result.skipped) {
         // Reverte reminderSentAt pra retry no próximo tick.
         await doc.ref.set({ reminderSentAt: null }, { merge: true });

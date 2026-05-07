@@ -66,6 +66,27 @@ async function loadTherapist(uid) {
   return snap.exists ? snap.data() : null;
 }
 
+// Resolve o e-mail do terapeuta. Prefere o snapshot salvo em
+// therapists/{uid}.email (gravado em /profissional/registrar). Se ausente
+// (terapeutas anteriores ao snapshot), faz lazy lookup via Firebase Admin
+// e backfilla o doc. Retorna null silenciosamente se Auth não tem o usuário.
+async function resolveTherapistEmail(uid, therapist) {
+  if (therapist?.email) return therapist.email;
+  try {
+    const userRecord = await admin.auth().getUser(uid);
+    const email = String(userRecord.email || "").toLowerCase() || null;
+    if (email) {
+      // Backfill silencioso pro próximo lookup ser barato.
+      try {
+        await getDb().collection("therapists").doc(uid).set({ email }, { merge: true });
+      } catch (_) { /* se falhar, próxima chamada tenta de novo */ }
+    }
+    return email;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function loadPatientAccount(uid) {
   const db = getDb();
   const snap = await db.collection("therapy_patient_accounts").doc(uid).get();
@@ -184,9 +205,21 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const trialUntil = existingData?.trialUntil
     || (Date.now() + THERAPY_TRIAL_DAYS * 24 * 60 * 60 * 1000);
 
+  // Snapshot do e-mail do Firebase Auth pra usar como Reply-To em e-mails
+  // automáticos (paciente que aperta Reply cai aqui). Falha silenciosa se
+  // Auth retornar erro — resolveTherapistEmail tenta de novo depois.
+  let therapistEmail = existingData?.email || null;
+  if (!therapistEmail) {
+    try {
+      const userRecord = await admin.auth().getUser(uid);
+      therapistEmail = String(userRecord.email || "").toLowerCase() || null;
+    } catch (_) { /* sem email — segue */ }
+  }
+
   await ref.set({
     uid,
     displayName,
+    email: therapistEmail,
     crp,
     crm,
     especialidade,
@@ -410,6 +443,10 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   const occurrences = isRecurring ? recurrenceWeekly : 1;
   const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
+  // Snapshot do e-mail do terapeuta pra Reply-To em e-mails automáticos.
+  // Usa o snapshot do doc; se ausente, lookup lazy via Firebase Auth.
+  const therapistEmail = await resolveTherapistEmail(uid, therapist);
+
   // Cria todas as sessões em batch. firstSession recebe joinToken; demais
   // ficam com joinTokenExp=null até o terapeuta pedir regenerate.
   const batch = db.batch();
@@ -443,6 +480,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       sessionId: sId,
       therapistUid: uid,
       therapistDisplayName: therapist.displayName || "",
+      therapistEmail,
       patientName,
       patientId: patientId || null,
       patientEmail,
@@ -475,7 +513,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       joinUrl: buildPatientJoinUrl(firstJoinToken),
       cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
     });
-    sendEmail({ to: patientEmail, ...tpl }).catch(e =>
+    sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(e =>
       logError("therapy_confirmation_email_failed", e, { sessionId: created[0].sessionId })
     );
   }

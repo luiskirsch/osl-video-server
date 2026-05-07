@@ -32,7 +32,7 @@ function fmtDateTimePtBR(ms) {
   });
 }
 
-async function sendEmail({ to, subject, html, text }) {
+async function sendEmail({ to, subject, html, text, replyTo }) {
   if (!RESEND_API_KEY) {
     logWarn("email_skipped_no_api_key", { to, subject });
     return { ok: false, skipped: true };
@@ -42,6 +42,12 @@ async function sendEmail({ to, subject, html, text }) {
     return { ok: false, skipped: true };
   }
 
+  // Resend aceita reply_to como string ou array de strings. Quando paciente
+  // aperta Reply, e-mail vai pra esse endereço (o do terapeuta dono da
+  // sessão), não pro from (que não tem inbox).
+  const payload = { from: EMAIL_FROM, to, subject, html, text };
+  if (replyTo) payload.reply_to = replyTo;
+
   try {
     const res = await fetch(RESEND_API_URL, {
       method: "POST",
@@ -49,7 +55,7 @@ async function sendEmail({ to, subject, html, text }) {
         "Authorization": `Bearer ${RESEND_API_KEY}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ from: EMAIL_FROM, to, subject, html, text })
+      body: JSON.stringify(payload)
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
