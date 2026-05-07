@@ -1057,6 +1057,161 @@ router.get("/therapy/agenda/blackouts", asyncHandler(async (req, res) => {
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// FEED iCal — terapeuta assina a própria agenda no Google/Apple Calendar.
+//
+// Modelo: therapists/{uid}.calendarFeedToken (32B base64url, sem HMAC —
+// é look-up, pra permitir revogação imediata via regenerate). Sem expiry:
+// o terapeuta gerencia rotacionando manualmente.
+//
+// Feed retorna eventos dos próximos 90 dias: sessões agendadas/em curso/
+// canceladas (com STATUS:CANCELLED) + blackouts (TRANSP:OPAQUE).
+// ─────────────────────────────────────────────────────────────────────────
+const FEED_HORIZON_DAYS = 90;
+
+function generateFeedToken() {
+  return crypto.randomBytes(32).toString("base64").replace(/[+/=]/g, c => ({"+":"-","/":"_","=":""}[c]));
+}
+
+function icsEscape(value) {
+  // RFC 5545: escapar backslash, vírgula, ponto-e-vírgula, newline.
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,")
+    .replace(/\r?\n/g, "\\n");
+}
+
+function icsDate(ms) {
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+}
+
+function icsFold(line) {
+  // RFC 5545: linhas > 75 octetos têm que ser dobradas (continuação com espaço).
+  const limit = 73;
+  if (line.length <= limit) return line;
+  const out = [];
+  let i = 0;
+  while (i < line.length) {
+    const chunk = i === 0 ? line.slice(i, limit) : line.slice(i, i + limit - 1);
+    out.push(i === 0 ? chunk : ` ${chunk}`);
+    i += chunk.length - (i === 0 ? 0 : 1);
+    if (i === 0) i = chunk.length;
+  }
+  return out.join("\r\n");
+}
+
+router.post("/therapy/agenda/feed-token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const regenerate = req.body?.regenerate === true;
+  const db = getDb();
+  let token = therapist.calendarFeedToken;
+  if (!token || regenerate) {
+    token = generateFeedToken();
+    await db.collection("therapists").doc(uid).set({
+      calendarFeedToken: token,
+      calendarFeedTokenUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    await logAudit({ type: "feed_token_generated", therapistUid: uid, regenerate });
+  }
+
+  return res.json({ ok: true, token });
+}));
+
+router.get("/therapy/agenda/feed.ics", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const db = getDb();
+  // Look-up reverso: encontra terapeuta cujo calendarFeedToken bate.
+  const matchSnap = await db.collection("therapists")
+    .where("calendarFeedToken", "==", token)
+    .limit(1)
+    .get();
+  if (matchSnap.empty) return sendError(res, 401, "TOKEN_INVALIDO");
+  const therapistDoc = matchSnap.docs[0];
+  const therapistUid = therapistDoc.id;
+  const therapistName = therapistDoc.data().displayName || "Espaço Prelúdio";
+
+  const now = Date.now();
+  const horizonEnd = now + FEED_HORIZON_DAYS * 24 * 60 * 60 * 1000;
+
+  const [sessSnap, blkSnap] = await Promise.all([
+    db.collection("therapy_sessions").where("therapistUid", "==", therapistUid).limit(500).get(),
+    db.collection("therapy_blackouts").where("therapistUid", "==", therapistUid).limit(500).get()
+  ]);
+
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    `PRODID:-//Espaço Prelúdio//Agenda//PT-BR`,
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    `X-WR-CALNAME:${icsEscape("Agenda — " + therapistName)}`,
+    "X-WR-TIMEZONE:UTC"
+  ];
+  const dtstamp = icsDate(now);
+
+  // Sessões: filtra horizonte (90d) + ignora as sem scheduledAt.
+  for (const doc of sessSnap.docs) {
+    const s = doc.data();
+    const at = Number(s.scheduledAt || 0);
+    if (!at) continue;
+    if (at > horizonEnd) continue;
+    if (at < now - 7 * 24 * 60 * 60 * 1000) continue; // 7 dias de cauda histórica
+    const start = at;
+    const end   = at + 50 * 60 * 1000; // 50min default (padrão clínico)
+    const cancelled = s.status === "canceled";
+    lines.push("BEGIN:VEVENT");
+    lines.push(`UID:sess-${s.sessionId}@espacopreludio.com.br`);
+    lines.push(`DTSTAMP:${dtstamp}`);
+    lines.push(`DTSTART:${icsDate(start)}`);
+    lines.push(`DTEND:${icsDate(end)}`);
+    lines.push(icsFold(`SUMMARY:${icsEscape((cancelled ? "[Cancelada] " : "") + (s.patientName || "Consulta"))}`));
+    if (s.recurrenceGroupId) {
+      lines.push(icsFold(`DESCRIPTION:${icsEscape(`Sessão ${(s.recurrenceIndex||0)+1}/${s.recurrenceCount || "?"} de série semanal.`)}`));
+    }
+    lines.push(`STATUS:${cancelled ? "CANCELLED" : "CONFIRMED"}`);
+    lines.push("TRANSP:OPAQUE");
+    lines.push("END:VEVENT");
+  }
+
+  // Blackouts: também limitados ao horizonte.
+  for (const doc of blkSnap.docs) {
+    const b = doc.data();
+    if (!b.from || !b.to) continue;
+    if (b.from > horizonEnd) continue;
+    if (b.to   < now - 7 * 24 * 60 * 60 * 1000) continue;
+    lines.push("BEGIN:VEVENT");
+    lines.push(`UID:blk-${b.blackoutId}@espacopreludio.com.br`);
+    lines.push(`DTSTAMP:${dtstamp}`);
+    lines.push(`DTSTART:${icsDate(b.from)}`);
+    lines.push(`DTEND:${icsDate(b.to)}`);
+    lines.push(icsFold(`SUMMARY:${icsEscape("Bloqueado" + (b.reason ? ` — ${b.reason}` : ""))}`));
+    lines.push("STATUS:CONFIRMED");
+    lines.push("TRANSP:OPAQUE");
+    lines.push("END:VEVENT");
+  }
+
+  lines.push("END:VCALENDAR");
+
+  // Cache curto (5 min) — calendários típicos polleam a cada 1-12h, mas
+  // mudanças rápidas via app/web devem refletir razoavelmente rápido.
+  res.set("Content-Type", "text/calendar; charset=utf-8");
+  res.set("Cache-Control", "public, max-age=300");
+  res.set("Content-Disposition", `inline; filename="espacopreludio-${therapistUid}.ics"`);
+  return res.send(lines.join("\r\n") + "\r\n");
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // PACIENTES — CRUD cifrado client-side. Server vê só ciphertext + iv.
 // O blob cifrado contém: { name, contact, observations, birthdate?, ... }
 // ─────────────────────────────────────────────────────────────────────────
