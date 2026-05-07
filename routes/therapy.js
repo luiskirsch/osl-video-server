@@ -31,6 +31,10 @@ const {
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
+const {
+  sendEmail, templateConfirmation,
+  buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl
+} = require("../services/email");
 
 const router = express.Router();
 
@@ -379,6 +383,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
 
   const patientName = String(req.body?.patientName || "Paciente").trim().slice(0, PATIENT_NAME_MAX);
   const patientId   = String(req.body?.patientId || "").trim();
+  const patientEmailRaw = String(req.body?.patientEmail || "").trim().toLowerCase();
+  const patientEmail = patientEmailRaw && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw) ? patientEmailRaw : null;
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
 
@@ -439,6 +445,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       therapistDisplayName: therapist.displayName || "",
       patientName,
       patientId: patientId || null,
+      patientEmail,
       livekitRoom: room,
       e2eeKey,
       scheduledAt: at,
@@ -450,10 +457,28 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
-    created.push({ sessionId: sId, scheduledAt: at });
+    created.push({ sessionId: sId, scheduledAt: at, livekitRoom: room });
   }
 
   await batch.commit();
+
+  // Confirmação por e-mail (fire-and-forget, não bloqueia resposta).
+  // Apenas a primeira ocorrência: para séries longas, enviar 52 e-mails de
+  // confirmação seria spam — paciente pega calendário visual + lembretes 24h
+  // antes de cada uma.
+  if (patientEmail && firstJoinToken) {
+    const cancelTokenInfo = buildCancelToken(created[0].sessionId);
+    const tpl = templateConfirmation({
+      patientName,
+      therapistName: therapist.displayName || "seu profissional",
+      scheduledAt: created[0].scheduledAt || Date.now(),
+      joinUrl: buildPatientJoinUrl(firstJoinToken),
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+    });
+    sendEmail({ to: patientEmail, ...tpl }).catch(e =>
+      logError("therapy_confirmation_email_failed", e, { sessionId: created[0].sessionId })
+    );
+  }
   await logAudit({
     type: "session_created",
     sessionId: created[0].sessionId,

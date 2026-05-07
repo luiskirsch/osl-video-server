@@ -173,6 +173,16 @@ const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://
 // clínica usual de "no-show fee" em terapia.
 const THERAPY_MIN_CANCEL_HOURS_PATIENT = Number(process.env.THERAPY_MIN_CANCEL_HOURS_PATIENT || 24);
 
+// E-mail (provider Resend, https://resend.com). Se RESEND_API_KEY vazio, o
+// service vira no-op com log warn — funcionalidade de confirmação/lembrete
+// degrada silenciosamente sem quebrar criação de sessão.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const EMAIL_FROM     = process.env.EMAIL_FROM     || "Espaço Prelúdio <agendas@espacopreludio.com.br>";
+// Janela do cron de lembretes: lookahead em horas (procura sessões cujo
+// scheduledAt cai entre now+lookahead-1h e now+lookahead). 24h por default;
+// 1h de janela permite que o cron rode 1×/h sem perder eventos.
+const REMINDER_LOOKAHEAD_HOURS = Number(process.env.REMINDER_LOOKAHEAD_HOURS || 24);
+
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
 const DISCORD_BOT_TOKEN       = process.env.DISCORD_BOT_TOKEN       || "";
@@ -200,6 +210,7 @@ module.exports = {
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
+  RESEND_API_KEY, EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE
 };

@@ -129,12 +129,14 @@ app.use((err, req, res, next) => {
 
 // --- Startup ---
 const { startCleanupLoop, stopCleanupLoop } = require("./services/cleanup");
+const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
   startCleanupLoop();
+  startSchedulerLoop();
 });
 
 async function gracefullyStopAllEgress() {
@@ -155,6 +157,7 @@ async function gracefullyStopAllEgress() {
 async function shutdown(signal) {
   logWarn("shutdown_started", { signal });
   stopCleanupLoop();
+  stopSchedulerLoop();
 
   await gracefullyStopAllEgress();
 
