@@ -32,6 +32,29 @@ function fmtDateTimePtBR(ms) {
   });
 }
 
+// "Hoje", "amanhã" ou "em N dias" no fuso brasileiro. Usado no subject e
+// headline do lembrete pra não dizer "amanhã" quando o cron pega uma
+// sessão que é em 30min, ou quando alguém futuramente reduzir o
+// REMINDER_LOOKAHEAD_HOURS.
+function describeWhenPtBR(scheduledAt) {
+  const diffMs = scheduledAt - Date.now();
+  if (diffMs < 0)                       return "agora";
+  if (diffMs < 2 * 60 * 60 * 1000)      return "em breve";
+
+  // Comparar dia-calendário em America/Sao_Paulo, não UTC do servidor.
+  const ymdAt  = new Date(scheduledAt).toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  const ymdNow = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  if (ymdAt === ymdNow) return "hoje";
+
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const ymdTomorrow = tomorrow.toLocaleDateString("sv-SE", { timeZone: "America/Sao_Paulo" });
+  if (ymdAt === ymdTomorrow) return "amanhã";
+
+  const days = Math.round(diffMs / (24 * 60 * 60 * 1000));
+  return `em ${days} dias`;
+}
+
 async function sendEmail({ to, subject, html, text, replyTo }) {
   if (!RESEND_API_KEY) {
     logWarn("email_skipped_no_api_key", { to, subject });
@@ -113,10 +136,18 @@ function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl
 }
 
 function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl }) {
-  const subject = `Lembrete: sua consulta amanhã`;
+  const relativeWhen = describeWhenPtBR(scheduledAt);
+  const subject = `Lembrete: sua consulta ${relativeWhen}`;
+  const headingByWhen = {
+    "agora":     "Sua consulta é agora",
+    "em breve":  "Sua consulta começa em breve",
+    "hoje":      "Sua consulta é hoje",
+    "amanhã":    "Sua consulta é amanhã"
+  };
+  const heading = headingByWhen[relativeWhen] || `Sua consulta ${relativeWhen}`;
   const when = fmtDateTimePtBR(scheduledAt);
   const html = renderShell({
-    heading: "Sua consulta é amanhã",
+    heading,
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(patientName)},</p>
       <p style="margin:0 0 16px;">Lembrete: você tem consulta com <strong>${escHtml(therapistName)}</strong> em:</p>
