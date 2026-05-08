@@ -1743,6 +1743,39 @@ router.delete("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) =
 const RECEITA_FORM_CIPHERTEXT_MAX = 32 * 1024;     // 32 KB cifrado de formulário
 const RECEITA_PDF_MAX             = 1024 * 1024;   // 1 MB de PDF assinado base64
 const RECEITA_DELIVERY_VALIDITY_MS = 90 * 24 * 60 * 60 * 1000; // 90 dias
+// Validade clínica da receita (RDC 471/2021 ANVISA: 30 dias após emissão pra
+// receita de controle especial). É independente do deliveryToken (90d) — depois
+// dos 30d a farmácia não deve aviar mesmo que o link ainda funcione.
+const RECEITA_VALIDITY_CLINICAL_MS = 30 * 24 * 60 * 60 * 1000;
+const RECEITA_QUANTIDADE_MAX = 24; // teto defensivo (mais que isso é caso clínico atípico)
+const DISPENSACAO_REASON_MAX = 200;
+// CRF em formato {UF}-NNNNN ou similar; aceita variações regionais (CRF/SP 12345,
+// CRF SP 12345, CRF-SC-12345 etc). Validação leve — fonte de verdade é o conselho.
+const CRF_REGEX  = /^[A-Z]{2,4}[\s\-/]*[A-Z]{2}[\s\-/]*\d{2,8}$/i;
+const CNPJ_REGEX = /^\d{14}$/;
+
+// Helper: valida quantidade prescrita. Retorna número inteiro >=1 e <=MAX, ou null se inválido.
+function parseQuantidade(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > RECEITA_QUANTIDADE_MAX) return null;
+  return n;
+}
+
+// Validador CNPJ (algoritmo padrão Receita Federal).
+function isValidCnpj(cnpj) {
+  const c = String(cnpj || "").replace(/\D/g, "");
+  if (c.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(c)) return false; // todos iguais → inválido (00000000000000 etc)
+  const calc = (digs, weights) => {
+    const sum = digs.reduce((acc, d, i) => acc + d * weights[i], 0);
+    const r = sum % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  const arr = c.split("").map(Number);
+  const w1 = [5,4,3,2,9,8,7,6,5,4,3,2];
+  const w2 = [6].concat(w1);
+  return calc(arr.slice(0, 12), w1) === arr[12] && calc(arr.slice(0, 13), w2) === arr[13];
+}
 
 function buildDeliveryToken(receitaId) {
   const now = Date.now();
@@ -1770,10 +1803,12 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
   const patientId            = String(req.body?.patientId || "").trim() || null;
   const patientNameSnapshot  = String(req.body?.patientNameSnapshot || "").trim().slice(0, PATIENT_NAME_MAX);
   const sessionId            = String(req.body?.sessionId || "").trim() || null;
+  const quantidadePrescrita  = parseQuantidade(req.body?.quantidadePrescrita);
 
   if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
   if (formCiphertext.length > RECEITA_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
   if (!patientNameSnapshot)       return sendError(res, 400, "NOME_PACIENTE_OBRIGATORIO");
+  if (quantidadePrescrita === null) return sendError(res, 400, "QUANTIDADE_PRESCRITA_INVALIDA", { hint: `Total de unidades (caixas/comprimidos) entre 1 e ${RECEITA_QUANTIDADE_MAX}.` });
 
   if (patientId) {
     const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
@@ -1792,6 +1827,9 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
     status: "draft",
     formCiphertext,
     formIv,
+    quantidadePrescrita,
+    quantidadeDispensada: 0,
+    dispensacaoStatus: "pendente",
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
@@ -1815,6 +1853,14 @@ router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
   if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
   if (formCiphertext.length > RECEITA_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
 
+  // quantidadePrescrita é opcional aqui — se vier, valida; senão preserva o
+  // valor anterior. Tipicamente o frontend reenvia o mesmo valor pra simplicidade.
+  const hasQty = req.body?.quantidadePrescrita !== undefined;
+  const quantidadePrescrita = hasQty ? parseQuantidade(req.body.quantidadePrescrita) : undefined;
+  if (hasQty && quantidadePrescrita === null) {
+    return sendError(res, 400, "QUANTIDADE_PRESCRITA_INVALIDA", { hint: `Total entre 1 e ${RECEITA_QUANTIDADE_MAX}.` });
+  }
+
   const db = getDb();
   const ref = db.collection("therapy_receitas").doc(receitaId);
   const snap = await ref.get();
@@ -1823,10 +1869,12 @@ router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
   if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
 
-  await ref.set({
+  const updates = {
     formCiphertext, formIv,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+  if (hasQty) updates.quantidadePrescrita = quantidadePrescrita;
+  await ref.set(updates, { merge: true });
 
   return res.json({ ok: true });
 }));
@@ -1907,6 +1955,11 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
     deliveryTokenExp = fresh.exp;
   }
 
+  // signedAt usa serverTimestamp pra precisão; validadeClinicaAt salva como ms
+  // pra leitura sem getter (usado em comparações no /receita/dispensar).
+  const signedAtMs = Date.now();
+  const validadeClinicaAt = signedAtMs + RECEITA_VALIDITY_CLINICAL_MS;
+
   await ref.set({
     status: "signed",
     signatureMethod,
@@ -1914,6 +1967,8 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
     pdfSignedMime: pdfMime,
     deliveryToken,
     deliveryTokenExp,
+    signedAtMs,
+    validadeClinicaAt,
     signedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -1925,7 +1980,7 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
     signatureMethod
   });
 
-  return res.json({ ok: true, deliveryToken, deliveryTokenExp });
+  return res.json({ ok: true, deliveryToken, deliveryTokenExp, validadeClinicaAt });
 }));
 
 // GET /therapy/receitas — lista do médico (sem PDF base64 pra não pesar)
@@ -2062,6 +2117,34 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
     consultorio:   therapist.consultorio || null
   } : null;
 
+  // Carrega histórico de dispensações pra essa receita (sem dados sensíveis,
+  // só identificação profissional do farmacêutico + dados da farmácia + qty).
+  const dispSnap = await db.collection("therapy_dispensacoes")
+    .where("receitaId", "==", r.receitaId)
+    .limit(50)
+    .get();
+  const dispensacoes = dispSnap.docs
+    .map(d => {
+      const x = d.data();
+      return {
+        dispensacaoId: x.dispensacaoId,
+        farmaceuticoCRF: x.farmaceuticoCRF,
+        farmaceuticoNome: x.farmaceuticoNome,
+        farmaciaCNPJ: x.farmaciaCNPJ,
+        farmaciaNome: x.farmaciaNome,
+        quantidade: x.quantidade,
+        dispensadoAt: x.dispensadoAt?.toMillis ? x.dispensadoAt.toMillis() : (x.dispensadoAtMs || null)
+      };
+    })
+    .sort((a, b) => (a.dispensadoAt || 0) - (b.dispensadoAt || 0));
+
+  const quantidadePrescrita  = r.quantidadePrescrita  || null;
+  const quantidadeDispensada = r.quantidadeDispensada || 0;
+  const validadeClinicaAt    = r.validadeClinicaAt    || null;
+  const expirada = validadeClinicaAt ? Date.now() > validadeClinicaAt : false;
+  let dispensacaoStatus = r.dispensacaoStatus || (quantidadePrescrita ? "pendente" : null);
+  if (expirada && dispensacaoStatus !== "completa") dispensacaoStatus = "expirada";
+
   return res.json({
     ok: true,
     receita: {
@@ -2069,11 +2152,139 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
       patientNameSnapshot: r.patientNameSnapshot,
       pdfBase64: r.pdfSignedBase64,
       pdfMime: r.pdfSignedMime || "application/pdf",
-      signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : null,
+      signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : (r.signedAtMs || null),
       signatureMethod: r.signatureMethod || null,
       deliveryTokenExp: r.deliveryTokenExp || null,
+      validadeClinicaAt,
+      quantidadePrescrita,
+      quantidadeDispensada,
+      dispensacaoStatus,
+      dispensacoes,
       issuer
     }
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/receita/dispensar — endpoint público (sem Firebase auth).
+// Farmacêutico autentica-se informando CRF + nome + CNPJ + nome farmácia.
+// É low-trust por design (MVP) — fonte de verdade é a auditoria + responsabilidade
+// profissional do farmacêutico. Sistema garante que a quantidade dispensada
+// nunca ultrapassa a prescrita e que receita expirada (>30d) não é aviada.
+// Transação Firestore evita race entre 2 farmácias dispensando ao mesmo tempo.
+// ─────────────────────────────────────────────────────────────────────────
+router.post("/therapy/receita/dispensar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.body?.deliveryToken || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "receita_delivery") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const farmaceuticoCRF  = String(req.body?.farmaceuticoCRF  || "").trim().toUpperCase();
+  const farmaceuticoNome = String(req.body?.farmaceuticoNome || "").trim().slice(0, 80);
+  const farmaciaCNPJraw  = String(req.body?.farmaciaCNPJ     || "").replace(/\D/g, "");
+  const farmaciaNome     = String(req.body?.farmaciaNome     || "").trim().slice(0, 120);
+  const quantidadeRaw    = req.body?.quantidade;
+
+  if (!CRF_REGEX.test(farmaceuticoCRF)) return sendError(res, 400, "CRF_INVALIDO", { hint: "Formato esperado: CRF UF + número (ex: CRF-SC 12345)." });
+  if (!farmaceuticoNome)                return sendError(res, 400, "NOME_FARMACEUTICO_OBRIGATORIO");
+  if (!isValidCnpj(farmaciaCNPJraw))    return sendError(res, 400, "CNPJ_INVALIDO");
+  if (!farmaciaNome)                    return sendError(res, 400, "NOME_FARMACIA_OBRIGATORIO");
+
+  const quantidade = Number(quantidadeRaw);
+  if (!Number.isFinite(quantidade) || !Number.isInteger(quantidade) || quantidade < 1 || quantidade > RECEITA_QUANTIDADE_MAX) {
+    return sendError(res, 400, "QUANTIDADE_INVALIDA");
+  }
+
+  const db = getDb();
+  const receitaRef = db.collection("therapy_receitas").doc(payload.receitaId);
+  const dispensacaoId = newId("disp");
+  const dispRef = db.collection("therapy_dispensacoes").doc(dispensacaoId);
+
+  // Transação: lê receita, valida regras, grava dispensação + incremento atômico.
+  let resultPayload;
+  try {
+    resultPayload = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(receitaRef);
+      if (!snap.exists) throw Object.assign(new Error("RECEITA_NAO_ENCONTRADA"), { httpStatus: 404 });
+      const r = snap.data();
+      if (r.status !== "signed" || !r.pdfSignedBase64) throw Object.assign(new Error("RECEITA_NAO_ASSINADA"), { httpStatus: 410 });
+      if (r.deliveryToken !== token) throw Object.assign(new Error("TOKEN_REVOGADO"), { httpStatus: 401 });
+
+      const validadeClinicaAt = r.validadeClinicaAt || ((r.signedAtMs || 0) + RECEITA_VALIDITY_CLINICAL_MS);
+      if (validadeClinicaAt && Date.now() > validadeClinicaAt) {
+        throw Object.assign(new Error("RECEITA_VENCIDA"), { httpStatus: 410, hint: "Validade clínica de 30 dias já expirou. Solicite uma nova receita." });
+      }
+
+      const quantidadePrescrita  = Number(r.quantidadePrescrita  || 0);
+      const quantidadeDispensada = Number(r.quantidadeDispensada || 0);
+      if (!quantidadePrescrita) {
+        throw Object.assign(new Error("QUANTIDADE_PRESCRITA_AUSENTE"), { httpStatus: 409, hint: "Receita antiga sem quantidade prescrita explícita. Solicite ao profissional uma receita atualizada." });
+      }
+      if (quantidadeDispensada + quantidade > quantidadePrescrita) {
+        throw Object.assign(new Error("SALDO_INSUFICIENTE"), {
+          httpStatus: 409,
+          hint: `Restam ${quantidadePrescrita - quantidadeDispensada} de ${quantidadePrescrita} unidades dispensáveis.`,
+          restante: quantidadePrescrita - quantidadeDispensada
+        });
+      }
+
+      const novoTotal = quantidadeDispensada + quantidade;
+      const novoStatus = novoTotal >= quantidadePrescrita ? "completa" : "parcial";
+
+      tx.set(dispRef, {
+        dispensacaoId,
+        receitaId: r.receitaId,
+        therapistUid: r.therapistUid,
+        farmaceuticoCRF,
+        farmaceuticoNome,
+        farmaciaCNPJ: farmaciaCNPJraw,
+        farmaciaNome,
+        quantidade,
+        dispensadoAtMs: Date.now(),
+        dispensadoAt: admin.firestore.FieldValue.serverTimestamp(),
+        ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null,
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 200)
+      });
+
+      tx.set(receitaRef, {
+        quantidadeDispensada: novoTotal,
+        dispensacaoStatus: novoStatus,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      return { novoTotal, novoStatus, restante: quantidadePrescrita - novoTotal };
+    });
+  } catch (err) {
+    if (err.httpStatus) {
+      const extra = {};
+      if (err.hint)     extra.hint     = err.hint;
+      if (err.restante !== undefined) extra.restante = err.restante;
+      return sendError(res, err.httpStatus, err.message, extra);
+    }
+    throw err;
+  }
+
+  await logAudit({
+    type: "receita_dispensada",
+    receitaId: payload.receitaId,
+    dispensacaoId,
+    farmaceuticoCRF,
+    farmaciaCNPJ: farmaciaCNPJraw,
+    quantidade,
+    novoTotal: resultPayload.novoTotal,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({
+    ok: true,
+    dispensacaoId,
+    quantidadeDispensada: resultPayload.novoTotal,
+    restante: resultPayload.restante,
+    dispensacaoStatus: resultPayload.novoStatus
   });
 }));
 
@@ -2428,7 +2639,8 @@ const THERAPIST_AUDIT_TYPES = new Set([
   "session_created", "therapist_joined", "session_completed",
   "patient_created", "patient_updated", "patient_deleted",
   "verification_submitted", "verification_approved", "verification_rejected",
-  "receita_created", "receita_signed", "receita_deleted_draft", "receita_publica_access"
+  "receita_created", "receita_signed", "receita_deleted_draft", "receita_publica_access",
+  "receita_dispensada"
 ]);
 
 // Tipos de evento que o paciente (com conta) vê
@@ -2455,6 +2667,7 @@ function describeAudit(ev) {
     receita_signed:              "Receita assinada",
     receita_deleted_draft:       "Rascunho de receita apagado",
     receita_publica_access:      "Receita acessada via link público",
+    receita_dispensada:          "Receita dispensada por farmácia",
     patient_account_registered:  "Conta de paciente criada",
     patient_account_recovered:   "Senha do paciente redefinida via chave-semente",
     patient_joined:              "Você entrou em uma consulta"
