@@ -2166,6 +2166,352 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// DOCUMENTOS MÉDICOS — atestado, exames, encaminhamento, relatório.
+//
+// Espelha o fluxo de receita (rascunho → preparar-link → assinar) mas sem
+// dispensação (não tem saldo nem histórico de farmácia). Formulário cifrado
+// client-side por DEK (igual notas/receita); backend só vê metadados.
+//
+// Modelo: therapy_documents/{id}
+//   { documentoId, tipo: "atestado"|"exames"|"encaminhamento"|"relatorio",
+//     therapistUid, patientId?, patientNameSnapshot, sessionId?,
+//     status: "draft"|"signed",
+//     formCiphertext, formIv,
+//     pdfSignedBase64?, pdfSignedMime?, signatureMethod?,
+//     deliveryToken?, deliveryTokenExp?,
+//     signedAtMs?, signedAt?,
+//     createdAt, updatedAt }
+//
+// Token type: "documento_delivery" (distinto de "receita_delivery").
+// ─────────────────────────────────────────────────────────────────────────
+const DOCUMENTO_TIPOS = new Set(["atestado", "exames", "encaminhamento", "relatorio"]);
+const DOCUMENTO_FORM_CIPHERTEXT_MAX = 64 * 1024; // 64 KB cifrado (relatório pode ser longo)
+const DOCUMENTO_PDF_MAX = 1024 * 1024;
+const DOCUMENTO_DELIVERY_VALIDITY_MS = 365 * 24 * 60 * 60 * 1000; // 1 ano (atestado/relatório precisam de janela longa pra consulta retroativa)
+
+function buildDocumentoDeliveryToken(documentoId) {
+  const now = Date.now();
+  const exp = now + DOCUMENTO_DELIVERY_VALIDITY_MS;
+  const token = signPayload({
+    token_type: "documento_delivery",
+    documentoId,
+    iat: now,
+    exp
+  }, ACCESS_TOKEN_SECRET);
+  return { token, exp };
+}
+
+// POST /therapy/documentos — cria rascunho
+router.post("/therapy/documentos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const tipo = String(req.body?.tipo || "").trim().toLowerCase();
+  if (!DOCUMENTO_TIPOS.has(tipo)) {
+    return sendError(res, 400, "TIPO_INVALIDO", { hint: `Tipos válidos: ${[...DOCUMENTO_TIPOS].join(", ")}.` });
+  }
+
+  const formCiphertext      = String(req.body?.formCiphertext || "").trim();
+  const formIv              = String(req.body?.formIv || "").trim();
+  const patientId           = String(req.body?.patientId || "").trim() || null;
+  const patientNameSnapshot = String(req.body?.patientNameSnapshot || "").trim().slice(0, PATIENT_NAME_MAX);
+  const sessionId           = String(req.body?.sessionId || "").trim() || null;
+
+  if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
+  if (formCiphertext.length > DOCUMENTO_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
+  if (!patientNameSnapshot) return sendError(res, 400, "NOME_PACIENTE_OBRIGATORIO");
+
+  if (patientId) {
+    const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
+
+  const documentoId = newId("doc");
+  const db = getDb();
+  await db.collection("therapy_documents").doc(documentoId).set({
+    documentoId,
+    tipo,
+    therapistUid: uid,
+    patientId,
+    patientNameSnapshot,
+    sessionId,
+    status: "draft",
+    formCiphertext,
+    formIv,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "documento_created", documentoId, tipo, therapistUid: uid, patientId });
+  return res.json({ ok: true, documentoId });
+}));
+
+// PATCH /therapy/documentos/:id
+router.patch("/therapy/documentos/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const documentoId = String(req.params.id || "").trim();
+  if (!documentoId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const formCiphertext = String(req.body?.formCiphertext || "").trim();
+  const formIv         = String(req.body?.formIv || "").trim();
+  if (!formCiphertext || !formIv) return sendError(res, 400, "FORMULARIO_OBRIGATORIO");
+  if (formCiphertext.length > DOCUMENTO_FORM_CIPHERTEXT_MAX) return sendError(res, 413, "FORMULARIO_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const ref = db.collection("therapy_documents").doc(documentoId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (d.status === "signed")  return sendError(res, 409, "DOCUMENTO_JA_ASSINADO");
+
+  await ref.set({
+    formCiphertext, formIv,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/documentos/:id/preparar-link
+router.post("/therapy/documentos/:id/preparar-link", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const documentoId = String(req.params.id || "").trim();
+  if (!documentoId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_documents").doc(documentoId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  let deliveryToken    = d.deliveryToken    || null;
+  let deliveryTokenExp = d.deliveryTokenExp || null;
+  const now = Date.now();
+  if (!deliveryToken || !deliveryTokenExp || deliveryTokenExp - now < 30 * 24 * 60 * 60 * 1000) {
+    const fresh = buildDocumentoDeliveryToken(documentoId);
+    deliveryToken    = fresh.token;
+    deliveryTokenExp = fresh.exp;
+    await ref.set({
+      deliveryToken, deliveryTokenExp,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+  return res.json({ ok: true, deliveryToken, deliveryTokenExp });
+}));
+
+// POST /therapy/documentos/:id/assinar
+router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const documentoId = String(req.params.id || "").trim();
+  if (!documentoId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const pdfBase64       = String(req.body?.pdfBase64 || "").trim();
+  const pdfMime         = String(req.body?.pdfMime || "application/pdf").trim();
+  const signatureMethod = String(req.body?.signatureMethod || "").trim();
+
+  if (!pdfBase64) return sendError(res, 400, "PDF_OBRIGATORIO");
+  if (pdfBase64.length > DOCUMENTO_PDF_MAX) return sendError(res, 413, "PDF_GRANDE_DEMAIS");
+  if (pdfMime !== "application/pdf") return sendError(res, 400, "TIPO_INVALIDO");
+  if (!["a1_inline", "external_upload"].includes(signatureMethod)) {
+    return sendError(res, 400, "METODO_INVALIDO");
+  }
+
+  const db = getDb();
+  const ref = db.collection("therapy_documents").doc(documentoId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (d.status === "signed")  return sendError(res, 409, "DOCUMENTO_JA_ASSINADO");
+
+  let deliveryToken    = d.deliveryToken    || null;
+  let deliveryTokenExp = d.deliveryTokenExp || null;
+  if (!deliveryToken || !deliveryTokenExp || deliveryTokenExp < Date.now()) {
+    const fresh = buildDocumentoDeliveryToken(documentoId);
+    deliveryToken    = fresh.token;
+    deliveryTokenExp = fresh.exp;
+  }
+
+  const signedAtMs = Date.now();
+  await ref.set({
+    status: "signed",
+    signatureMethod,
+    pdfSignedBase64: pdfBase64,
+    pdfSignedMime: pdfMime,
+    deliveryToken,
+    deliveryTokenExp,
+    signedAtMs,
+    signedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "documento_signed", documentoId, tipo: d.tipo, therapistUid: uid, signatureMethod });
+  return res.json({ ok: true, deliveryToken, deliveryTokenExp });
+}));
+
+// GET /therapy/documentos — lista do médico (filtro opcional por tipo, patientId)
+router.get("/therapy/documentos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const tipoFilter      = String(req.query?.tipo || "").trim().toLowerCase();
+  const patientIdFilter = String(req.query?.patientId || "").trim();
+
+  const db = getDb();
+  let q = db.collection("therapy_documents").where("therapistUid", "==", uid);
+  if (tipoFilter && DOCUMENTO_TIPOS.has(tipoFilter)) q = q.where("tipo", "==", tipoFilter);
+  if (patientIdFilter)                                q = q.where("patientId", "==", patientIdFilter);
+
+  const snap = await q.limit(500).get();
+  const documentos = snap.docs
+    .map(d => {
+      const x = d.data();
+      return {
+        documentoId: x.documentoId,
+        tipo: x.tipo,
+        patientId: x.patientId || null,
+        patientNameSnapshot: x.patientNameSnapshot,
+        sessionId: x.sessionId || null,
+        status: x.status,
+        signatureMethod: x.signatureMethod || null,
+        formCiphertext: x.formCiphertext,
+        formIv: x.formIv,
+        deliveryToken: x.deliveryToken || null,
+        deliveryTokenExp: x.deliveryTokenExp || null,
+        createdAt: x.createdAt?.toMillis ? x.createdAt.toMillis() : null,
+        signedAt: x.signedAt?.toMillis ? x.signedAt.toMillis() : (x.signedAtMs || null)
+      };
+    })
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, documentos });
+}));
+
+// GET /therapy/documentos/:id — devolve um documento individual (rascunho ou assinado)
+router.get("/therapy/documentos/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const documentoId = String(req.params.id || "").trim();
+  if (!documentoId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_documents").doc(documentoId).get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  return res.json({
+    ok: true,
+    documento: {
+      documentoId: d.documentoId,
+      tipo: d.tipo,
+      patientId: d.patientId || null,
+      patientNameSnapshot: d.patientNameSnapshot,
+      sessionId: d.sessionId || null,
+      status: d.status,
+      formCiphertext: d.formCiphertext,
+      formIv: d.formIv,
+      signatureMethod: d.signatureMethod || null,
+      deliveryToken: d.deliveryToken || null,
+      deliveryTokenExp: d.deliveryTokenExp || null,
+      signedAt: d.signedAt?.toMillis ? d.signedAt.toMillis() : (d.signedAtMs || null)
+    }
+  });
+}));
+
+// DELETE /therapy/documentos/:id — apaga rascunho (assinado nunca apaga)
+router.delete("/therapy/documentos/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const documentoId = String(req.params.id || "").trim();
+  if (!documentoId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_documents").doc(documentoId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (d.status === "signed")  return sendError(res, 409, "DOCUMENTO_JA_ASSINADO");
+
+  await ref.delete();
+  await logAudit({ type: "documento_deleted_draft", documentoId, tipo: d.tipo, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/documento/publica?t=<token> — sem auth, paciente/destinatário
+router.get("/therapy/documento/publica", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.t || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "documento_delivery") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_documents").doc(payload.documentoId).get();
+  if (!snap.exists) return sendError(res, 404, "DOCUMENTO_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.status !== "signed" || !d.pdfSignedBase64) return sendError(res, 410, "DOCUMENTO_NAO_ASSINADO");
+  if (d.deliveryToken !== token) return sendError(res, 401, "TOKEN_REVOGADO");
+
+  await logAudit({
+    type: "documento_publica_access",
+    documentoId: d.documentoId,
+    tipo: d.tipo,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  const therapist = await loadTherapist(d.therapistUid);
+  const issuer = therapist ? {
+    displayName:   therapist.displayName || "",
+    crm:           therapist.crm || "",
+    crp:           therapist.crp || "",
+    rqe:           therapist.rqe || "",
+    especialidade: therapist.especialidade || "",
+    consultorio:   therapist.consultorio || null
+  } : null;
+
+  return res.json({
+    ok: true,
+    documento: {
+      documentoId: d.documentoId,
+      tipo: d.tipo,
+      patientNameSnapshot: d.patientNameSnapshot,
+      pdfBase64: d.pdfSignedBase64,
+      pdfMime: d.pdfSignedMime || "application/pdf",
+      signedAt: d.signedAt?.toMillis ? d.signedAt.toMillis() : (d.signedAtMs || null),
+      signatureMethod: d.signatureMethod || null,
+      deliveryTokenExp: d.deliveryTokenExp || null,
+      issuer
+    }
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // GET /therapy/profissional/publico/:uid — perfil profissional público.
 //
 // Sem auth Firebase. Retorna apenas dados profissionais (nome, registros,
@@ -2721,7 +3067,8 @@ const THERAPIST_AUDIT_TYPES = new Set([
   "patient_created", "patient_updated", "patient_deleted",
   "verification_submitted", "verification_approved", "verification_rejected",
   "receita_created", "receita_signed", "receita_deleted_draft", "receita_publica_access",
-  "receita_dispensada"
+  "receita_dispensada",
+  "documento_created", "documento_signed", "documento_deleted_draft", "documento_publica_access"
 ]);
 
 // Tipos de evento que o paciente (com conta) vê
@@ -2749,6 +3096,10 @@ function describeAudit(ev) {
     receita_deleted_draft:       "Rascunho de receita apagado",
     receita_publica_access:      "Receita acessada via link público",
     receita_dispensada:          "Receita dispensada por farmácia",
+    documento_created:           "Documento médico criado (rascunho)",
+    documento_signed:            "Documento médico assinado",
+    documento_deleted_draft:     "Rascunho de documento médico apagado",
+    documento_publica_access:    "Documento médico acessado via link público",
     patient_account_registered:  "Conta de paciente criada",
     patient_account_recovered:   "Senha do paciente redefinida via chave-semente",
     patient_joined:              "Você entrou em uma consulta"
