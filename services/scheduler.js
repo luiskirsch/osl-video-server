@@ -117,6 +117,54 @@ async function runFullTick() {
   // #B1: processa fila de retries de afiliado todo tick (1×/h é suficiente —
   // backoff mínimo é 1min mas pra batch isso fica adequado).
   await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
+  // LGPD: apaga fileBase64 de comprovantes-estudante com mais de 90 dias.
+  // Mantém metadados (decision, reasons) pra audit.
+  await runStudentDocCleanup().catch(e => logError("student_doc_cleanup_unhandled", e));
+}
+
+// Itera therapy_student_docs/{uid}/uploads/* e apaga fileBase64 quando
+// uploadedAt >= STUDENT_DOC_RETENTION_DAYS atrás. Mantém o doc e os metadados
+// pra audit. Roda 1×/h junto do reminder tick — barato, idempotente.
+const STUDENT_DOC_RETENTION_DAYS = 90;
+const STUDENT_DOC_CLEANUP_BATCH  = 200;
+
+async function runStudentDocCleanup() {
+  const db = getDb();
+  if (!db) return;
+
+  const cutoffMs = Date.now() - STUDENT_DOC_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const cutoff = new Date(cutoffMs);
+
+  // collectionGroup pega todos os subdocs "uploads" de qualquer therapist.
+  const snap = await db.collectionGroup("uploads")
+    .where("uploadedAt", "<=", cutoff)
+    .limit(STUDENT_DOC_CLEANUP_BATCH)
+    .get();
+
+  if (snap.empty) return;
+
+  let cleaned = 0, errors = 0;
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    if (!data.fileBase64) continue; // já limpo
+    // Sanity check: só processa docs que parecem ser de comprovante-estudante
+    // (pode haver outras "uploads" subcollections no futuro).
+    if (!data.therapistUid || !data.fileHash) continue;
+    try {
+      await doc.ref.update({
+        fileBase64: admin.firestore.FieldValue.delete(),
+        fileBase64DeletedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      cleaned++;
+    } catch (e) {
+      logError("student_doc_cleanup_delete_failed", e, { uploadId: data.uploadId });
+      errors++;
+    }
+  }
+
+  if (cleaned > 0 || errors > 0) {
+    logInfo("student_doc_cleanup_tick", { cleaned, errors, batchSize: snap.size, retentionDays: STUDENT_DOC_RETENTION_DAYS });
+  }
 }
 
 function startSchedulerLoop() {
@@ -137,4 +185,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup };

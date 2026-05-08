@@ -192,6 +192,45 @@ function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, ca
   return { subject, html, text };
 }
 
+// E-mail enviado quando admin aprova manualmente o comprovante de matrícula
+// do tier estudante (caso o LLM tenha mandado pra fila de revisão).
+function templateStudentApproved({ therapistName, validUntilMs, painelUrl }) {
+  const subject = "Tier Estudante liberado no Espaço Prelúdio";
+  const validUntilTxt = fmtDateTimePtBR(validUntilMs).split(",")[0]; // só a data
+  const html = renderShell({
+    heading: "Tier Estudante ativo",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;">Sua declaração de matrícula foi aprovada. O <strong>plano Estudante</strong> está liberado e você pode usar o Espaço Prelúdio sem mensalidade até <strong>${escHtml(validUntilTxt)}</strong>.</p>
+      <p style="margin:0 0 16px;">No vencimento, vamos pedir um comprovante atualizado pra renovar — se você ainda estiver no último ano, é instantâneo.</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Acessar painel</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Lembre-se: o tier Estudante exige matrícula ativa no último ano de Psicologia ou Medicina cursando clínica-escola/internato. Profissionais já formados que utilizem este tier de forma indevida terão a conta cancelada e a mensalidade Profissional cobrada retroativamente.</p>
+    `,
+    footer: "Notificação do Espaço Prelúdio sobre seu plano."
+  });
+  const text = `Olá ${therapistName},\n\nSua declaração de matrícula foi aprovada. O plano Estudante está liberado até ${validUntilTxt}.\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
+// E-mail enviado quando admin rejeita manualmente o comprovante de matrícula.
+function templateStudentRejected({ therapistName, reason, retryUrl }) {
+  const subject = "Sobre seu comprovante de matrícula no Espaço Prelúdio";
+  const html = renderShell({
+    heading: "Comprovante não aprovado",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;">Revisamos seu comprovante de matrícula e ele não atende aos critérios do tier Estudante. Motivo apontado pela nossa equipe:</p>
+      <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-style: italic;">${escHtml(reason)}</p>
+      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (declaração atualizada, mais legível, ou com a situação de matrícula explícita) pelo link abaixo. Ou, se preferir, partir direto pro plano Profissional.</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar outro comprovante</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Sua conta continua ativa em modo trial. Em caso de dúvida, responda este e-mail.</p>
+    `,
+    footer: "Notificação do Espaço Prelúdio sobre seu plano."
+  });
+  const text = `Olá ${therapistName},\n\nSeu comprovante de matrícula não foi aprovado. Motivo: ${reason}\n\nEnviar novo comprovante: ${retryUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 // ─── Helpers de URL ─────────────────────────────────────────────────────
 
 function buildJoinUrl(joinToken) {
@@ -201,11 +240,22 @@ function buildCancelUrl(cancelToken) {
   return `${THERAPY_FRONTEND_BASE}/cancelar.html?t=${encodeURIComponent(cancelToken)}`;
 }
 
+function buildPainelUrl() {
+  return `${THERAPY_FRONTEND_BASE}/painel.html`;
+}
+function buildComprovanteEstudanteUrl() {
+  return `${THERAPY_FRONTEND_BASE}/comprovante-estudante.html`;
+}
+
 module.exports = {
   sendEmail,
   templateConfirmation,
   templateReminder,
   templateDispensacaoNotice,
+  templateStudentApproved,
+  templateStudentRejected,
   buildJoinUrl,
-  buildCancelUrl
+  buildCancelUrl,
+  buildPainelUrl,
+  buildComprovanteEstudanteUrl
 };

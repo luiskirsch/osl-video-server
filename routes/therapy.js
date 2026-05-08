@@ -34,7 +34,9 @@ const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE } = require("../services/document-validator");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
-  buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl
+  templateStudentApproved, templateStudentRejected,
+  buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
+  buildPainelUrl, buildComprovanteEstudanteUrl
 } = require("../services/email");
 
 const router = express.Router();
@@ -3764,6 +3766,21 @@ router.post("/therapy/admin/comprovantes-estudante/:uid/aprovar", asyncHandler(a
     notes
   });
 
+  // Notifica o profissional. Falha do email não impede a aprovação.
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateStudentApproved({
+        therapistName: therapist.displayName || "profissional",
+        validUntilMs: validUntil.getTime(),
+        painelUrl: buildPainelUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("student_doc_approve_email_failed", e, { therapistUid: targetUid });
+  }
+
   return res.json({ ok: true, plano: "student-active", validUntil: validUntil.toISOString() });
 }));
 
@@ -3797,6 +3814,21 @@ router.post("/therapy/admin/comprovantes-estudante/:uid/rejeitar", asyncHandler(
     reviewedBy: adminAuth.email,
     reason
   });
+
+  // Notifica o profissional com o motivo. Falha do email não impede a rejeição.
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateStudentRejected({
+        therapistName: therapist.displayName || "profissional",
+        reason,
+        retryUrl: buildComprovanteEstudanteUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("student_doc_reject_email_failed", e, { therapistUid: targetUid });
+  }
 
   return res.json({ ok: true, plano: "trial", reason });
 }));
