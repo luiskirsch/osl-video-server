@@ -31,6 +31,7 @@ const {
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
+const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE } = require("../services/document-validator");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl
@@ -295,6 +296,226 @@ router.post("/therapy/profissional/recuperar", asyncHandler(async (req, res) => 
   });
 
   return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/profissional/comprovante-estudante
+// Upload de declaração de matrícula para liberação do tier "estudante".
+// Fluxo:
+//   1) Profissional precisa estar registrado (therapists/{uid} existe).
+//   2) Body: { fileBase64, mediaType }. Limite ~5MB binário.
+//   3) Validador (Claude Vision) extrai dados + decide.
+//   4) decision === "approved":
+//        therapists/{uid}.plano = "student-active"
+//        + studentVerifiedUntil = now + 365d
+//      decision === "manual-review":
+//        therapists/{uid}.plano = "student-pending-review"
+//        admin verifica via /admin/comprovantes-pendentes
+//      decision === "rejected":
+//        plano não muda, response devolve reasons.
+//   5) Hash sha256 do arquivo é gravado pra dedup (mesmo doc não pode ser
+//      reaproveitado em 2 contas).
+//   6) Rate limit: 5 uploads/24h por uid.
+//
+// Coleções:
+//   therapists/{uid}.studentDoc   — metadados (curso, dataEmissao, decision, ...)
+//   therapy_student_docs/{uid}    — fileBase64 + extracted (separado pra não
+//                                    estourar limite de 1MB do Firestore)
+//   therapy_student_doc_hashes/{sha256} — dedup, aponta pra primeiro uid que usou
+// ─────────────────────────────────────────────────────────────────────────
+
+const STUDENT_DOC_MAX_BASE64 = 5 * 1024 * 1024;     // ~3.7 MB binário
+const STUDENT_DOC_ALLOWED_MIMES = new Set([
+  "image/png", "image/jpeg", "image/webp", "application/pdf"
+]);
+const STUDENT_DOC_RATE_LIMIT_24H = 5;
+const STUDENT_VERIFIED_DAYS = 365;
+
+router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  // Idempotência: se já está aprovado e dentro da validade, devolve sucesso sem reprocessar.
+  if (therapist.plano === "student-active" && therapist.studentVerifiedUntil) {
+    const until = therapist.studentVerifiedUntil.toDate ? therapist.studentVerifiedUntil.toDate() : new Date(therapist.studentVerifiedUntil);
+    if (until > new Date()) {
+      return res.json({
+        ok: true,
+        decision: "approved",
+        confidence: 1,
+        reasons: ["já aprovado anteriormente, validade vigente"],
+        validUntil: until.toISOString()
+      });
+    }
+  }
+
+  const fileBase64 = String(req.body?.fileBase64 || "").trim();
+  const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
+
+  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
+  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+  if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
+
+  // Hash do conteúdo binário pra dedup. Decodifica base64 → sha256 → hex.
+  let buffer;
+  try {
+    buffer = Buffer.from(fileBase64, "base64");
+  } catch {
+    return sendError(res, 400, "BASE64_INVALIDO");
+  }
+  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+
+  const db = getDb();
+
+  // Dedup: mesmo arquivo não pode ser usado em 2 contas distintas
+  const hashRef = db.collection("therapy_student_doc_hashes").doc(fileHash);
+  const hashSnap = await hashRef.get();
+  if (hashSnap.exists && hashSnap.data().uid !== uid) {
+    await logAudit({ type: "student_doc_dedup_block", therapistUid: uid, fileHash });
+    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  }
+
+  // Rate limit: olha submissoes dos últimos 24h
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const recent = await db.collection("therapy_student_docs").doc(uid)
+    .collection("uploads")
+    .where("uploadedAt", ">=", new Date(since))
+    .get();
+  if (recent.size >= STUDENT_DOC_RATE_LIMIT_24H) {
+    return sendError(res, 429, "MUITAS_TENTATIVAS_EM_24H");
+  }
+
+  // Pega CPF do cadastro (pode estar no perfil estendido)
+  const expectedName = String(therapist.displayName || "").trim();
+  const expectedCpf  = String(therapist.cpf || therapist.consultorio?.cpf || "").replace(/\D/g, "") || null;
+
+  // Roda validação com Claude Vision
+  const validator = getDocValidator();
+  const result = await validator.validate({
+    fileBase64,
+    mediaType,
+    expectedName,
+    expectedCpf,
+    requestId: req.requestId
+  });
+
+  // Persiste o arquivo + extracted em coleção separada (1 doc por upload, histórico)
+  const uploadId = newId("doc");
+  const uploadRef = db.collection("therapy_student_docs").doc(uid).collection("uploads").doc(uploadId);
+  await uploadRef.set({
+    uploadId,
+    therapistUid: uid,
+    fileBase64,
+    mediaType,
+    fileSize: buffer.length,
+    fileHash,
+    extracted: result.extracted,
+    confidence: result.confidence,
+    decision: result.decision,
+    reasons: result.reasons,
+    provider: result.provider,
+    raw: result.raw || null,
+    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // Marca o hash como usado (lock contra reuso multi-conta)
+  await hashRef.set({
+    uid,
+    uploadId,
+    decision: result.decision,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // Atualiza therapist com metadados (sem o fileBase64 — fica no doc separado)
+  const update = {
+    studentDoc: {
+      lastUploadId: uploadId,
+      lastUploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      decision: result.decision,
+      confidence: result.confidence,
+      reasons: result.reasons,
+      extracted: result.extracted,
+      fileHash,
+      mediaType,
+      fileSize: buffer.length
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  if (result.decision === "approved") {
+    update.plano = "student-active";
+    update.studentVerifiedAt = admin.firestore.FieldValue.serverTimestamp();
+    update.studentVerifiedUntil = new Date(Date.now() + STUDENT_VERIFIED_DAYS * 24 * 60 * 60 * 1000);
+  } else if (result.decision === "manual-review") {
+    update.plano = "student-pending-review";
+  } else {
+    // rejected: não muda plano (continua trial). Usuário pode tentar de novo dentro do rate limit.
+  }
+
+  await db.collection("therapists").doc(uid).set(update, { merge: true });
+
+  await logAudit({
+    type: "student_doc_submitted",
+    therapistUid: uid,
+    uploadId,
+    decision: result.decision,
+    confidence: result.confidence,
+    fileHash,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  // Retorna resultado pro frontend
+  return res.json({
+    ok: true,
+    decision: result.decision,
+    confidence: result.confidence,
+    reasons: result.reasons,
+    extracted: {
+      // não devolvemos CPF cru no response
+      curso: result.extracted.curso,
+      semestre: result.extracted.semestre,
+      instituicao: result.extracted.instituicao,
+      dataEmissao: result.extracted.dataEmissao,
+      situacao: result.extracted.situacao,
+      isUltimoAno: result.extracted.isUltimoAno
+    },
+    validUntil: result.decision === "approved"
+      ? new Date(Date.now() + STUDENT_VERIFIED_DAYS * 24 * 60 * 60 * 1000).toISOString()
+      : null
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /therapy/profissional/comprovante-estudante/status
+// Devolve o status atual do comprovante do profissional logado, sem mexer
+// em nada. Usado pelo frontend pra polling enquanto admin não revisou.
+// ─────────────────────────────────────────────────────────────────────────
+router.get("/therapy/profissional/comprovante-estudante/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const doc = therapist.studentDoc || null;
+  return res.json({
+    ok: true,
+    plano: therapist.plano || null,
+    studentDoc: doc ? {
+      decision: doc.decision,
+      confidence: doc.confidence,
+      reasons: doc.reasons || [],
+      extracted: doc.extracted || null,
+      lastUploadedAt: doc.lastUploadedAt?.toDate?.()?.toISOString?.() || null
+    } : null,
+    studentVerifiedUntil: therapist.studentVerifiedUntil?.toDate?.()?.toISOString?.() || null
+  });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -3410,6 +3631,176 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   return res.status(200).json({ ok: true });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// ADMIN — Revisão de comprovantes-estudante na fila manual
+//
+// Quando o validador devolve decision="manual-review" (confiança média), o
+// profissional fica em plano "student-pending-review". Admin revisa aqui.
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /therapy/admin/comprovantes-estudante?status=pending-review
+router.get("/therapy/admin/comprovantes-estudante", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending-review").trim().toLowerCase();
+  const allowed = new Set(["pending-review", "approved", "rejected", "all"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  let q = db.collection("therapists");
+  if (wantStatus === "pending-review") {
+    q = q.where("plano", "==", "student-pending-review");
+  } else if (wantStatus === "approved") {
+    q = q.where("plano", "==", "student-active");
+  } else if (wantStatus === "rejected") {
+    q = q.where("studentDoc.decision", "==", "rejected");
+  }
+
+  const snap = await q.limit(500).get();
+  const items = snap.docs.map(d => {
+    const t = d.data();
+    return {
+      therapistUid: t.uid,
+      displayName: t.displayName || "",
+      email: t.email || null,
+      crp: t.crp || "",
+      crm: t.crm || "",
+      plano: t.plano || null,
+      studentDoc: t.studentDoc ? {
+        decision: t.studentDoc.decision,
+        confidence: t.studentDoc.confidence,
+        reasons: t.studentDoc.reasons || [],
+        extracted: t.studentDoc.extracted || null,
+        lastUploadId: t.studentDoc.lastUploadId,
+        lastUploadedAt: t.studentDoc.lastUploadedAt?.toMillis?.() || null,
+        fileHash: t.studentDoc.fileHash,
+        mediaType: t.studentDoc.mediaType,
+        fileSize: t.studentDoc.fileSize
+      } : null
+    };
+  })
+  .sort((a, b) => (b.studentDoc?.lastUploadedAt || 0) - (a.studentDoc?.lastUploadedAt || 0));
+
+  return res.json({ ok: true, items });
+}));
+
+// GET /therapy/admin/comprovantes-estudante/:uid — devolve fileBase64 pra admin abrir
+router.get("/therapy/admin/comprovantes-estudante/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (!therapist.studentDoc?.lastUploadId) return sendError(res, 404, "COMPROVANTE_NAO_ENCONTRADO");
+
+  const db = getDb();
+  const uploadSnap = await db.collection("therapy_student_docs").doc(targetUid)
+    .collection("uploads").doc(therapist.studentDoc.lastUploadId).get();
+  if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
+  const upload = uploadSnap.data();
+
+  return res.json({
+    ok: true,
+    item: {
+      therapistUid: targetUid,
+      uploadId: upload.uploadId,
+      fileBase64: upload.fileBase64,
+      mediaType: upload.mediaType,
+      fileSize: upload.fileSize,
+      fileHash: upload.fileHash,
+      extracted: upload.extracted,
+      confidence: upload.confidence,
+      decision: upload.decision,
+      reasons: upload.reasons || [],
+      provider: upload.provider,
+      uploadedAt: upload.uploadedAt?.toMillis?.() || null,
+      therapist: {
+        displayName: therapist.displayName || "",
+        email: therapist.email || null,
+        crp: therapist.crp || "",
+        crm: therapist.crm || "",
+        plano: therapist.plano || null
+      }
+    }
+  });
+}));
+
+// POST /therapy/admin/comprovantes-estudante/:uid/aprovar
+router.post("/therapy/admin/comprovantes-estudante/:uid/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const notes = String(req.body?.notes || "").trim().slice(0, 500);
+  const validUntil = new Date(Date.now() + STUDENT_VERIFIED_DAYS * 24 * 60 * 60 * 1000);
+
+  await getDb().collection("therapists").doc(targetUid).set({
+    plano: "student-active",
+    studentVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    studentVerifiedUntil: validUntil,
+    "studentDoc.decision": "approved",
+    "studentDoc.reviewedBy": adminAuth.email,
+    "studentDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "studentDoc.reviewNotes": notes,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "student_doc_admin_approved",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    notes
+  });
+
+  return res.json({ ok: true, plano: "student-active", validUntil: validUntil.toISOString() });
+}));
+
+// POST /therapy/admin/comprovantes-estudante/:uid/rejeitar
+router.post("/therapy/admin/comprovantes-estudante/:uid/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, 500);
+  if (!reason) return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+
+  await getDb().collection("therapists").doc(targetUid).set({
+    plano: "trial", // volta pra trial — usuário pode tentar de novo ou pagar tier pro
+    "studentDoc.decision": "rejected",
+    "studentDoc.reviewedBy": adminAuth.email,
+    "studentDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "studentDoc.reviewNotes": reason,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "student_doc_admin_rejected",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    reason
+  });
+
+  return res.json({ ok: true, plano: "trial", reason });
+}));
+
 // GET /therapy/health — diagnóstico isolado
 router.get("/therapy/health", (req, res) => {
   res.json({
@@ -3417,7 +3808,8 @@ router.get("/therapy/health", (req, res) => {
     livekitConfigured: !!(LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
     livekitUrl: LIVEKIT_URL,
     mpAccessTokenConfigured:   !!MP_ACCESS_TOKEN,
-    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET
+    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET,
+    docValidatorProvider: String(process.env.DOC_VALIDATOR_PROVIDER || "claude").toLowerCase()
   });
 });
 

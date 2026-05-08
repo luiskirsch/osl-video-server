@@ -60,8 +60,11 @@ app.use(cors({
   },
   credentials: false
 }));
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+// 6MB: permite upload de comprovante de matrícula (PDF/imagem em base64)
+// para validação automática do tier estudante. Outros endpoints continuam
+// validando tamanho específico no handler.
+app.use(express.json({ limit: "6mb" }));
+app.use(express.urlencoded({ extended: true, limit: "6mb" }));
 
 // Request ID + log estruturado por requisição
 app.use((req, res, next) => {
