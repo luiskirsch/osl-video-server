@@ -135,6 +135,37 @@ function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl
   return { subject, html, text };
 }
 
+function templateDispensacaoNotice({
+  therapistName, patientName, farmaciaNome, farmaciaCnpjFmt,
+  farmaceuticoNome, farmaceuticoCRF, quantidade, totalPrescrito, restante, dispensadoAt
+}) {
+  const subject = restante > 0
+    ? `Receita do paciente ${patientName} foi parcialmente dispensada`
+    : `Receita do paciente ${patientName} foi totalmente dispensada`;
+  const when = fmtDateTimePtBR(dispensadoAt);
+  const restanteTxt = restante > 0
+    ? `<strong>${restante} de ${totalPrescrito}</strong> ${restante === 1 ? "unidade restante" : "unidades restantes"}.`
+    : `Saldo zerado — todas as ${totalPrescrito} ${totalPrescrito === 1 ? "unidade" : "unidades"} foram dispensadas.`;
+  const html = renderShell({
+    heading: "Receita dispensada",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;">Uma farmácia registrou dispensação da receita que você emitiu para <strong>${escHtml(patientName)}</strong>.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Quando</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(when)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Quantidade dispensada</td><td style="padding:3px 0; text-align:right;"><strong>${quantidade} ${quantidade === 1 ? "unidade" : "unidades"}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Farmácia</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(farmaciaNome)}</strong><br><span style="font-size:12px; color:rgba(28,31,29,0.55);">${escHtml(farmaciaCnpjFmt)}</span></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Farmacêutico</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(farmaceuticoNome)}</strong><br><span style="font-size:12px; color:rgba(28,31,29,0.55);">${escHtml(farmaceuticoCRF)}</span></td></tr>
+      </table>
+      <p style="margin:0 0 8px;">${restanteTxt}</p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Esta notificação ajuda você a acompanhar a adesão do paciente ao tratamento. Em caso de irregularidade (CNPJ desconhecido, frequência atípica, etc.), entre em contato com o paciente diretamente ou registre ocorrência ao CRF/Vigilância Sanitária.</p>
+    `,
+    footer: "Notificação automática do Espaço Prelúdio sobre dispensação de receita controlada."
+  });
+  const text = `Olá ${therapistName},\n\nDispensação registrada para ${patientName}:\n- ${when}\n- ${quantidade} ${quantidade === 1 ? "unidade" : "unidades"}\n- ${farmaciaNome} (CNPJ ${farmaciaCnpjFmt})\n- ${farmaceuticoNome} (${farmaceuticoCRF})\n\n${restante > 0 ? `${restante} de ${totalPrescrito} restantes.` : `Saldo zerado.`}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl }) {
   const relativeWhen = describeWhenPtBR(scheduledAt);
   const subject = `Lembrete: sua consulta ${relativeWhen}`;
@@ -174,6 +205,7 @@ module.exports = {
   sendEmail,
   templateConfirmation,
   templateReminder,
+  templateDispensacaoNotice,
   buildJoinUrl,
   buildCancelUrl
 };

@@ -32,7 +32,7 @@ const {
 const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const {
-  sendEmail, templateConfirmation,
+  sendEmail, templateConfirmation, templateDispensacaoNotice,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl
 } = require("../services/email");
 
@@ -2166,6 +2166,52 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// GET /therapy/profissional/publico/:uid — perfil profissional público.
+//
+// Sem auth Firebase. Retorna apenas dados profissionais (nome, registros,
+// especialidade, consultório) de terapeutas com verificationStatus=verified.
+// Usado pela página /verificado.html — vira "selo de credibilidade" que o
+// terapeuta pode incorporar no site/perfil próprio.
+// ─────────────────────────────────────────────────────────────────────────
+router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = String(req.params.uid || "").trim();
+  if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (therapist.verificationStatus !== "verified") {
+    return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
+  }
+
+  // Sumariza consultório (omite dados desnecessários — endereço sumarizado).
+  const c = therapist.consultorio || {};
+  const consultorioPublico = {
+    cidade:    c.cidade || null,
+    uf:        c.uf || null,
+    bairro:    c.bairro || null,
+    endereco:  c.endereco ? `${c.endereco}${c.numero ? ", " + c.numero : ""}` : null,
+    telefone:  c.telefone || null,
+    cnpj:      c.cnpj || null
+  };
+
+  return res.json({
+    ok: true,
+    profissional: {
+      uid,
+      displayName:   therapist.displayName || "",
+      crp:           therapist.crp || "",
+      crm:           therapist.crm || "",
+      rqe:           therapist.rqe || "",
+      especialidade: therapist.especialidade || "",
+      bio:           therapist.bio || "",
+      consultorio:   consultorioPublico,
+      verifiedAt:    therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null
+    }
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/receita/dispensar — endpoint público (sem Firebase auth).
 // Farmacêutico autentica-se informando CRF + nome + CNPJ + nome farmácia.
 // É low-trust por design (MVP) — fonte de verdade é a auditoria + responsabilidade
@@ -2256,7 +2302,14 @@ router.post("/therapy/receita/dispensar", asyncHandler(async (req, res) => {
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
 
-      return { novoTotal, novoStatus, restante: quantidadePrescrita - novoTotal };
+      return {
+        novoTotal,
+        novoStatus,
+        restante: quantidadePrescrita - novoTotal,
+        therapistUid: r.therapistUid,
+        patientName: r.patientNameSnapshot,
+        totalPrescrito: quantidadePrescrita
+      };
     });
   } catch (err) {
     if (err.httpStatus) {
@@ -2278,6 +2331,34 @@ router.post("/therapy/receita/dispensar", asyncHandler(async (req, res) => {
     novoTotal: resultPayload.novoTotal,
     ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
   });
+
+  // Notificação por e-mail ao psiquiatra prescritor (fire-and-forget).
+  // Diferencial vs. MEMED/CFM: prescritor sabe em tempo real quando paciente
+  // aviou e onde, sem precisar perguntar. Útil pra adesão ao tratamento.
+  (async () => {
+    try {
+      const therapist = await loadTherapist(resultPayload.therapistUid);
+      if (!therapist) return;
+      const therapistEmail = await resolveTherapistEmail(resultPayload.therapistUid, therapist);
+      if (!therapistEmail) return;
+      const cnpjFmt = farmaciaCNPJraw.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
+      const tpl = templateDispensacaoNotice({
+        therapistName:    therapist.displayName || "profissional",
+        patientName:      resultPayload.patientName || "paciente",
+        farmaciaNome,
+        farmaciaCnpjFmt:  cnpjFmt,
+        farmaceuticoNome,
+        farmaceuticoCRF,
+        quantidade,
+        totalPrescrito:   resultPayload.totalPrescrito,
+        restante:         resultPayload.restante,
+        dispensadoAt:     Date.now()
+      });
+      await sendEmail({ to: therapistEmail, ...tpl });
+    } catch (e) {
+      logError("therapy_dispensacao_notice_failed", e, { dispensacaoId });
+    }
+  })();
 
   return res.json({
     ok: true,
