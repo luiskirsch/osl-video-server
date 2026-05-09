@@ -44,6 +44,9 @@ const AUTO_APPROVE_CONFIDENCE = 0.85;
 // Abaixo disso, rejeita direto sem revisão (provavelmente não é um doc válido).
 const REJECT_CONFIDENCE = 0.40;
 
+// Tier "recém-formado": elegível se inscrição CRP/CRM <= N meses atrás.
+const RECEM_FORMADO_MAX_MONTHS = 12;
+
 // Modelo Claude com visão. Sonnet 4.6 = melhor custo-benefício pra OCR estruturado.
 const MODEL = "claude-sonnet-4-6";
 const MAX_TOKENS = 800;
@@ -70,6 +73,17 @@ class MockValidator extends BaseValidator {
       raw: { fileSize: fileBase64?.length || 0, mediaType, expectedName }
     };
   }
+  async validateRegistration({ fileBase64, mediaType, expectedName }) {
+    return {
+      ok: true,
+      decision: "manual-review",
+      confidence: 0,
+      reasons: ["validador automático não configurado — admin precisa revisar manualmente"],
+      extracted: emptyRegistrationExtracted(),
+      provider: "mock",
+      raw: { fileSize: fileBase64?.length || 0, mediaType, expectedName }
+    };
+  }
 }
 
 class ClaudeVisionValidator extends BaseValidator {
@@ -78,16 +92,9 @@ class ClaudeVisionValidator extends BaseValidator {
     this.client = new Anthropic({ apiKey });
   }
 
-  async validate({ fileBase64, mediaType, expectedName, expectedCpf, requestId = "" }) {
-    if (!fileBase64) {
-      return rejected({ reason: "ARQUIVO_AUSENTE", provider: this.name });
-    }
-    if (!isImageOrPdf(mediaType)) {
-      return rejected({ reason: "FORMATO_NAO_SUPORTADO", provider: this.name });
-    }
-
-    const prompt = buildPrompt({ expectedName, expectedCpf });
-
+  // Helper privado: chama Claude com visão e retorna JSON parseado.
+  // Em caso de erro, retorna { error: <decision-result> } pro caller.
+  async _callClaude({ prompt, fileBase64, mediaType, requestId, emptyFallback }) {
     let msg;
     try {
       msg = await this.client.messages.create({
@@ -106,36 +113,48 @@ class ClaudeVisionValidator extends BaseValidator {
       });
     } catch (error) {
       logError("doc_validator_anthropic_failed", error, { requestId });
-      return {
+      return { error: {
         ok: false,
         decision: "manual-review",
         confidence: 0,
         reasons: ["erro ao chamar serviço de validação — revisão manual"],
-        extracted: emptyExtracted(),
+        extracted: emptyFallback(),
         provider: this.name,
         raw: { error: error.message }
-      };
+      }};
     }
 
     const text = msg?.content?.[0]?.text || "{}";
-    let parsed;
     try {
-      // Claude às vezes envolve JSON em markdown — strip antes de parsear
       const cleaned = text.replace(/```json\s*|```\s*$/g, "").trim();
       const match = cleaned.match(/\{[\s\S]*\}/);
-      parsed = match ? JSON.parse(match[0]) : {};
+      const parsed = match ? JSON.parse(match[0]) : {};
+      return { parsed };
     } catch (error) {
       logError("doc_validator_json_parse_failed", error, { requestId, text: text.slice(0, 500) });
-      return {
+      return { error: {
         ok: false,
         decision: "manual-review",
         confidence: 0,
         reasons: ["resposta inválida do validador — revisão manual"],
-        extracted: emptyExtracted(),
+        extracted: emptyFallback(),
         provider: this.name,
         raw: { rawText: text }
-      };
+      }};
     }
+  }
+
+  async validate({ fileBase64, mediaType, expectedName, expectedCpf, requestId = "" }) {
+    if (!fileBase64) return rejected({ reason: "ARQUIVO_AUSENTE", provider: this.name });
+    if (!isImageOrPdf(mediaType)) return rejected({ reason: "FORMATO_NAO_SUPORTADO", provider: this.name });
+
+    const result = await this._callClaude({
+      prompt: buildPrompt({ expectedName, expectedCpf }),
+      fileBase64, mediaType, requestId,
+      emptyFallback: emptyExtracted
+    });
+    if (result.error) return result.error;
+    const parsed = result.parsed;
 
     const extracted = normalizeExtracted(parsed);
     const verdict = applyValidationRules({ extracted, expectedName, expectedCpf, llmConfidence: parsed.confidence });
@@ -146,6 +165,47 @@ class ClaudeVisionValidator extends BaseValidator {
       confidence: verdict.confidence,
       curso: extracted.curso,
       isUltimoAno: extracted.isUltimoAno
+    });
+
+    return {
+      ok: true,
+      ...verdict,
+      extracted,
+      provider: this.name,
+      raw: { llmRaw: parsed, model: MODEL }
+    };
+  }
+
+  // Valida comprovante de registro profissional (carteira CRP/CRM ou print do
+  // sistema oficial — e-Psi pra psicólogos, portal CFM pra médicos). Extrai
+  // a data de inscrição no conselho. Decisão automática:
+  //   inscrição <= 12 meses atrás + confiança alta → approved (recém-formado)
+  //   inscrição > 12 meses atrás                   → rejected (não é recém-formado)
+  //   confiança intermediária                       → manual-review
+  async validateRegistration({ fileBase64, mediaType, expectedName, expectedCrp, expectedCrm, requestId = "" }) {
+    if (!fileBase64) return rejected({ reason: "ARQUIVO_AUSENTE", provider: this.name });
+    if (!isImageOrPdf(mediaType)) return rejected({ reason: "FORMATO_NAO_SUPORTADO", provider: this.name });
+
+    const result = await this._callClaude({
+      prompt: buildRegistrationPrompt({ expectedName, expectedCrp, expectedCrm }),
+      fileBase64, mediaType, requestId,
+      emptyFallback: emptyRegistrationExtracted
+    });
+    if (result.error) return result.error;
+    const parsed = result.parsed;
+
+    const extracted = normalizeRegistrationExtracted(parsed);
+    const verdict = applyRegistrationValidationRules({
+      extracted, expectedName, expectedCrp, expectedCrm,
+      llmConfidence: parsed.confidence
+    });
+
+    logInfo("doc_validator_registration_done", {
+      requestId,
+      decision: verdict.decision,
+      confidence: verdict.confidence,
+      conselho: extracted.conselho,
+      monthsSinceInscricao: extracted.monthsSinceInscricao
     });
 
     return {
@@ -282,6 +342,143 @@ function emptyExtracted() {
   };
 }
 
+// ─── Registration (CRP/CRM) helpers ─────────────────────────────────────
+
+function buildRegistrationPrompt({ expectedName, expectedCrp, expectedCrm }) {
+  return `Você é um validador de registros profissionais brasileiros (CRP do CFP, CRM do CFM). Recebeu um documento que pode ser:
+- Carteira/cédula profissional emitida pelo conselho
+- Print do sistema e-Psi (psicólogos) ou portal de busca do CFM (médicos)
+- Declaração/certidão de inscrição no conselho
+
+Sua tarefa: extrair dados estruturados e a DATA DE INSCRIÇÃO no conselho. Responda APENAS com JSON válido, sem markdown, no schema abaixo:
+
+{
+  "nome": "nome completo do profissional",
+  "conselho": "CFP" ou "CFM" ou "outro",
+  "registro": "número de registro como aparece (ex: '06/12345', '123456-SC')",
+  "regiao": "UF/região do conselho (ex: 'RS', '06')",
+  "dataInscricao": "data ORIGINAL de inscrição no conselho em formato ISO YYYY-MM-DD, ou null se não conseguir ler",
+  "situacao": "status da inscrição (ex: 'ativo', 'regular', 'suspenso', 'cancelado')",
+  "tipoDocumento": "carteira" ou "e-psi-print" ou "cfm-print" ou "declaracao" ou "outro",
+  "confidence": 0.0 a 1.0,
+  "observacoes": "QR code presente, assinatura digital, sinais de adulteração, screenshot zoado, etc"
+}
+
+Regras importantes:
+1. "dataInscricao" é a data de PRIMEIRA INSCRIÇÃO no conselho (quando o profissional foi habilitado), não a data de validade da carteira nem a data de emissão do documento. Se o doc tem ambas, retorne a de INSCRIÇÃO.
+2. ${expectedName ? `Nome esperado: "${expectedName}". Se não bater (case-insensitive, ignore acentos), reduza confidence drasticamente.` : ""}
+3. ${expectedCrp ? `CRP esperado: "${expectedCrp}". Se aparecer e não bater, reduza confidence drasticamente.` : ""}
+4. ${expectedCrm ? `CRM esperado: "${expectedCrm}". Se aparecer e não bater, reduza confidence drasticamente.` : ""}
+5. "confidence" reflete autenticidade: prints do e-Psi/CFM oficiais são mais confiáveis que fotos de carteira (que podem ser editadas). Reduza pra 0.3-0.5 se a foto da carteira está estranha (datas com fontes inconsistentes, áreas turvas perto da data, etc).
+6. Não invente dados. Se não conseguir ler um campo, retorne null/string vazia.
+7. Se o documento não é um registro profissional do CFP/CFM (ex: declaração de matrícula, RG, comprovante de pagamento), retorne confidence ≤ 0.2.`;
+}
+
+function applyRegistrationValidationRules({ extracted, expectedName, expectedCrp, expectedCrm, llmConfidence }) {
+  const reasons = [];
+  let confidence = clamp01(Number(llmConfidence) || 0);
+
+  if (!extracted.dataInscricao) {
+    reasons.push("data de inscrição no conselho não identificada");
+    return { decision: "manual-review", confidence: Math.min(confidence, 0.5), reasons };
+  }
+
+  if (extracted.situacao && /suspenso|cancelado|inativo|baixa/i.test(extracted.situacao)) {
+    reasons.push(`registro em situação "${extracted.situacao}" — inelegível`);
+    return { decision: "rejected", confidence: 0, reasons };
+  }
+
+  // Cálculo da janela: inscrição até 12 meses atrás (com tolerância de 7 dias)
+  const months = monthsSince(extracted.dataInscricao);
+  if (months === null) {
+    reasons.push("data de inscrição em formato inválido");
+    confidence = Math.min(confidence, 0.4);
+  } else if (months < 0) {
+    reasons.push("data de inscrição no futuro — suspeito");
+    return { decision: "rejected", confidence: 0, reasons };
+  } else if (months > RECEM_FORMADO_MAX_MONTHS) {
+    reasons.push(`inscrição há ${months} meses — fora da janela de 12 meses do tier recém-formado`);
+    return { decision: "rejected", confidence: 0, reasons };
+  }
+
+  if (expectedName && extracted.nome) {
+    if (!fuzzyNameMatch(expectedName, extracted.nome)) {
+      reasons.push(`nome no documento ("${extracted.nome}") não bate com cadastro ("${expectedName}")`);
+      return { decision: "rejected", confidence: 0, reasons };
+    }
+  }
+
+  if (expectedCrp && extracted.registro && extracted.conselho === "CFP") {
+    if (!fuzzyRegistroMatch(expectedCrp, extracted.registro)) {
+      reasons.push(`CRP no documento (${extracted.registro}) não bate com cadastro (${expectedCrp})`);
+      return { decision: "rejected", confidence: 0, reasons };
+    }
+  }
+  if (expectedCrm && extracted.registro && extracted.conselho === "CFM") {
+    if (!fuzzyRegistroMatch(expectedCrm, extracted.registro)) {
+      reasons.push(`CRM no documento (${extracted.registro}) não bate com cadastro (${expectedCrm})`);
+      return { decision: "rejected", confidence: 0, reasons };
+    }
+  }
+
+  let decision;
+  if (confidence >= AUTO_APPROVE_CONFIDENCE && reasons.length === 0) {
+    decision = "approved";
+    reasons.push(`aprovado: inscrição há ${months} meses (dentro da janela de 12 meses)`);
+  } else if (confidence < REJECT_CONFIDENCE) {
+    decision = "rejected";
+    reasons.unshift("confiança muito baixa para considerar este documento autêntico");
+  } else {
+    decision = "manual-review";
+    reasons.unshift("confiança intermediária — admin revisa antes de liberar");
+  }
+
+  return { decision, confidence, reasons };
+}
+
+function normalizeRegistrationExtracted(raw) {
+  const conselho = String(raw.conselho || "").toUpperCase();
+  const dataInscricao = parseIsoDate(raw.dataInscricao);
+  return {
+    nome: String(raw.nome || "").trim(),
+    conselho: ["CFP", "CFM"].includes(conselho) ? conselho : "outro",
+    registro: String(raw.registro || "").trim(),
+    regiao: String(raw.regiao || "").trim(),
+    dataInscricao,
+    monthsSinceInscricao: dataInscricao ? monthsSince(dataInscricao) : null,
+    situacao: String(raw.situacao || "").trim(),
+    tipoDocumento: String(raw.tipoDocumento || "outro").trim().toLowerCase(),
+    observacoes: String(raw.observacoes || "").trim().slice(0, 500)
+  };
+}
+
+function emptyRegistrationExtracted() {
+  return {
+    nome: "", conselho: "outro", registro: "", regiao: "",
+    dataInscricao: null, monthsSinceInscricao: null,
+    situacao: "", tipoDocumento: "outro", observacoes: ""
+  };
+}
+
+// Match aproximado de número de registro: ignora formatação (barras, hifens,
+// espaços) e UF. "06/12345" matches "12345-RS" matches "12345/06".
+function fuzzyRegistroMatch(expected, found) {
+  const digits = (s) => String(s).replace(/[^0-9]/g, "");
+  const e = digits(expected);
+  const f = digits(found);
+  if (!e || !f) return false;
+  // O número principal tem 5+ dígitos. Compara o último bloco contínuo de 5+ dígitos.
+  return e.includes(f) || f.includes(e);
+}
+
+function monthsSince(isoDate) {
+  if (!isoDate) return null;
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  const now = new Date();
+  return (now.getUTCFullYear() - d.getUTCFullYear()) * 12 + (now.getUTCMonth() - d.getUTCMonth());
+}
+
 function rejected({ reason, provider }) {
   return {
     ok: false,
@@ -349,5 +546,6 @@ module.exports = {
   AUTO_APPROVE_CONFIDENCE,
   REJECT_CONFIDENCE,
   DOC_VALIDITY_DAYS,
-  CURSOS_ELEGIVEIS
+  CURSOS_ELEGIVEIS,
+  RECEM_FORMADO_MAX_MONTHS
 };

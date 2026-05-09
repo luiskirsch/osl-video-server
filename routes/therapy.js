@@ -31,7 +31,7 @@ const {
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
-const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE } = require("../services/document-validator");
+const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
@@ -517,6 +517,176 @@ router.get("/therapy/profissional/comprovante-estudante/status", asyncHandler(as
       lastUploadedAt: doc.lastUploadedAt?.toDate?.()?.toISOString?.() || null
     } : null,
     studentVerifiedUntil: therapist.studentVerifiedUntil?.toDate?.()?.toISOString?.() || null
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/profissional/comprovante-recem-formado
+// Upload de carteira CRP/CRM ou print do e-Psi para validação do tier
+// "recém-formado" (R$ 49,90/mês — disponível se inscrição no conselho
+// foi nos últimos 12 meses).
+// Reusa hash dedup, rate limit, fluxo do tier estudante.
+// Estados em therapists/{uid}.plano:
+//   "recem-formado-pending-review"  — confiança média, fila admin
+//   "recem-formado-eligible"        — aprovado, pode iniciar assinatura R$ 49,90
+//   se rejeitado: plano não muda (continua trial), reasons no response
+// ─────────────────────────────────────────────────────────────────────────
+
+const RECEM_FORMADO_RATE_LIMIT_24H = 5;
+
+router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  // Idempotência: já elegível, devolve sucesso sem reprocessar
+  if (therapist.plano === "recem-formado-eligible") {
+    return res.json({
+      ok: true,
+      decision: "approved",
+      confidence: 1,
+      reasons: ["já validado anteriormente — siga para o pagamento da assinatura"],
+      extracted: therapist.recemFormadoDoc?.extracted || null
+    });
+  }
+
+  const fileBase64 = String(req.body?.fileBase64 || "").trim();
+  const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
+
+  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
+  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+  if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
+
+  let buffer;
+  try { buffer = Buffer.from(fileBase64, "base64"); } catch { return sendError(res, 400, "BASE64_INVALIDO"); }
+  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+
+  const db = getDb();
+
+  // Dedup
+  const hashRef = db.collection("therapy_recem_formado_doc_hashes").doc(fileHash);
+  const hashSnap = await hashRef.get();
+  if (hashSnap.exists && hashSnap.data().uid !== uid) {
+    await logAudit({ type: "recem_formado_doc_dedup_block", therapistUid: uid, fileHash });
+    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  }
+
+  // Rate limit
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const recent = await db.collection("therapy_recem_formado_docs").doc(uid)
+    .collection("uploads")
+    .where("uploadedAt", ">=", new Date(since))
+    .get();
+  if (recent.size >= RECEM_FORMADO_RATE_LIMIT_24H) {
+    return sendError(res, 429, "MUITAS_TENTATIVAS_EM_24H");
+  }
+
+  const expectedName = String(therapist.displayName || "").trim();
+  const expectedCrp  = String(therapist.crp || "").trim();
+  const expectedCrm  = String(therapist.crm || "").trim();
+
+  const validator = getDocValidator();
+  const result = await validator.validateRegistration({
+    fileBase64, mediaType,
+    expectedName, expectedCrp, expectedCrm,
+    requestId: req.requestId
+  });
+
+  const uploadId = newId("rfdoc");
+  const uploadRef = db.collection("therapy_recem_formado_docs").doc(uid).collection("uploads").doc(uploadId);
+  await uploadRef.set({
+    uploadId, therapistUid: uid,
+    fileBase64, mediaType, fileSize: buffer.length, fileHash,
+    extracted: result.extracted,
+    confidence: result.confidence,
+    decision: result.decision,
+    reasons: result.reasons,
+    provider: result.provider,
+    raw: result.raw || null,
+    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await hashRef.set({
+    uid, uploadId, decision: result.decision,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  const update = {
+    recemFormadoDoc: {
+      lastUploadId: uploadId,
+      lastUploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      decision: result.decision,
+      confidence: result.confidence,
+      reasons: result.reasons,
+      extracted: result.extracted,
+      fileHash, mediaType, fileSize: buffer.length
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  if (result.decision === "approved") {
+    update.plano = "recem-formado-eligible";
+    update.recemFormadoVerifiedAt = admin.firestore.FieldValue.serverTimestamp();
+  } else if (result.decision === "manual-review") {
+    update.plano = "recem-formado-pending-review";
+  }
+  // rejected: plano fica como tá (trial)
+
+  await db.collection("therapists").doc(uid).set(update, { merge: true });
+
+  await logAudit({
+    type: "recem_formado_doc_submitted",
+    therapistUid: uid,
+    uploadId,
+    decision: result.decision,
+    confidence: result.confidence,
+    fileHash,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({
+    ok: true,
+    decision: result.decision,
+    confidence: result.confidence,
+    reasons: result.reasons,
+    extracted: {
+      conselho: result.extracted.conselho,
+      registro: result.extracted.registro,
+      regiao: result.extracted.regiao,
+      dataInscricao: result.extracted.dataInscricao,
+      monthsSinceInscricao: result.extracted.monthsSinceInscricao,
+      situacao: result.extracted.situacao,
+      tipoDocumento: result.extracted.tipoDocumento
+    }
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /therapy/profissional/comprovante-recem-formado/status
+// ─────────────────────────────────────────────────────────────────────────
+router.get("/therapy/profissional/comprovante-recem-formado/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const doc = therapist.recemFormadoDoc || null;
+  return res.json({
+    ok: true,
+    plano: therapist.plano || null,
+    recemFormadoDoc: doc ? {
+      decision: doc.decision,
+      confidence: doc.confidence,
+      reasons: doc.reasons || [],
+      extracted: doc.extracted || null,
+      lastUploadedAt: doc.lastUploadedAt?.toDate?.()?.toISOString?.() || null
+    } : null
   });
 }));
 
@@ -3829,6 +3999,171 @@ router.post("/therapy/admin/comprovantes-estudante/:uid/rejeitar", asyncHandler(
   } catch (e) {
     logError("student_doc_reject_email_failed", e, { therapistUid: targetUid });
   }
+
+  return res.json({ ok: true, plano: "trial", reason });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADMIN — Revisão de comprovantes do tier recém-formado
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /therapy/admin/comprovantes-recem-formado?status=pending-review
+router.get("/therapy/admin/comprovantes-recem-formado", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending-review").trim().toLowerCase();
+  const allowed = new Set(["pending-review", "eligible", "rejected", "all"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  let q = db.collection("therapists");
+  if (wantStatus === "pending-review") {
+    q = q.where("plano", "==", "recem-formado-pending-review");
+  } else if (wantStatus === "eligible") {
+    q = q.where("plano", "==", "recem-formado-eligible");
+  } else if (wantStatus === "rejected") {
+    q = q.where("recemFormadoDoc.decision", "==", "rejected");
+  }
+
+  const snap = await q.limit(500).get();
+  const items = snap.docs.map(d => {
+    const t = d.data();
+    return {
+      therapistUid: t.uid,
+      displayName: t.displayName || "",
+      email: t.email || null,
+      crp: t.crp || "",
+      crm: t.crm || "",
+      plano: t.plano || null,
+      recemFormadoDoc: t.recemFormadoDoc ? {
+        decision: t.recemFormadoDoc.decision,
+        confidence: t.recemFormadoDoc.confidence,
+        reasons: t.recemFormadoDoc.reasons || [],
+        extracted: t.recemFormadoDoc.extracted || null,
+        lastUploadId: t.recemFormadoDoc.lastUploadId,
+        lastUploadedAt: t.recemFormadoDoc.lastUploadedAt?.toMillis?.() || null,
+        fileHash: t.recemFormadoDoc.fileHash,
+        mediaType: t.recemFormadoDoc.mediaType,
+        fileSize: t.recemFormadoDoc.fileSize
+      } : null
+    };
+  })
+  .sort((a, b) => (b.recemFormadoDoc?.lastUploadedAt || 0) - (a.recemFormadoDoc?.lastUploadedAt || 0));
+
+  return res.json({ ok: true, items });
+}));
+
+// GET /therapy/admin/comprovantes-recem-formado/:uid
+router.get("/therapy/admin/comprovantes-recem-formado/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (!therapist.recemFormadoDoc?.lastUploadId) return sendError(res, 404, "COMPROVANTE_NAO_ENCONTRADO");
+
+  const db = getDb();
+  const uploadSnap = await db.collection("therapy_recem_formado_docs").doc(targetUid)
+    .collection("uploads").doc(therapist.recemFormadoDoc.lastUploadId).get();
+  if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
+  const upload = uploadSnap.data();
+
+  return res.json({
+    ok: true,
+    item: {
+      therapistUid: targetUid,
+      uploadId: upload.uploadId,
+      fileBase64: upload.fileBase64,
+      mediaType: upload.mediaType,
+      fileSize: upload.fileSize,
+      fileHash: upload.fileHash,
+      extracted: upload.extracted,
+      confidence: upload.confidence,
+      decision: upload.decision,
+      reasons: upload.reasons || [],
+      provider: upload.provider,
+      uploadedAt: upload.uploadedAt?.toMillis?.() || null,
+      therapist: {
+        displayName: therapist.displayName || "",
+        email: therapist.email || null,
+        crp: therapist.crp || "",
+        crm: therapist.crm || "",
+        plano: therapist.plano || null
+      }
+    }
+  });
+}));
+
+// POST /therapy/admin/comprovantes-recem-formado/:uid/aprovar
+router.post("/therapy/admin/comprovantes-recem-formado/:uid/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const notes = String(req.body?.notes || "").trim().slice(0, 500);
+
+  await getDb().collection("therapists").doc(targetUid).set({
+    plano: "recem-formado-eligible",
+    recemFormadoVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    "recemFormadoDoc.decision": "approved",
+    "recemFormadoDoc.reviewedBy": adminAuth.email,
+    "recemFormadoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "recemFormadoDoc.reviewNotes": notes,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "recem_formado_doc_admin_approved",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    notes
+  });
+
+  return res.json({ ok: true, plano: "recem-formado-eligible" });
+}));
+
+// POST /therapy/admin/comprovantes-recem-formado/:uid/rejeitar
+router.post("/therapy/admin/comprovantes-recem-formado/:uid/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, 500);
+  if (!reason) return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+
+  await getDb().collection("therapists").doc(targetUid).set({
+    plano: "trial",
+    "recemFormadoDoc.decision": "rejected",
+    "recemFormadoDoc.reviewedBy": adminAuth.email,
+    "recemFormadoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "recemFormadoDoc.reviewNotes": reason,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "recem_formado_doc_admin_rejected",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    reason
+  });
 
   return res.json({ ok: true, plano: "trial", reason });
 }));
