@@ -164,7 +164,13 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
   .filter(Boolean);
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
-const THERAPY_PLAN_AMOUNT     = Number(process.env.THERAPY_PLAN_AMOUNT || 49.90);
+// Existem 2 tiers que diferem só no preço:
+//   - "recem-formado" (R$ 49,90)  — válido só pra quem tem CRP/CRM <12 meses
+//   - "profissional"  (R$ 120,00) — qualquer profissional habilitado
+// THERAPY_PLAN_AMOUNT é mantido por compat (default tier sem flag explícita).
+const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 49.90);
+const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 49.90);
+const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 120.00);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 14);
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
@@ -208,7 +214,8 @@ module.exports = {
   REFERRAL_REWARD_COINS, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE, REFERRAL_COMMISSION_PERCENT,
   ADMIN_SECRET,
   THERAPY_ADMIN_EMAILS,
-  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
+  THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   RESEND_API_KEY, EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,

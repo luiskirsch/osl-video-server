@@ -25,7 +25,8 @@ const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = 
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
-  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
+  THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
 } = require("../config");
@@ -35,8 +36,10 @@ const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MA
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
+  templateRecemFormadoApproved, templateRecemFormadoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
-  buildPainelUrl, buildComprovanteEstudanteUrl
+  buildPainelUrl, buildPlanosUrl,
+  buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl
 } = require("../services/email");
 
 const router = express.Router();
@@ -3597,6 +3600,11 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
 
 // POST /therapy/profissional/plano/iniciar
 // Cria preapproval no MP, salva mpPreapprovalId, retorna init_point pra redirect.
+//
+// Body opcional: { tier: "recem-formado" | "profissional" }
+//   - "recem-formado" → cobra R$ 49,90 (exige plano === "recem-formado-eligible")
+//   - "profissional"  → cobra R$ 120
+//   - sem tier (compat) → cobra THERAPY_PLAN_AMOUNT (default 49,90)
 router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -3604,6 +3612,29 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
 
   const therapist = await loadTherapist(uid);
   if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  // Determina tier + preço. Default mantém compat (sem flag = THERAPY_PLAN_AMOUNT).
+  const tier = String(req.body?.tier || "").trim().toLowerCase();
+  let amount, planTier, planLabel;
+  if (tier === "recem-formado") {
+    if (therapist.plano !== "recem-formado-eligible") {
+      return sendError(res, 403, "RECEM_FORMADO_NAO_ELEGIVEL", {
+        detail: "Envie o comprovante de inscrição CRP/CRM em /comprovante-recem-formado.html antes de assinar este tier."
+      });
+    }
+    amount = THERAPY_PLAN_RECEM_FORMADO_AMOUNT;
+    planTier = "recem-formado";
+    planLabel = `${THERAPY_PLAN_NAME} — Recém-formado`;
+  } else if (tier === "profissional") {
+    amount = THERAPY_PLAN_PROFISSIONAL_AMOUNT;
+    planTier = "profissional";
+    planLabel = `${THERAPY_PLAN_NAME} — Profissional`;
+  } else {
+    // Compat: chamadas antigas sem tier usam o default histórico
+    amount = THERAPY_PLAN_AMOUNT;
+    planTier = "default";
+    planLabel = THERAPY_PLAN_NAME;
+  }
 
   // Pega e-mail do Firebase Auth (preapproval exige payer_email)
   let payerEmail = "";
@@ -3616,11 +3647,11 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
   const externalRef = `EP_THERAPY_${uid}`;
 
   const body = {
-    reason: THERAPY_PLAN_NAME,
+    reason: planLabel,
     auto_recurring: {
       frequency: 1,
       frequency_type: "months",
-      transaction_amount: THERAPY_PLAN_AMOUNT,
+      transaction_amount: amount,
       currency_id: "BRL"
     },
     back_url: `${THERAPY_FRONTEND_BASE}/perfil.html?mp_back=1`,
@@ -3650,13 +3681,17 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     mpPreapprovalId:     data.id,
     mpPreapprovalStatus: data.status || "pending",
     mpExternalRef:       externalRef,
+    proTier:             planTier,
+    proPriceCents:       Math.round(amount * 100),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
   await logAudit({
     type: "therapy_plano_iniciado",
     therapistUid: uid,
-    preapprovalId: data.id
+    preapprovalId: data.id,
+    tier: planTier,
+    amount
   });
 
   return res.json({
@@ -4131,6 +4166,20 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/aprovar", asyncHandl
     notes
   });
 
+  // Notifica o profissional. Falha do email não impede a aprovação.
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateRecemFormadoApproved({
+        therapistName: therapist.displayName || "profissional",
+        painelUrl: buildPlanosUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("recem_formado_doc_approve_email_failed", e, { therapistUid: targetUid });
+  }
+
   return res.json({ ok: true, plano: "recem-formado-eligible" });
 }));
 
@@ -4164,6 +4213,21 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/rejeitar", asyncHand
     reviewedBy: adminAuth.email,
     reason
   });
+
+  // Notifica o profissional com o motivo. Falha do email não impede a rejeição.
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateRecemFormadoRejected({
+        therapistName: therapist.displayName || "profissional",
+        reason,
+        retryUrl: buildComprovanteRecemFormadoUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("recem_formado_doc_reject_email_failed", e, { therapistUid: targetUid });
+  }
 
   return res.json({ ok: true, plano: "trial", reason });
 }));
