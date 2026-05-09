@@ -172,7 +172,16 @@ const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOU
 const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 49.90);
 const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 120.00);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
-const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 14);
+
+// Trial diferenciado por tier intencionado no cadastro:
+//   - "estudante"     →  0 dias (irrelevante: vira student-active após validar doc)
+//   - "recem-formado" → 30 dias (1 mês pra validar inscrição + decidir contratar)
+//   - "profissional"  →  7 dias (default, padrão SaaS de telessaúde)
+//   - default         →  7 dias (cadastros sem flag explícita = profissional)
+// THERAPY_TRIAL_DAYS mantido por compat — usado se intendedTier não vier.
+const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 7);
+const THERAPY_TRIAL_DAYS_PROFISSIONAL  = Number(process.env.THERAPY_TRIAL_DAYS_PROFISSIONAL  || 7);
+const THERAPY_TRIAL_DAYS_RECEM_FORMADO = Number(process.env.THERAPY_TRIAL_DAYS_RECEM_FORMADO || 30);
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
 // Janela mínima (em horas) para o paciente cancelar uma sessão futura. Abaixo
 // disso, só o terapeuta pode cancelar. Default 24h alinha com a expectativa
@@ -215,7 +224,9 @@ module.exports = {
   ADMIN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
-  THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_PLAN_NAME,
+  THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
+  THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   RESEND_API_KEY, EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,

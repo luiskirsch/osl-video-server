@@ -26,7 +26,9 @@ const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
-  THERAPY_PLAN_NAME, THERAPY_TRIAL_DAYS, THERAPY_FRONTEND_BASE,
+  THERAPY_PLAN_NAME,
+  THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
+  THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
 } = require("../config");
@@ -70,6 +72,44 @@ async function loadTherapist(uid) {
   const db = getDb();
   const snap = await db.collection("therapists").doc(uid).get();
   return snap.exists ? snap.data() : null;
+}
+
+// Determina se o profissional pode usar funções clínicas (criar consulta,
+// receita, documento, paciente). Regra de produto:
+//   - student-active        → libera (tier estudante gratuito)
+//   - pro                   → libera (assinatura paga e ativa)
+//   - trial COM trialUntil > now → libera (período gratuito)
+//   - qualquer outro estado → bloqueia (trial expirado, canceled, expired,
+//                              recem-formado-eligible que não contratou ainda,
+//                              pending-review além do trial)
+// Retorna { ok: bool, reason?: string, plano: string, trialUntil?: number }
+function evaluatePlanAccess(therapist) {
+  if (!therapist) return { ok: false, reason: "PROFISSIONAL_NAO_REGISTRADO", plano: null };
+  const plano = therapist.plano || "trial";
+  if (plano === "student-active" || plano === "pro") {
+    return { ok: true, plano };
+  }
+  const until = therapist.trialUntil?.toMillis ? therapist.trialUntil.toMillis() : Number(therapist.trialUntil) || 0;
+  if (until && until > Date.now()) {
+    return { ok: true, plano, trialUntil: until };
+  }
+  return { ok: false, reason: "TRIAL_EXPIRADO", plano, trialUntil: until || null };
+}
+
+// Middleware-style helper: usa em endpoints que criam recursos clínicos.
+// Retorna o therapist se ok, ou escreve 402 e devolve null pra encerrar handler.
+async function requirePaidPlan(req, res, uid) {
+  const therapist = await loadTherapist(uid);
+  const access = evaluatePlanAccess(therapist);
+  if (!access.ok) {
+    sendError(res, 402, access.reason, {
+      plano: access.plano,
+      trialUntil: access.trialUntil || null,
+      detail: "Sua trial expirou ou você não tem assinatura ativa. Acesse o seu perfil para contratar um plano."
+    });
+    return null;
+  }
+  return therapist;
 }
 
 // Resolve o e-mail do terapeuta. Prefere o snapshot salvo em
@@ -182,6 +222,14 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const wrappedDEK    = String(req.body?.wrappedDEK    || "").trim();
   const wrappedDEKIv  = String(req.body?.wrappedDEKIv  || "").trim();
   const consentLgpd   = !!req.body?.consentLgpd;
+  // Tier escolhido na landing — define duração do trial. Aceita: "estudante",
+  // "recem-formado" (alias: "recem"), "profissional" (default).
+  const intendedTierRaw = String(req.body?.intendedTier || "").trim().toLowerCase();
+  const intendedTier =
+    intendedTierRaw === "estudante"      ? "estudante"     :
+    intendedTierRaw === "recem"          ? "recem-formado" :
+    intendedTierRaw === "recem-formado"  ? "recem-formado" :
+    "profissional";
 
   if (!displayName)   return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!consentLgpd)   return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
@@ -208,8 +256,14 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const lockedWrappedDEKIv = existingData?.wrappedDEKIv || wrappedDEKIv;
 
   // Trial é setado uma vez na criação; não estende em re-cadastros.
+  // Duração depende do tier escolhido: profissional 7d, recém-formado 30d,
+  // estudante 0 (vai virar student-active após validar doc).
+  const trialDays =
+    intendedTier === "estudante"      ? 0 :
+    intendedTier === "recem-formado"  ? THERAPY_TRIAL_DAYS_RECEM_FORMADO :
+                                         THERAPY_TRIAL_DAYS_PROFISSIONAL;
   const trialUntil = existingData?.trialUntil
-    || (Date.now() + THERAPY_TRIAL_DAYS * 24 * 60 * 60 * 1000);
+    || (Date.now() + trialDays * 24 * 60 * 60 * 1000);
 
   // Snapshot do e-mail do Firebase Auth pra usar como Reply-To em e-mails
   // automáticos (paciente que aperta Reply cai aqui). Falha silenciosa se
@@ -235,6 +289,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     wrappedDEKIv:  lockedWrappedDEKIv,
     role: "therapist",
     plano: existingData?.plano || "trial",
+    intendedTier: existingData?.intendedTier || intendedTier,
     trialUntil,
     consentLgpd: true,
     consentLgpdAt: existingData?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
@@ -784,7 +839,21 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const therapist = await loadTherapist(uid);
   if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
 
-  return res.json({ ok: true, therapist });
+  const access = evaluatePlanAccess(therapist);
+  const trialUntilMs = therapist.trialUntil?.toMillis ? therapist.trialUntil.toMillis() : Number(therapist.trialUntil) || 0;
+  const daysLeft = trialUntilMs ? Math.max(0, Math.ceil((trialUntilMs - Date.now()) / 86_400_000)) : null;
+
+  return res.json({
+    ok: true,
+    therapist,
+    planAccess: {
+      canUseFeatures: access.ok,
+      reason: access.reason || null,
+      plano: access.plano,
+      trialUntil: trialUntilMs || null,
+      trialDaysLeft: daysLeft
+    }
+  });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -807,8 +876,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
 
   const patientName = String(req.body?.patientName || "Paciente").trim().slice(0, PATIENT_NAME_MAX);
   const patientId   = String(req.body?.patientId || "").trim();
@@ -1691,6 +1760,9 @@ router.post("/therapy/pacientes", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
   const ciphertext = String(req.body?.ciphertext || "").trim();
   const iv         = String(req.body?.iv         || "").trim();
   if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
@@ -2191,8 +2263,8 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
 
   const formCiphertext       = String(req.body?.formCiphertext || "").trim();
   const formIv               = String(req.body?.formIv || "").trim();
@@ -2603,8 +2675,8 @@ router.post("/therapy/documentos", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
 
   const tipo = String(req.body?.tipo || "").trim().toLowerCase();
   if (!DOCUMENTO_TIPOS.has(tipo)) {
