@@ -112,6 +112,28 @@ async function requirePaidPlan(req, res, uid) {
   return therapist;
 }
 
+// Bloqueia features que estudantes não podem usar legalmente: emitir receitas
+// digitais e documentos médicos (atestado, encaminhamento, relatório). Aluno
+// no último ano de Psicologia/Medicina não tem habilitação no conselho —
+// só pode emitir esses documentos após formação + inscrição CRP/CRM.
+//
+// Encadear DEPOIS de requirePaidPlan: primeiro garante plano ativo, depois
+// confere se o tier permite a feature.
+function rejectIfStudent(therapist, res) {
+  const intended = therapist?.intendedTier;
+  const plano = therapist?.plano;
+  const isStudent = intended === "estudante"
+    || plano === "student-active"
+    || plano === "student-pending-review";
+  if (isStudent) {
+    sendError(res, 403, "TIER_ESTUDANTE_NAO_PERMITE", {
+      detail: "Receitas digitais e documentos médicos só ficam disponíveis após formação e inscrição no conselho (CRP/CRM)."
+    });
+    return true;
+  }
+  return false;
+}
+
 // Resolve o e-mail do terapeuta. Prefere o snapshot salvo em
 // therapists/{uid}.email (gravado em /profissional/registrar). Se ausente
 // (terapeutas anteriores ao snapshot), faz lazy lookup via Firebase Admin
@@ -2265,6 +2287,7 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
 
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
+  if (rejectIfStudent(therapist, res)) return;
 
   const formCiphertext       = String(req.body?.formCiphertext || "").trim();
   const formIv               = String(req.body?.formIv || "").trim();
@@ -2677,6 +2700,7 @@ router.post("/therapy/documentos", asyncHandler(async (req, res) => {
 
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
+  if (rejectIfStudent(therapist, res)) return;
 
   const tipo = String(req.body?.tipo || "").trim().toLowerCase();
   if (!DOCUMENTO_TIPOS.has(tipo)) {
