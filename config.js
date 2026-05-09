@@ -173,14 +173,14 @@ const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECE
 const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 120.00);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 
-// Trial diferenciado por tier intencionado no cadastro:
+// Trial diferenciado por plano intencionado no cadastro:
 //   - "estudante"     →  0 dias (irrelevante: vira student-active após validar doc)
 //   - "recem-formado" → 30 dias (1 mês pra validar inscrição + decidir contratar)
-//   - "profissional"  →  7 dias (default, padrão SaaS de telessaúde)
-//   - default         →  7 dias (cadastros sem flag explícita = profissional)
+//   - "profissional"  → 30 dias (período de teste padrão)
+//   - default         → 30 dias (cadastros sem flag explícita = profissional)
 // THERAPY_TRIAL_DAYS mantido por compat — usado se intendedTier não vier.
-const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 7);
-const THERAPY_TRIAL_DAYS_PROFISSIONAL  = Number(process.env.THERAPY_TRIAL_DAYS_PROFISSIONAL  || 7);
+const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 30);
+const THERAPY_TRIAL_DAYS_PROFISSIONAL  = Number(process.env.THERAPY_TRIAL_DAYS_PROFISSIONAL  || 30);
 const THERAPY_TRIAL_DAYS_RECEM_FORMADO = Number(process.env.THERAPY_TRIAL_DAYS_RECEM_FORMADO || 30);
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
 // Janela mínima (em horas) para o paciente cancelar uma sessão futura. Abaixo
