@@ -38,7 +38,9 @@ const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MA
 const {
   isValidSigla: isValidConselhoSigla,
   normalizeSigla: normalizeConselhoSigla,
-  resolveSiglaFromTherapist
+  resolveSiglaFromTherapist,
+  therapistCan,
+  getConselho
 } = require("../services/professional-councils");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
@@ -115,6 +117,31 @@ async function requirePaidPlan(req, res, uid) {
     return null;
   }
   return therapist;
+}
+
+// Bloqueia ações cujo conselho do profissional não habilita. Encadear DEPOIS
+// de requirePaidPlan + rejectIfStudent. A matriz de capabilities está em
+// services/professional-councils.js (cada conselho lista suas features).
+//
+// Capabilities:
+//   "receita"             — só CRM (prescrição medicamentosa, RDC ANVISA)
+//   "documentos-clinicos" — CRM + CRP + CRN + CRO (atestado de doença,
+//                           relatório, encaminhamento). CRESS/CREFITO/CRFa/
+//                           CREF não emitem porque não é prerrogativa do
+//                           conselho deles.
+//
+// Retorna true se ok; escreve 403 + retorna false se bloqueado.
+function requireCapability(therapist, res, capability, hint) {
+  if (!therapistCan(therapist, capability)) {
+    const sigla = resolveSiglaFromTherapist(therapist) || "desconhecido";
+    sendError(res, 403, "CONSELHO_NAO_AUTORIZADO", {
+      capability,
+      conselho: sigla,
+      detail: hint || `Seu conselho (${sigla}) não habilita esta ação.`
+    });
+    return false;
+  }
+  return true;
 }
 
 // Bloqueia features que estudantes não podem usar legalmente: emitir receitas
@@ -922,6 +949,13 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const trialUntilMs = therapist.trialUntil?.toMillis ? therapist.trialUntil.toMillis() : Number(therapist.trialUntil) || 0;
   const daysLeft = trialUntilMs ? Math.max(0, Math.ceil((trialUntilMs - Date.now()) / 86_400_000)) : null;
 
+  // Capabilities derivadas do conselho — frontend usa pra ocultar botões
+  // (ex.: nutricionista não vê 'Emitir receita'). Backend continua sendo
+  // a fonte da verdade via requireCapability nos endpoints.
+  const conselhoSigla = resolveSiglaFromTherapist(therapist);
+  const conselho = getConselho(conselhoSigla);
+  const capabilities = conselho?.capabilities || [];
+
   return res.json({
     ok: true,
     therapist,
@@ -931,6 +965,12 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
       plano: access.plano,
       trialUntil: trialUntilMs || null,
       trialDaysLeft: daysLeft
+    },
+    conselho: {
+      sigla: conselhoSigla || null,
+      label: conselho?.label || null,
+      profissional: conselho?.profissional || null,
+      capabilities
     }
   });
 }));
@@ -2345,6 +2385,8 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
+  if (!requireCapability(therapist, res, "receita",
+    "Apenas profissionais com CRM podem emitir receitas medicamentosas (RDC ANVISA).")) return;
 
   const formCiphertext       = String(req.body?.formCiphertext || "").trim();
   const formIv               = String(req.body?.formIv || "").trim();
@@ -2416,6 +2458,13 @@ router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
   const r = snap.data();
   if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
+
+  // Defesa em profundidade: bloqueia edição se o conselho atual do
+  // profissional não habilita "receita" (ex.: terapeuta trocou tipoConselho
+  // de CRM pra CRESS depois de criar o draft).
+  const therapistDoc = await loadTherapist(uid);
+  if (!requireCapability(therapistDoc, res, "receita",
+    "Apenas profissionais com CRM podem editar receitas.")) return;
 
   const updates = {
     formCiphertext, formIv,
@@ -2492,6 +2541,13 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   const r = snap.data();
   if (r.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (r.status === "signed")  return sendError(res, 409, "RECEITA_JA_ASSINADA");
+
+  // Defesa em profundidade: revalida capability no momento da assinatura
+  // (ato legal). Bloqueia se o profissional trocou pra um conselho que
+  // não habilita receita depois de criar o draft.
+  const therapistDoc = await loadTherapist(uid);
+  if (!requireCapability(therapistDoc, res, "receita",
+    "Apenas profissionais com CRM podem assinar receitas medicamentosas.")) return;
 
   // Reutiliza token pré-gerado se ainda válido. Senão fallback (PDF pode estar
   // sem QR ou com QR que não bate, mas a receita continua íntegra).
@@ -2758,6 +2814,8 @@ router.post("/therapy/documentos", asyncHandler(async (req, res) => {
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
+  if (!requireCapability(therapist, res, "documentos-clinicos",
+    "Atestado de doença, encaminhamento e relatório clínico só podem ser emitidos por médicos (CRM) e psicólogos (CRP).")) return;
 
   const tipo = String(req.body?.tipo || "").trim().toLowerCase();
   if (!DOCUMENTO_TIPOS.has(tipo)) {
@@ -2821,6 +2879,12 @@ router.patch("/therapy/documentos/:id", asyncHandler(async (req, res) => {
   const d = snap.data();
   if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (d.status === "signed")  return sendError(res, 409, "DOCUMENTO_JA_ASSINADO");
+
+  // Defesa em profundidade: revalida capability se o profissional trocou
+  // de conselho depois de criar o draft.
+  const therapistDoc = await loadTherapist(uid);
+  if (!requireCapability(therapistDoc, res, "documentos-clinicos",
+    "Apenas médicos (CRM) e psicólogos (CRP) podem editar documentos clínicos.")) return;
 
   await ref.set({
     formCiphertext, formIv,
@@ -2888,6 +2952,11 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
   const d = snap.data();
   if (d.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (d.status === "signed")  return sendError(res, 409, "DOCUMENTO_JA_ASSINADO");
+
+  // Defesa em profundidade no momento da assinatura (ato legal).
+  const therapistDoc = await loadTherapist(uid);
+  if (!requireCapability(therapistDoc, res, "documentos-clinicos",
+    "Apenas médicos (CRM) e psicólogos (CRP) podem assinar documentos clínicos.")) return;
 
   let deliveryToken    = d.deliveryToken    || null;
   let deliveryTokenExp = d.deliveryTokenExp || null;

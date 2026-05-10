@@ -66,9 +66,11 @@ const CONSELHOS = {
     label: "CRN — Conselho Regional de Nutricionistas",
     profissional: "Nutricionista",
     numberFormat: "Ex.: CRN-2 12345",
-    // CRN pode emitir prescrição dietética (não medicamentosa, fora do escopo
-    // de "receita"). Mantém docs clínicos pra relatórios nutricionais.
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
+    // CRN tem prescrição dietética (não medicamentosa) — quando tivermos
+    // endpoint específico pra prescrição nutricional, adiciona capability
+    // própria. "documentos-clinicos" hoje cobre atestado/encaminhamento
+    // médico, restrito a CRM/CRP por decisão de produto.
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CRO: {
@@ -76,10 +78,10 @@ const CONSELHOS = {
     label: "CRO — Conselho Regional de Odontologia (ansiedade odontológica, bruxismo, DTM)",
     profissional: "Cirurgião(ã)-dentista",
     numberFormat: "Ex.: CRO-SC 12345",
-    // Dentista pode prescrever dentro do escopo odontológico (RDC ANVISA),
-    // mas não habilitamos "receita" no MVP — escopo controverso pra
-    // teleodontologia. Avalia caso a caso quando tiver demanda.
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
+    // Dentista emite atestado odontológico, mas o endpoint /documentos
+    // hoje gera atestado/encaminhamento médico — restrito a CRM/CRP.
+    // Atestado odontológico precisa de endpoint próprio (futuro).
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CREF: {
@@ -138,6 +140,12 @@ function resolveSiglaFromTherapist(therapist) {
   return "";
 }
 
+// Atalho ergonômico: dado um doc therapist, responde se o conselho dele
+// habilita a capability. Equivale a hasCapability(resolveSiglaFromTherapist(t), cap).
+function therapistCan(therapist, capability) {
+  return hasCapability(resolveSiglaFromTherapist(therapist), capability);
+}
+
 module.exports = {
   CONSELHOS,
   ALL_SIGLAS,
@@ -147,5 +155,6 @@ module.exports = {
   isValidSigla,
   hasCapability,
   canUseTier,
-  resolveSiglaFromTherapist
+  resolveSiglaFromTherapist,
+  therapistCan
 };
