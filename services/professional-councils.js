@@ -9,7 +9,12 @@
 //   "anotacoes"               — anotações clínicas E2EE (todos têm)
 //   "atestado-comparecimento" — atestado de presença em sessão (todos têm)
 //   "documentos-clinicos"     — relatório clínico, encaminhamento, atestado de doença
-//   "receita"                 — prescrição medicamentosa (RDC ANVISA)
+//   "receita"                 — gate de acesso aos endpoints de receita medicamentosa
+//
+// Quando "receita" está habilitada, prescriptionTypes define QUAIS tipos:
+//   "mip"               — medicamentos isentos de prescrição (livre prescrição)
+//   "insumo-injetavel"  — insumos/injetáveis estéticos (Ac. COFFITO 735/2024 p/ fisio)
+//   "controlado"        — Portaria SVS/MS 344/1998 (psicotrópicos, antibióticos etc) — só CRM
 //
 // eligibleTiers controla quais tiers de plano cada conselho pode escolher
 // no cadastro. Tier "estudante" exige clínica-escola/internato, que só
@@ -35,6 +40,8 @@ const CONSELHOS = {
     profissional: "Médico(a)",
     numberFormat: "Ex.: 123456-SC",
     capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita"],
+    // Médico prescreve qualquer tipo, incluindo controlados (Portaria 344/98).
+    prescriptionTypes: ["mip", "insumo-injetavel", "controlado"],
     eligibleTiers: ["estudante", "recem-formado", "profissional"]
   },
   CRESS: {
@@ -49,8 +56,26 @@ const CONSELHOS = {
     sigla: "CREFITO",
     label: "CREFITO — Conselho Regional de Fisioterapia e Terapia Ocupacional",
     profissional: "Terapeuta ocupacional / Fisioterapeuta",
-    numberFormat: "Ex.: 12345-TO",
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
+    numberFormat: "Ex.: 12345-F (fisio) / 12345-TO (terapeuta ocupacional)",
+    // Capabilities base do conselho. "receita" só fica disponível pra fisio/TO
+    // que tenham subtipo definido (ver subtipos abaixo). Sem subtipo, sem receita.
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "receita"],
+    prescriptionTypes: [], // delegado pro subtipo — fisio vs TO têm escopos diferentes
+    requiresSubtipo: true,
+    subtipos: {
+      // Fisioterapeuta: MIPs (livre) + insumos/injetáveis (Acórdão COFFITO 735/2024).
+      // Não controlado (Portaria 344 — privativo CRM).
+      fisio: {
+        label: "Fisioterapeuta",
+        prescriptionTypes: ["mip", "insumo-injetavel"]
+      },
+      // Terapeuta ocupacional: só MIPs (livre prescrição).
+      // Acórdão 735 não menciona TO; sem base legal pra injetáveis/controlados.
+      to: {
+        label: "Terapeuta ocupacional",
+        prescriptionTypes: ["mip"]
+      }
+    },
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CRFA: {
@@ -167,6 +192,59 @@ function therapistCan(therapist, capability) {
   return hasCapability(resolveSiglaFromTherapist(therapist), capability);
 }
 
+// True se o conselho exige escolha de subtipo no cadastro (ex.: CREFITO
+// precisa distinguir fisio vs TO porque cada um tem prescriptionTypes diferentes).
+function requiresSubtipo(sigla) {
+  const c = getConselho(sigla);
+  return !!(c && c.requiresSubtipo);
+}
+
+// Retorna os subtipos válidos pra um conselho (ex.: { fisio: {...}, to: {...} }).
+// Vazio se o conselho não requer subtipo.
+function getSubtipos(sigla) {
+  const c = getConselho(sigla);
+  return c?.subtipos || {};
+}
+
+// Valida se uma string é um subtipo aceito pro conselho.
+function isValidSubtipo(sigla, subtipo) {
+  if (!subtipo) return false;
+  const subs = getSubtipos(sigla);
+  return Object.prototype.hasOwnProperty.call(subs, String(subtipo).trim().toLowerCase());
+}
+
+// Lista os tipos de prescrição que o profissional pode emitir, baseado em
+// conselho + subtipo (quando aplicável). Retorna array vazio se não tem
+// capability "receita" ou se subtipo é exigido mas não foi definido.
+function getPrescriptionTypesForTherapist(therapist) {
+  const sigla = resolveSiglaFromTherapist(therapist);
+  const c = getConselho(sigla);
+  if (!c) return [];
+  if (!c.capabilities?.includes("receita")) return [];
+
+  // Conselho com subtipo (ex.: CREFITO): resolve via subtipo do therapist.
+  if (c.requiresSubtipo) {
+    const sub = String(therapist?.subtipoConselho || "").trim().toLowerCase();
+    if (!sub || !c.subtipos?.[sub]) return [];
+    return c.subtipos[sub].prescriptionTypes || [];
+  }
+
+  return c.prescriptionTypes || [];
+}
+
+// True se o profissional pode prescrever esse tipo específico.
+// tipo aceito: "mip" | "insumo-injetavel" | "controlado".
+function canPrescribeType(therapist, tipo) {
+  const allowed = getPrescriptionTypesForTherapist(therapist);
+  return allowed.includes(String(tipo || "").trim().toLowerCase());
+}
+
+const VALID_PRESCRIPTION_TYPES = ["mip", "insumo-injetavel", "controlado"];
+
+function isValidPrescriptionType(tipo) {
+  return VALID_PRESCRIPTION_TYPES.includes(String(tipo || "").trim().toLowerCase());
+}
+
 // True se a sigla é de um conselho regulamentado por lei federal
 // (CRP/CRM/CRESS/CREFITO/CRFa/CRN/CRO/CREF). False pra SEM_CONSELHO.
 function isRegulamentado(sigla) {
@@ -201,6 +279,7 @@ module.exports = {
   CONSELHOS,
   ALL_SIGLAS,
   LEGACY_SIGLAS,
+  VALID_PRESCRIPTION_TYPES,
   normalizeSigla,
   getConselho,
   isValidSigla,
@@ -211,5 +290,11 @@ module.exports = {
   isRegulamentado,
   requiresManualReview,
   acceptedPracticeTypes,
-  isValidPracticeType
+  isValidPracticeType,
+  requiresSubtipo,
+  getSubtipos,
+  isValidSubtipo,
+  getPrescriptionTypesForTherapist,
+  canPrescribeType,
+  isValidPrescriptionType
 };

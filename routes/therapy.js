@@ -43,7 +43,12 @@ const {
   getConselho,
   isRegulamentado: isConselhoRegulamentado,
   requiresManualReview: conselhoRequiresManualReview,
-  isValidPracticeType
+  isValidPracticeType,
+  requiresSubtipo: conselhoRequiresSubtipo,
+  isValidSubtipo: isValidConselhoSubtipo,
+  canPrescribeType,
+  isValidPrescriptionType,
+  getPrescriptionTypesForTherapist
 } = require("../services/professional-councils");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
@@ -315,6 +320,18 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const crp = tipoConselho === "CRP" ? numeroConselho : "";
   const crm = tipoConselho === "CRM" ? numeroConselho : "";
 
+  // Subtipo do conselho — exigido pra CREFITO (fisio vs TO) porque cada um
+  // tem prescriptionTypes diferentes. Outros conselhos ignoram.
+  let subtipoConselho = "";
+  if (tipoConselho && conselhoRequiresSubtipo(tipoConselho)) {
+    const sub = String(req.body?.subtipoConselho || "").trim().toLowerCase();
+    if (!isValidConselhoSubtipo(tipoConselho, sub)) {
+      return sendError(res, 400, "SUBTIPO_CONSELHO_INVALIDO",
+        { hint: `Para ${tipoConselho} informe subtipoConselho válido (fisio, to).` });
+    }
+    subtipoConselho = sub;
+  }
+
   // Campos extras obrigatórios pra SEM_CONSELHO — substituem o "selo do
   // conselho" como trust signal. Validados sempre (mesmo se vazios) pra
   // que o admin tenha o que revisar.
@@ -419,6 +436,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     crm,
     tipoConselho,
     numeroConselho,
+    subtipoConselho,
     especialidade,
     bio,
     e2eeSalt:      lockedSalt,
@@ -451,7 +469,8 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   return res.json({
     ok: true,
     therapist: {
-      uid, displayName, crp, crm, tipoConselho, numeroConselho, especialidade, bio,
+      uid, displayName, crp, crm, tipoConselho, numeroConselho, subtipoConselho,
+      especialidade, bio,
       e2eeSalt:     lockedSalt,
       wrappedDEK:   lockedWrappedDEK,
       wrappedDEKIv: lockedWrappedDEKIv,
@@ -1051,7 +1070,7 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
   if (req.body?.bio !== undefined) {
     updates.bio = String(req.body.bio || "").trim().slice(0, 500);
   }
-  // Conselho profissional: atualização atômica via { tipoConselho, numeroConselho }.
+  // Conselho profissional: atualização atômica via { tipoConselho, numeroConselho, subtipoConselho? }.
   // Espelha em crp/crm pra manter retrocompat com leitores legados.
   if (req.body?.tipoConselho !== undefined || req.body?.numeroConselho !== undefined) {
     const tipoIn = String(req.body?.tipoConselho || "").trim().toUpperCase();
@@ -1062,6 +1081,23 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       updates.numeroConselho = numIn;
       updates.crp = tipo === "CRP" ? numIn : "";
       updates.crm = tipo === "CRM" ? numIn : "";
+      // Subtipo: exigido quando o conselho requer (CREFITO).
+      if (conselhoRequiresSubtipo(tipo)) {
+        const sub = String(req.body?.subtipoConselho || "").trim().toLowerCase();
+        if (!isValidConselhoSubtipo(tipo, sub)) {
+          return sendError(res, 400, "SUBTIPO_CONSELHO_INVALIDO",
+            { hint: `Para ${tipo} informe subtipoConselho válido (fisio, to).` });
+        }
+        updates.subtipoConselho = sub;
+      } else {
+        updates.subtipoConselho = "";
+      }
+    }
+  } else if (req.body?.subtipoConselho !== undefined) {
+    // PATCH só do subtipo (ex.: CREFITO mudou de TO pra fisio sem trocar conselho).
+    const sub = String(req.body.subtipoConselho || "").trim().toLowerCase();
+    if (isValidConselhoSubtipo(therapist.tipoConselho, sub)) {
+      updates.subtipoConselho = sub;
     }
   } else {
     // Compat: PATCH { crp } ou { crm } isolado (clientes antigos) — atualiza
@@ -1140,6 +1176,7 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const conselhoSigla = resolveSiglaFromTherapist(therapist);
   const conselho = getConselho(conselhoSigla);
   const capabilities = conselho?.capabilities || [];
+  const prescriptionTypes = getPrescriptionTypesForTherapist(therapist);
 
   return res.json({
     ok: true,
@@ -1155,7 +1192,9 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
       sigla: conselhoSigla || null,
       label: conselho?.label || null,
       profissional: conselho?.profissional || null,
-      capabilities
+      subtipo: therapist.subtipoConselho || null,
+      capabilities,
+      prescriptionTypes
     }
   });
 }));
@@ -2571,7 +2610,26 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
   if (!requireCapability(therapist, res, "receita",
-    "Apenas profissionais com CRM podem emitir receitas medicamentosas (RDC ANVISA).")) return;
+    "Seu conselho não habilita emissão de receita.")) return;
+
+  // tipoPrescricao define o tipo regulatório da receita:
+  //   "mip"               — livre prescrição (medicamentos isentos de prescrição)
+  //   "insumo-injetavel"  — insumos/injetáveis estéticos (Acórdão COFFITO 735/2024)
+  //   "controlado"        — Portaria SVS/MS 344/1998 (psicotrópicos, antibióticos)
+  // Capability matrix por conselho em professional-councils.js.
+  const tipoPrescricao = String(req.body?.tipoPrescricao || "").trim().toLowerCase();
+  if (!isValidPrescriptionType(tipoPrescricao)) {
+    return sendError(res, 400, "TIPO_PRESCRICAO_INVALIDO",
+      { hint: "Valores aceitos: mip, insumo-injetavel, controlado." });
+  }
+  if (!canPrescribeType(therapist, tipoPrescricao)) {
+    const allowed = getPrescriptionTypesForTherapist(therapist);
+    return sendError(res, 403, "TIPO_PRESCRICAO_NAO_AUTORIZADO", {
+      tipoPrescricao,
+      allowed,
+      detail: `Seu conselho não permite emitir receita do tipo "${tipoPrescricao}". Tipos disponíveis pra você: ${allowed.length ? allowed.join(", ") : "nenhum"}.`
+    });
+  }
 
   const formCiphertext       = String(req.body?.formCiphertext || "").trim();
   const formIv               = String(req.body?.formIv || "").trim();
@@ -2600,6 +2658,12 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
     patientNameSnapshot,
     sessionId,
     status: "draft",
+    tipoPrescricao,
+    // Snapshot do conselho/subtipo do prescritor no momento da criação.
+    // Imutável depois — se profissional trocar conselho, receita preserva quem
+    // realmente prescreveu (auditoria).
+    prescritorTipoConselho: resolveSiglaFromTherapist(therapist) || null,
+    prescritorSubtipoConselho: therapist.subtipoConselho || null,
     formCiphertext,
     formIv,
     quantidadePrescrita,
@@ -2609,9 +2673,13 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
 
-  await logAudit({ type: "receita_created", receitaId, therapistUid: uid, patientId });
+  await logAudit({
+    type: "receita_created",
+    receitaId, therapistUid: uid, patientId,
+    tipoPrescricao
+  });
 
-  return res.json({ ok: true, receitaId });
+  return res.json({ ok: true, receitaId, tipoPrescricao });
 }));
 
 // PATCH /therapy/receitas/:id — edita rascunho (não permite após assinada)
@@ -2732,7 +2800,17 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   // não habilita receita depois de criar o draft.
   const therapistDoc = await loadTherapist(uid);
   if (!requireCapability(therapistDoc, res, "receita",
-    "Apenas profissionais com CRM podem assinar receitas medicamentosas.")) return;
+    "Seu conselho não habilita assinatura de receita.")) return;
+
+  // Revalida o TIPO específico — profissional pode ter mudado de subtipo
+  // (ex.: CREFITO de fisio pra TO) entre criar e assinar. tipoPrescricao
+  // foi snapshot no doc na criação; comparamos com matriz atual.
+  if (r.tipoPrescricao && !canPrescribeType(therapistDoc, r.tipoPrescricao)) {
+    return sendError(res, 403, "TIPO_PRESCRICAO_NAO_AUTORIZADO", {
+      tipoPrescricao: r.tipoPrescricao,
+      detail: `Seu conselho atual não permite emitir receita do tipo "${r.tipoPrescricao}".`
+    });
+  }
 
   // Reutiliza token pré-gerado se ainda válido. Senão fallback (PDF pode estar
   // sem QR ou com QR que não bate, mas a receita continua íntegra).
