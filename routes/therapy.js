@@ -3159,18 +3159,26 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
     cnpj:      c.cnpj || null
   };
 
+  // Conselho genérico — mantém crp/crm legados pra retrocompat com clientes
+  // antigos que ainda lêem esses campos.
+  const conselhoSigla = resolveSiglaFromTherapist(therapist);
+  const conselhoMeta  = getConselho(conselhoSigla);
+
   return res.json({
     ok: true,
     profissional: {
       uid,
-      displayName:   therapist.displayName || "",
-      crp:           therapist.crp || "",
-      crm:           therapist.crm || "",
-      rqe:           therapist.rqe || "",
-      especialidade: therapist.especialidade || "",
-      bio:           therapist.bio || "",
-      consultorio:   consultorioPublico,
-      verifiedAt:    therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null
+      displayName:    therapist.displayName || "",
+      crp:            therapist.crp || "",
+      crm:            therapist.crm || "",
+      rqe:            therapist.rqe || "",
+      tipoConselho:   conselhoSigla || "",
+      numeroConselho: therapist.numeroConselho || therapist.crp || therapist.crm || "",
+      conselhoLabel:  conselhoMeta?.label || "",
+      especialidade:  therapist.especialidade || "",
+      bio:            therapist.bio || "",
+      consultorio:    consultorioPublico,
+      verifiedAt:     therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null
     }
   });
 }));
