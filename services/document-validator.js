@@ -29,6 +29,7 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const { logError, logInfo } = require("../logger");
 const { ANTHROPIC_API_KEY } = require("../config");
+const { ALL_SIGLAS, isValidSigla, normalizeSigla } = require("./professional-councils");
 
 // Cursos elegíveis pro tier estudante (clínica-escola é coisa de Psicologia,
 // mas internato/estágio supervisionado de Medicina também conta porque eles
@@ -176,18 +177,35 @@ class ClaudeVisionValidator extends BaseValidator {
     };
   }
 
-  // Valida comprovante de registro profissional (carteira CRP/CRM ou print do
-  // sistema oficial — e-Psi pra psicólogos, portal CFM pra médicos). Extrai
-  // a data de inscrição no conselho. Decisão automática:
+  // Valida comprovante de registro profissional (carteira do conselho ou print
+  // do sistema oficial). Aceita qualquer conselho suportado (CRP, CRM, CRESS,
+  // CREFITO, CRFa, CRN, CRO, CREF). Extrai a data de inscrição no conselho.
+  // Decisão automática:
   //   inscrição <= 12 meses atrás + confiança alta → approved (recém-formado)
   //   inscrição > 12 meses atrás                   → rejected (não é recém-formado)
   //   confiança intermediária                       → manual-review
-  async validateRegistration({ fileBase64, mediaType, expectedName, expectedCrp, expectedCrm, requestId = "" }) {
+  //
+  // Params:
+  //   expectedConselho — sigla esperada (CRP, CRM, CRESS, ...). Se ausente,
+  //                      aceita qualquer conselho válido.
+  //   expectedRegistro — número esperado. Match fuzzy ignora formatação/UF.
+  async validateRegistration({
+    fileBase64, mediaType, expectedName,
+    expectedConselho, expectedRegistro,
+    expectedCrp, expectedCrm,  // legados — usados se expectedConselho ausente
+    requestId = ""
+  }) {
     if (!fileBase64) return rejected({ reason: "ARQUIVO_AUSENTE", provider: this.name });
     if (!isImageOrPdf(mediaType)) return rejected({ reason: "FORMATO_NAO_SUPORTADO", provider: this.name });
 
+    // Compat: se vier { expectedCrp } sem expectedConselho, mapeia.
+    let conselhoEsperado = expectedConselho ? normalizeSigla(expectedConselho) : "";
+    let registroEsperado = String(expectedRegistro || "").trim();
+    if (!conselhoEsperado && expectedCrp) { conselhoEsperado = "CRP"; registroEsperado = String(expectedCrp).trim(); }
+    if (!conselhoEsperado && expectedCrm) { conselhoEsperado = "CRM"; registroEsperado = String(expectedCrm).trim(); }
+
     const result = await this._callClaude({
-      prompt: buildRegistrationPrompt({ expectedName, expectedCrp, expectedCrm }),
+      prompt: buildRegistrationPrompt({ expectedName, expectedConselho: conselhoEsperado, expectedRegistro: registroEsperado }),
       fileBase64, mediaType, requestId,
       emptyFallback: emptyRegistrationExtracted
     });
@@ -196,7 +214,10 @@ class ClaudeVisionValidator extends BaseValidator {
 
     const extracted = normalizeRegistrationExtracted(parsed);
     const verdict = applyRegistrationValidationRules({
-      extracted, expectedName, expectedCrp, expectedCrm,
+      extracted,
+      expectedName,
+      expectedConselho: conselhoEsperado,
+      expectedRegistro: registroEsperado,
       llmConfidence: parsed.confidence
     });
 
@@ -344,22 +365,32 @@ function emptyExtracted() {
 
 // ─── Registration (CRP/CRM) helpers ─────────────────────────────────────
 
-function buildRegistrationPrompt({ expectedName, expectedCrp, expectedCrm }) {
-  return `Você é um validador de registros profissionais brasileiros (CRP do CFP, CRM do CFM). Recebeu um documento que pode ser:
-- Carteira/cédula profissional emitida pelo conselho
-- Print do sistema e-Psi (psicólogos) ou portal de busca do CFM (médicos)
+function buildRegistrationPrompt({ expectedName, expectedConselho, expectedRegistro }) {
+  return `Você é um validador de registros profissionais brasileiros. Recebeu um documento que pode ser:
+- Carteira/cédula profissional emitida por um conselho de classe
+- Print de sistema oficial de busca do conselho (e-Psi/CFP, portal CFM, CFESS, COFFITO, CFFa, CFN, CFO, CONFEF)
 - Declaração/certidão de inscrição no conselho
+
+Conselhos suportados (extraia a sigla EXATA desta lista; nunca invente):
+- CRP   — Conselho Regional de Psicologia (psicólogos)
+- CRM   — Conselho Regional de Medicina (médicos, psiquiatras)
+- CRESS — Conselho Regional de Serviço Social (assistentes sociais)
+- CREFITO — Conselho Regional de Fisioterapia e Terapia Ocupacional (fisioterapeutas, TOs)
+- CRFA  — Conselho Regional de Fonoaudiologia (fonoaudiólogos; também grafado "CRFa")
+- CRN   — Conselho Regional de Nutricionistas (nutricionistas)
+- CRO   — Conselho Regional de Odontologia (cirurgiões-dentistas)
+- CREF  — Conselho Regional de Educação Física (profissionais de Educação Física)
 
 Sua tarefa: extrair dados estruturados e a DATA DE INSCRIÇÃO no conselho. Responda APENAS com JSON válido, sem markdown, no schema abaixo:
 
 {
   "nome": "nome completo do profissional",
-  "conselho": "CFP" ou "CFM" ou "outro",
-  "registro": "número de registro como aparece (ex: '06/12345', '123456-SC')",
-  "regiao": "UF/região do conselho (ex: 'RS', '06')",
+  "conselho": "CRP" | "CRM" | "CRESS" | "CREFITO" | "CRFA" | "CRN" | "CRO" | "CREF" | "outro",
+  "registro": "número de registro como aparece (ex: '06/12345', '123456-SC', '12345-TO')",
+  "regiao": "UF/região do conselho (ex: 'SC', '06', 'CRN-2')",
   "dataInscricao": "data ORIGINAL de inscrição no conselho em formato ISO YYYY-MM-DD, ou null se não conseguir ler",
   "situacao": "status da inscrição (ex: 'ativo', 'regular', 'suspenso', 'cancelado')",
-  "tipoDocumento": "carteira" ou "e-psi-print" ou "cfm-print" ou "declaracao" ou "outro",
+  "tipoDocumento": "carteira" | "sistema-oficial-print" | "declaracao" | "outro",
   "confidence": 0.0 a 1.0,
   "observacoes": "QR code presente, assinatura digital, sinais de adulteração, screenshot zoado, etc"
 }
@@ -367,14 +398,14 @@ Sua tarefa: extrair dados estruturados e a DATA DE INSCRIÇÃO no conselho. Resp
 Regras importantes:
 1. "dataInscricao" é a data de PRIMEIRA INSCRIÇÃO no conselho (quando o profissional foi habilitado), não a data de validade da carteira nem a data de emissão do documento. Se o doc tem ambas, retorne a de INSCRIÇÃO.
 2. ${expectedName ? `Nome esperado: "${expectedName}". Se não bater (case-insensitive, ignore acentos), reduza confidence drasticamente.` : ""}
-3. ${expectedCrp ? `CRP esperado: "${expectedCrp}". Se aparecer e não bater, reduza confidence drasticamente.` : ""}
-4. ${expectedCrm ? `CRM esperado: "${expectedCrm}". Se aparecer e não bater, reduza confidence drasticamente.` : ""}
-5. "confidence" reflete autenticidade: prints do e-Psi/CFM oficiais são mais confiáveis que fotos de carteira (que podem ser editadas). Reduza pra 0.3-0.5 se a foto da carteira está estranha (datas com fontes inconsistentes, áreas turvas perto da data, etc).
+3. ${expectedConselho ? `Conselho esperado: ${expectedConselho}. Se o documento for de OUTRO conselho, reduza confidence drasticamente — o profissional declarou esse tipo no cadastro.` : ""}
+4. ${expectedRegistro ? `Número de registro esperado: "${expectedRegistro}". Se aparecer e não bater (compare apenas dígitos), reduza confidence drasticamente.` : ""}
+5. "confidence" reflete autenticidade: prints de sistemas oficiais são mais confiáveis que fotos de carteira (que podem ser editadas). Reduza pra 0.3-0.5 se a foto está estranha (datas com fontes inconsistentes, áreas turvas perto da data, etc).
 6. Não invente dados. Se não conseguir ler um campo, retorne null/string vazia.
-7. Se o documento não é um registro profissional do CFP/CFM (ex: declaração de matrícula, RG, comprovante de pagamento), retorne confidence ≤ 0.2.`;
+7. Se o documento não é um registro profissional de nenhum dos conselhos listados (ex: declaração de matrícula, RG, comprovante de pagamento), retorne confidence ≤ 0.2 e conselho="outro".`;
 }
 
-function applyRegistrationValidationRules({ extracted, expectedName, expectedCrp, expectedCrm, llmConfidence }) {
+function applyRegistrationValidationRules({ extracted, expectedName, expectedConselho, expectedRegistro, llmConfidence }) {
   const reasons = [];
   let confidence = clamp01(Number(llmConfidence) || 0);
 
@@ -408,15 +439,19 @@ function applyRegistrationValidationRules({ extracted, expectedName, expectedCrp
     }
   }
 
-  if (expectedCrp && extracted.registro && extracted.conselho === "CFP") {
-    if (!fuzzyRegistroMatch(expectedCrp, extracted.registro)) {
-      reasons.push(`CRP no documento (${extracted.registro}) não bate com cadastro (${expectedCrp})`);
+  // Conselho declarado no cadastro precisa bater com o do documento.
+  // Se o LLM não conseguiu identificar (conselho="outro"), deixa passar
+  // pra revisão manual em vez de rejeitar — pode ser carteira atípica.
+  if (expectedConselho && extracted.conselho && extracted.conselho !== "outro") {
+    if (extracted.conselho !== expectedConselho) {
+      reasons.push(`documento é de ${extracted.conselho}, mas o cadastro informou ${expectedConselho}`);
       return { decision: "rejected", confidence: 0, reasons };
     }
   }
-  if (expectedCrm && extracted.registro && extracted.conselho === "CFM") {
-    if (!fuzzyRegistroMatch(expectedCrm, extracted.registro)) {
-      reasons.push(`CRM no documento (${extracted.registro}) não bate com cadastro (${expectedCrm})`);
+
+  if (expectedRegistro && extracted.registro) {
+    if (!fuzzyRegistroMatch(expectedRegistro, extracted.registro)) {
+      reasons.push(`registro no documento (${extracted.registro}) não bate com cadastro (${expectedRegistro})`);
       return { decision: "rejected", confidence: 0, reasons };
     }
   }
@@ -437,11 +472,16 @@ function applyRegistrationValidationRules({ extracted, expectedName, expectedCrp
 }
 
 function normalizeRegistrationExtracted(raw) {
-  const conselho = String(raw.conselho || "").toUpperCase();
+  // Compat com prompts antigos que usavam CFP/CFM como sigla. Mapeia pra CRP/CRM.
+  const rawConselho = String(raw.conselho || "").toUpperCase();
+  const mapped = rawConselho === "CFP" ? "CRP"
+              : rawConselho === "CFM" ? "CRM"
+              : rawConselho;
+  const conselho = isValidSigla(mapped) ? normalizeSigla(mapped) : "outro";
   const dataInscricao = parseIsoDate(raw.dataInscricao);
   return {
     nome: String(raw.nome || "").trim(),
-    conselho: ["CFP", "CFM"].includes(conselho) ? conselho : "outro",
+    conselho,
     registro: String(raw.registro || "").trim(),
     regiao: String(raw.regiao || "").trim(),
     dataInscricao,

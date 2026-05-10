@@ -36,6 +36,11 @@ const { mercadoPagoFetch } = require("../services/payments");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
+  isValidSigla: isValidConselhoSigla,
+  normalizeSigla: normalizeConselhoSigla,
+  resolveSiglaFromTherapist
+} = require("../services/professional-councils");
+const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
@@ -227,7 +232,11 @@ async function issueLivekitToken({ room, identity, name, ttlMs }) {
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/profissional/registrar
 // Marca o usuário Firebase como profissional. Idempotente — atualiza no merge.
-// Body: { displayName, crp?, crm?, especialidade?, bio?, e2eeSalt }
+// Body: { displayName, tipoConselho?, numeroConselho?, crp?, crm?, especialidade?, bio?, e2eeSalt }
+//   tipoConselho: sigla do conselho (CRP, CRM, CRESS, CREFITO, CRFA, CRN, CRO, CREF)
+//   numeroConselho: número de registro (ex: "12/12345", "123456-SC")
+//   crp/crm: campos legados — aceitos pra retrocompat (cadastros pré-S21).
+//            Se vier sem tipoConselho, infere a partir desses.
 //   e2eeSalt: base64 (16-32 bytes) gerado client-side ao criar conta. Imutável depois.
 // ─────────────────────────────────────────────────────────────────────────
 router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => {
@@ -236,14 +245,38 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   if (!uid) return;
 
   const displayName   = String(req.body?.displayName   || "").trim().slice(0, 80);
-  const crp           = String(req.body?.crp           || "").trim().slice(0, 20).toUpperCase();
-  const crm           = String(req.body?.crm           || "").trim().slice(0, 20).toUpperCase();
   const especialidade = String(req.body?.especialidade || "").trim().slice(0, 60);
   const bio           = String(req.body?.bio           || "").trim().slice(0, 500);
   const e2eeSalt      = String(req.body?.e2eeSalt      || "").trim();
   const wrappedDEK    = String(req.body?.wrappedDEK    || "").trim();
   const wrappedDEKIv  = String(req.body?.wrappedDEKIv  || "").trim();
   const consentLgpd   = !!req.body?.consentLgpd;
+
+  // Resolve conselho: prioriza { tipoConselho, numeroConselho } (S21+);
+  // se ausente, cai pra { crp, crm } legado.
+  const tipoConselhoRaw = String(req.body?.tipoConselho || "").trim().toUpperCase();
+  const numeroConselhoIn = String(req.body?.numeroConselho || "").trim().slice(0, 30).toUpperCase();
+  const crpLegacy = String(req.body?.crp || "").trim().slice(0, 30).toUpperCase();
+  const crmLegacy = String(req.body?.crm || "").trim().slice(0, 30).toUpperCase();
+
+  let tipoConselho = "";
+  let numeroConselho = "";
+  if (isValidConselhoSigla(tipoConselhoRaw) && numeroConselhoIn) {
+    tipoConselho   = normalizeConselhoSigla(tipoConselhoRaw);
+    numeroConselho = numeroConselhoIn;
+  } else if (crpLegacy) {
+    tipoConselho   = "CRP";
+    numeroConselho = crpLegacy;
+  } else if (crmLegacy) {
+    tipoConselho   = "CRM";
+    numeroConselho = crmLegacy;
+  }
+
+  // Espelha no campo legado pra retrocompat com leitores que ainda usam
+  // therapist.crp / therapist.crm (perfil público, receita, documento médico).
+  const crp = tipoConselho === "CRP" ? numeroConselho : "";
+  const crm = tipoConselho === "CRM" ? numeroConselho : "";
+
   // Tier escolhido na landing — define duração do trial. Aceita: "estudante",
   // "recem-formado" (alias: "recem"), "profissional" (default).
   const intendedTierRaw = String(req.body?.intendedTier || "").trim().toLowerCase();
@@ -255,7 +288,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
 
   if (!displayName)   return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!consentLgpd)   return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
-  if (!crp && !crm)   return sendError(res, 400, "REGISTRO_PROFISSIONAL_OBRIGATORIO");
+  if (!tipoConselho || !numeroConselho) return sendError(res, 400, "REGISTRO_PROFISSIONAL_OBRIGATORIO");
   if (!e2eeSalt || e2eeSalt.length < 16 || e2eeSalt.length > 128) {
     return sendError(res, 400, "E2EE_SALT_INVALIDO");
   }
@@ -304,6 +337,8 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     email: therapistEmail,
     crp,
     crm,
+    tipoConselho,
+    numeroConselho,
     especialidade,
     bio,
     e2eeSalt:      lockedSalt,
@@ -328,7 +363,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   return res.json({
     ok: true,
     therapist: {
-      uid, displayName, crp, crm, especialidade, bio,
+      uid, displayName, crp, crm, tipoConselho, numeroConselho, especialidade, bio,
       e2eeSalt:     lockedSalt,
       wrappedDEK:   lockedWrappedDEK,
       wrappedDEKIv: lockedWrappedDEKIv,
@@ -665,14 +700,16 @@ router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(asyn
     return sendError(res, 429, "MUITAS_TENTATIVAS_EM_24H");
   }
 
-  const expectedName = String(therapist.displayName || "").trim();
-  const expectedCrp  = String(therapist.crp || "").trim();
-  const expectedCrm  = String(therapist.crm || "").trim();
+  const expectedName     = String(therapist.displayName || "").trim();
+  const expectedConselho = resolveSiglaFromTherapist(therapist);
+  const expectedRegistro = String(
+    therapist.numeroConselho || therapist.crp || therapist.crm || ""
+  ).trim();
 
   const validator = getDocValidator();
   const result = await validator.validateRegistration({
     fileBase64, mediaType,
-    expectedName, expectedCrp, expectedCrm,
+    expectedName, expectedConselho, expectedRegistro,
     requestId: req.requestId
   });
 
@@ -802,11 +839,31 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
   if (req.body?.bio !== undefined) {
     updates.bio = String(req.body.bio || "").trim().slice(0, 500);
   }
-  if (req.body?.crp !== undefined) {
-    updates.crp = String(req.body.crp || "").trim().toUpperCase().slice(0, 20);
-  }
-  if (req.body?.crm !== undefined) {
-    updates.crm = String(req.body.crm || "").trim().toUpperCase().slice(0, 20);
+  // Conselho profissional: atualização atômica via { tipoConselho, numeroConselho }.
+  // Espelha em crp/crm pra manter retrocompat com leitores legados.
+  if (req.body?.tipoConselho !== undefined || req.body?.numeroConselho !== undefined) {
+    const tipoIn = String(req.body?.tipoConselho || "").trim().toUpperCase();
+    const numIn  = String(req.body?.numeroConselho || "").trim().toUpperCase().slice(0, 30);
+    if (isValidConselhoSigla(tipoIn) && numIn) {
+      const tipo = normalizeConselhoSigla(tipoIn);
+      updates.tipoConselho   = tipo;
+      updates.numeroConselho = numIn;
+      updates.crp = tipo === "CRP" ? numIn : "";
+      updates.crm = tipo === "CRM" ? numIn : "";
+    }
+  } else {
+    // Compat: PATCH { crp } ou { crm } isolado (clientes antigos) — atualiza
+    // o campo legado E sincroniza tipoConselho/numeroConselho.
+    if (req.body?.crp !== undefined) {
+      const val = String(req.body.crp || "").trim().toUpperCase().slice(0, 30);
+      updates.crp = val;
+      if (val) { updates.tipoConselho = "CRP"; updates.numeroConselho = val; updates.crm = ""; }
+    }
+    if (req.body?.crm !== undefined) {
+      const val = String(req.body.crm || "").trim().toUpperCase().slice(0, 30);
+      updates.crm = val;
+      if (val) { updates.tipoConselho = "CRM"; updates.numeroConselho = val; updates.crp = ""; }
+    }
   }
   if (req.body?.rqe !== undefined) {
     updates.rqe = String(req.body.rqe || "").trim().slice(0, 30);
