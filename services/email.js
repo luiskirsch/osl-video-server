@@ -289,6 +289,47 @@ function buildComprovanteEstudanteUrl() {
 function buildComprovanteRecemFormadoUrl() {
   return `${THERAPY_FRONTEND_BASE}/comprovante-recem-formado.html`;
 }
+function buildComprovanteFormacaoUrl() {
+  return `${THERAPY_FRONTEND_BASE}/comprovante-formacao.html`;
+}
+
+// E-mail enviado quando admin aprova o diploma de formação de profissional
+// SEM_CONSELHO. Diferente do recém-formado: aqui não há "tier" — é só
+// liberação do perfil público com badge "não regulamentado".
+function templateFormacaoApproved({ therapistName, painelUrl }) {
+  const subject = "Perfil verificado no Espaço Prelúdio";
+  const html = renderShell({
+    heading: "Perfil aprovado pela equipe",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;">Seu diploma de formação foi revisado e aprovado. Seu perfil público no Espaço Prelúdio agora aparece com o selo <strong>"Verificado pela equipe"</strong>, com a indicação <em>"Profissional não regulamentado por conselho oficial"</em>.</p>
+      <p style="margin:0 0 16px;">Tudo o que você já podia fazer (consulta, chat, vídeo, anotações cifradas) continua funcionando. O que <strong>não</strong> fica disponível: emissão de receitas e documentos clínicos (atestado de doença, encaminhamento, relatório) — essas funções exigem CRM ou CRP.</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Acessar painel</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Em caso de dúvida, responda este e-mail.</p>
+    `,
+    footer: "Notificação do Espaço Prelúdio sobre seu perfil."
+  });
+  const text = `Olá ${therapistName},\n\nSeu diploma foi aprovado. Perfil público liberado com selo 'Verificado'.\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
+function templateFormacaoRejected({ therapistName, reason, retryUrl }) {
+  const subject = "Sobre seu diploma de formação no Espaço Prelúdio";
+  const html = renderShell({
+    heading: "Diploma não aprovado",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;">Revisamos seu diploma de formação e ele não atende aos critérios para liberação do perfil público. Motivo:</p>
+      <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-style: italic;">${escHtml(reason)}</p>
+      <p style="margin:0 0 16px;">Você pode enviar um novo documento (diploma mais legível, certificado da instituição, ou declaração assinada pela coordenação do curso) pelo link abaixo. Sua conta continua funcionando normalmente para atendimento; só o perfil público fica oculto até a aprovação.</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar outro comprovante</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Em caso de dúvida, responda este e-mail.</p>
+    `,
+    footer: "Notificação do Espaço Prelúdio sobre seu perfil."
+  });
+  const text = `Olá ${therapistName},\n\nSeu diploma de formação não foi aprovado. Motivo: ${reason}\n\nEnviar outro: ${retryUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
 
 module.exports = {
   sendEmail,
@@ -299,10 +340,13 @@ module.exports = {
   templateStudentRejected,
   templateRecemFormadoApproved,
   templateRecemFormadoRejected,
+  templateFormacaoApproved,
+  templateFormacaoRejected,
   buildJoinUrl,
   buildCancelUrl,
   buildPainelUrl,
   buildPlanosUrl,
   buildComprovanteEstudanteUrl,
-  buildComprovanteRecemFormadoUrl
+  buildComprovanteRecemFormadoUrl,
+  buildComprovanteFormacaoUrl
 };

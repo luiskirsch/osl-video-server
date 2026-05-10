@@ -49,9 +49,11 @@ const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
+  templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
   buildPainelUrl, buildPlanosUrl,
-  buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl
+  buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl,
+  buildComprovanteFormacaoUrl
 } = require("../services/email");
 
 const router = express.Router();
@@ -4643,6 +4645,201 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/rejeitar", asyncHand
   }
 
   return res.json({ ok: true, plano: "trial", reason });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADMIN — comprovantes de formação SEM_CONSELHO
+// Mesma família dos endpoints recém-formado, mas pra diplomas de psicanalistas/
+// terapeutas integrativos/hipnoterapeutas. Sem confiança automática — cada
+// caso passa pelo admin que decide manualmente.
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /therapy/admin/comprovantes-formacao?status=pending-review|verified|all
+router.get("/therapy/admin/comprovantes-formacao", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending-review").trim().toLowerCase();
+  const allowed = new Set(["pending-review", "verified", "rejected", "all"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  // Filtra terapeutas SEM_CONSELHO. Não dá pra fazer where em campo dentro
+  // de objeto eficientemente sem index — busca todos e filtra em memória
+  // (volume baixo: terapeutas SEM_CONSELHO devem ser <100 por revisão manual).
+  const snap = await db.collection("therapists").where("tipoConselho", "==", "SEM_CONSELHO").limit(500).get();
+  const items = snap.docs.map(d => {
+    const t = d.data();
+    return {
+      therapistUid: t.uid,
+      displayName: t.displayName || "",
+      email: t.email || null,
+      tipoConselho: t.tipoConselho,
+      verificationStatus: t.verificationStatus || null,
+      formacaoNaoRegulamentada: t.formacaoNaoRegulamentada || null,
+      formacaoDoc: t.formacaoDoc ? {
+        decision: t.formacaoDoc.decision,
+        reasons: t.formacaoDoc.reasons || [],
+        lastUploadId: t.formacaoDoc.lastUploadId,
+        lastUploadedAt: t.formacaoDoc.lastUploadedAt?.toMillis?.() || null,
+        fileHash: t.formacaoDoc.fileHash,
+        mediaType: t.formacaoDoc.mediaType,
+        fileSize: t.formacaoDoc.fileSize,
+        reviewedAt: t.formacaoDoc.reviewedAt?.toMillis?.() || null,
+        reviewedBy: t.formacaoDoc.reviewedBy || null
+      } : null
+    };
+  })
+  .filter(item => {
+    if (wantStatus === "all") return true;
+    if (wantStatus === "pending-review") return item.formacaoDoc?.decision === "pending-review";
+    if (wantStatus === "verified")       return item.verificationStatus === "verified";
+    if (wantStatus === "rejected")       return item.formacaoDoc?.decision === "rejected";
+    return false;
+  })
+  .sort((a, b) => (b.formacaoDoc?.lastUploadedAt || 0) - (a.formacaoDoc?.lastUploadedAt || 0));
+
+  return res.json({ ok: true, items });
+}));
+
+// GET /therapy/admin/comprovantes-formacao/:uid — devolve fileBase64 pra admin abrir
+router.get("/therapy/admin/comprovantes-formacao/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (!therapist.formacaoDoc?.lastUploadId) return sendError(res, 404, "COMPROVANTE_NAO_ENCONTRADO");
+
+  const db = getDb();
+  const uploadSnap = await db.collection("therapy_formacao_docs").doc(targetUid)
+    .collection("uploads").doc(therapist.formacaoDoc.lastUploadId).get();
+  if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
+  const upload = uploadSnap.data();
+
+  return res.json({
+    ok: true,
+    item: {
+      therapistUid: targetUid,
+      uploadId: upload.uploadId,
+      fileBase64: upload.fileBase64,
+      mediaType: upload.mediaType,
+      fileSize: upload.fileSize,
+      fileHash: upload.fileHash,
+      decision: upload.decision,
+      uploadedAt: upload.uploadedAt?.toMillis?.() || null,
+      therapist: {
+        displayName: therapist.displayName || "",
+        email: therapist.email || null,
+        especialidade: therapist.especialidade || "",
+        verificationStatus: therapist.verificationStatus || null,
+        formacaoNaoRegulamentada: therapist.formacaoNaoRegulamentada || null
+      }
+    }
+  });
+}));
+
+// POST /therapy/admin/comprovantes-formacao/:uid/aprovar
+router.post("/therapy/admin/comprovantes-formacao/:uid/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const notes = String(req.body?.notes || "").trim().slice(0, 500);
+
+  await getDb().collection("therapists").doc(targetUid).set({
+    verificationStatus: "verified",
+    verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+    "formacaoDoc.decision": "approved",
+    "formacaoDoc.reviewedBy": adminAuth.email,
+    "formacaoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "formacaoDoc.reviewNotes": notes,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "formacao_doc_admin_approved",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    notes
+  });
+
+  // Notifica. Falha do email não impede aprovação.
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateFormacaoApproved({
+        therapistName: therapist.displayName || "profissional",
+        painelUrl: buildPainelUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("formacao_doc_approve_email_failed", e, { therapistUid: targetUid });
+  }
+
+  return res.json({ ok: true, verificationStatus: "verified" });
+}));
+
+// POST /therapy/admin/comprovantes-formacao/:uid/rejeitar
+router.post("/therapy/admin/comprovantes-formacao/:uid/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, 500);
+  if (!reason) return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+
+  // Mantém verificationStatus="pending-review" pra user poder reenviar.
+  // Marca o doc como rejected pra UI mostrar o motivo.
+  await getDb().collection("therapists").doc(targetUid).set({
+    "formacaoDoc.decision": "rejected",
+    "formacaoDoc.reasons": [reason],
+    "formacaoDoc.reviewedBy": adminAuth.email,
+    "formacaoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "formacaoDoc.reviewNotes": reason,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "formacao_doc_admin_rejected",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    reason
+  });
+
+  try {
+    const email = await resolveTherapistEmail(targetUid, therapist);
+    if (email) {
+      const tpl = templateFormacaoRejected({
+        therapistName: therapist.displayName || "profissional",
+        reason,
+        retryUrl: buildComprovanteFormacaoUrl()
+      });
+      await sendEmail({ to: email, ...tpl });
+    }
+  } catch (e) {
+    logError("formacao_doc_reject_email_failed", e, { therapistUid: targetUid });
+  }
+
+  return res.json({ ok: true, verificationStatus: "pending-review", reason });
 }));
 
 // GET /therapy/health — diagnóstico isolado
