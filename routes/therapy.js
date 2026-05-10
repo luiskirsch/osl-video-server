@@ -894,6 +894,130 @@ router.get("/therapy/profissional/comprovante-recem-formado/status", asyncHandle
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/profissional/comprovante-formacao
+// Upload do diploma/certificado de formação pra profissionais SEM_CONSELHO
+// (psicanalistas, terapeutas integrativos, hipnoterapeutas). Sem validação
+// automática — sempre cai em revisão manual pelo admin (não há padrão de
+// diploma de escola livre que justifique OCR estruturado).
+//
+// Reusa hash dedup, rate limit do recém-formado (mesmas constantes).
+// Estados em therapists/{uid}.formacaoDoc.decision: "pending-review" sempre.
+// verificationStatus continua "pending-review" até admin aprovar via
+// /therapy/admin/comprovantes-formacao/:uid/decidir (S22.1b).
+// ─────────────────────────────────────────────────────────────────────────
+
+const FORMACAO_RATE_LIMIT_24H = 5;
+
+router.post("/therapy/profissional/comprovante-formacao", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  if (resolveSiglaFromTherapist(therapist) !== "SEM_CONSELHO") {
+    return sendError(res, 403, "ENDPOINT_APENAS_PARA_SEM_CONSELHO",
+      { detail: "Profissionais com conselho regulamentado usam /comprovante-recem-formado ou /verificacao/submeter." });
+  }
+
+  const fileBase64 = String(req.body?.fileBase64 || "").trim();
+  const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
+
+  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
+  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+  if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
+
+  let buffer;
+  try { buffer = Buffer.from(fileBase64, "base64"); } catch { return sendError(res, 400, "BASE64_INVALIDO"); }
+  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+
+  const db = getDb();
+
+  // Dedup por hash — mesmo diploma em conta diferente é bloqueado
+  const hashRef = db.collection("therapy_formacao_doc_hashes").doc(fileHash);
+  const hashSnap = await hashRef.get();
+  if (hashSnap.exists && hashSnap.data().uid !== uid) {
+    await logAudit({ type: "formacao_doc_dedup_block", therapistUid: uid, fileHash });
+    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  }
+
+  // Rate limit: max 5 uploads em 24h
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const recent = await db.collection("therapy_formacao_docs").doc(uid)
+    .collection("uploads")
+    .where("uploadedAt", ">=", new Date(since))
+    .get();
+  if (recent.size >= FORMACAO_RATE_LIMIT_24H) {
+    return sendError(res, 429, "MUITAS_TENTATIVAS_EM_24H");
+  }
+
+  const uploadId = newId("formacao");
+  const uploadRef = db.collection("therapy_formacao_docs").doc(uid).collection("uploads").doc(uploadId);
+  await uploadRef.set({
+    uploadId, therapistUid: uid,
+    fileBase64, mediaType, fileSize: buffer.length, fileHash,
+    decision: "pending-review",
+    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await hashRef.set({
+    uid, uploadId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await db.collection("therapists").doc(uid).set({
+    formacaoDoc: {
+      lastUploadId: uploadId,
+      lastUploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      decision: "pending-review",
+      fileHash, mediaType, fileSize: buffer.length
+    },
+    verificationStatus: "pending-review",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "formacao_doc_submitted",
+    therapistUid: uid,
+    uploadId,
+    fileHash,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({
+    ok: true,
+    decision: "pending-review",
+    detail: "Diploma recebido. Aguardando revisão manual pela equipe (até 2 dias úteis)."
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /therapy/profissional/comprovante-formacao/status
+// ─────────────────────────────────────────────────────────────────────────
+router.get("/therapy/profissional/comprovante-formacao/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const doc = therapist.formacaoDoc || null;
+  return res.json({
+    ok: true,
+    verificationStatus: therapist.verificationStatus || null,
+    formacao: therapist.formacaoNaoRegulamentada || null,
+    formacaoDoc: doc ? {
+      decision: doc.decision,
+      reasons: doc.reasons || [],
+      lastUploadedAt: doc.lastUploadedAt?.toDate?.()?.toISOString?.() || null,
+      reviewedAt: doc.reviewedAt?.toDate?.()?.toISOString?.() || null
+    } : null
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // PATCH /therapy/profissional/perfil
 // Atualiza dados extras do consultório (endereço, telefone, RQE, logo, etc).
 // Não toca em e2eeSalt/wrappedDEK (que são write-once via /registrar e
