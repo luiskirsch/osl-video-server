@@ -3348,22 +3348,32 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
   // antigos que ainda lêem esses campos.
   const conselhoSigla = resolveSiglaFromTherapist(therapist);
   const conselhoMeta  = getConselho(conselhoSigla);
+  const regulamentado = isConselhoRegulamentado(conselhoSigla);
+
+  // Pra SEM_CONSELHO, expõe o tipo de prática declarado (psicanálise/
+  // terapia integrativa/hipnoterapia) pro perfil público mostrar contexto
+  // ao paciente. Não expõe instituição/anos de prática (ruído).
+  const tipoPraticaPublica = (!regulamentado && therapist.formacaoNaoRegulamentada)
+    ? therapist.formacaoNaoRegulamentada.tipoPratica || ""
+    : "";
 
   return res.json({
     ok: true,
     profissional: {
       uid,
-      displayName:    therapist.displayName || "",
-      crp:            therapist.crp || "",
-      crm:            therapist.crm || "",
-      rqe:            therapist.rqe || "",
-      tipoConselho:   conselhoSigla || "",
-      numeroConselho: therapist.numeroConselho || therapist.crp || therapist.crm || "",
-      conselhoLabel:  conselhoMeta?.label || "",
-      especialidade:  therapist.especialidade || "",
-      bio:            therapist.bio || "",
-      consultorio:    consultorioPublico,
-      verifiedAt:     therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null
+      displayName:     therapist.displayName || "",
+      crp:             therapist.crp || "",
+      crm:             therapist.crm || "",
+      rqe:             therapist.rqe || "",
+      tipoConselho:    conselhoSigla || "",
+      numeroConselho:  therapist.numeroConselho || therapist.crp || therapist.crm || "",
+      conselhoLabel:   conselhoMeta?.label || "",
+      isRegulamentado: regulamentado,
+      tipoPratica:     tipoPraticaPublica,
+      especialidade:   therapist.especialidade || "",
+      bio:             therapist.bio || "",
+      consultorio:     consultorioPublico,
+      verifiedAt:      therapist.verifiedAt?.toMillis ? therapist.verifiedAt.toMillis() : null
     }
   });
 }));
