@@ -213,7 +213,8 @@ function templateStudentApproved({ therapistName, validUntilMs, painelUrl }) {
 }
 
 // E-mail enviado quando admin aprova manualmente o comprovante de inscrição
-// CRP/CRM (tier recém-formado).
+// no conselho (tier recém-formado). Aceita qualquer um dos 8 conselhos
+// suportados — copy genérica.
 function templateRecemFormadoApproved({ therapistName, painelUrl }) {
   const subject = "Tier Recém-formado liberado no Espaço Prelúdio";
   const html = renderShell({
@@ -238,7 +239,7 @@ function templateRecemFormadoRejected({ therapistName, reason, retryUrl }) {
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
       <p style="margin:0 0 16px;">Revisamos seu comprovante de inscrição no conselho e ele não atende aos critérios do tier Recém-formado. Motivo:</p>
       <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-style: italic;">${escHtml(reason)}</p>
-      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (print do e-Psi/portal CFM ou foto da carteira) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 120/mês).</p>
+      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 120/mês).</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar outro comprovante</a></p>
       <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Em caso de dúvida, responda este e-mail.</p>
     `,
