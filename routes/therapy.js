@@ -40,7 +40,10 @@ const {
   normalizeSigla: normalizeConselhoSigla,
   resolveSiglaFromTherapist,
   therapistCan,
-  getConselho
+  getConselho,
+  isRegulamentado: isConselhoRegulamentado,
+  requiresManualReview: conselhoRequiresManualReview,
+  isValidPracticeType
 } = require("../services/professional-councils");
 const {
   sendEmail, templateConfirmation, templateDispensacaoNotice,
@@ -280,7 +283,8 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const consentLgpd   = !!req.body?.consentLgpd;
 
   // Resolve conselho: prioriza { tipoConselho, numeroConselho } (S21+);
-  // se ausente, cai pra { crp, crm } legado.
+  // se ausente, cai pra { crp, crm } legado. SEM_CONSELHO não exige
+  // numeroConselho (validação alternativa via diploma + revisão manual).
   const tipoConselhoRaw = String(req.body?.tipoConselho || "").trim().toUpperCase();
   const numeroConselhoIn = String(req.body?.numeroConselho || "").trim().slice(0, 30).toUpperCase();
   const crpLegacy = String(req.body?.crp || "").trim().slice(0, 30).toUpperCase();
@@ -288,21 +292,62 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
 
   let tipoConselho = "";
   let numeroConselho = "";
-  if (isValidConselhoSigla(tipoConselhoRaw) && numeroConselhoIn) {
-    tipoConselho   = normalizeConselhoSigla(tipoConselhoRaw);
-    numeroConselho = numeroConselhoIn;
-  } else if (crpLegacy) {
-    tipoConselho   = "CRP";
-    numeroConselho = crpLegacy;
-  } else if (crmLegacy) {
-    tipoConselho   = "CRM";
-    numeroConselho = crmLegacy;
+  if (isValidConselhoSigla(tipoConselhoRaw)) {
+    tipoConselho = normalizeConselhoSigla(tipoConselhoRaw);
+    // SEM_CONSELHO não tem número — campo fica vazio. Demais conselhos exigem.
+    if (tipoConselho === "SEM_CONSELHO") {
+      numeroConselho = "";
+    } else if (numeroConselhoIn) {
+      numeroConselho = numeroConselhoIn;
+    } else {
+      tipoConselho = ""; // força fallback ou erro
+    }
+  }
+  if (!tipoConselho) {
+    if (crpLegacy)      { tipoConselho = "CRP"; numeroConselho = crpLegacy; }
+    else if (crmLegacy) { tipoConselho = "CRM"; numeroConselho = crmLegacy; }
   }
 
   // Espelha no campo legado pra retrocompat com leitores que ainda usam
   // therapist.crp / therapist.crm (perfil público, receita, documento médico).
   const crp = tipoConselho === "CRP" ? numeroConselho : "";
   const crm = tipoConselho === "CRM" ? numeroConselho : "";
+
+  // Campos extras obrigatórios pra SEM_CONSELHO — substituem o "selo do
+  // conselho" como trust signal. Validados sempre (mesmo se vazios) pra
+  // que o admin tenha o que revisar.
+  let formacaoNaoRegulamentada = null;
+  if (tipoConselho === "SEM_CONSELHO") {
+    const tipoPratica = String(req.body?.tipoPratica || "").trim().toLowerCase().slice(0, 40);
+    const instituicao = String(req.body?.formacaoInstituicao || "").trim().slice(0, 200);
+    const curso = String(req.body?.formacaoCurso || "").trim().slice(0, 200);
+    const anoConclusaoRaw = Number(req.body?.formacaoAnoConclusao || 0);
+    const anosExperienciaRaw = Number(req.body?.anosExperiencia || 0);
+    const anoAtual = new Date().getFullYear();
+
+    if (!isValidPracticeType("SEM_CONSELHO", tipoPratica)) {
+      return sendError(res, 400, "TIPO_PRATICA_INVALIDO",
+        { hint: "Aceitos: psicanalise, terapia-integrativa, hipnoterapia." });
+    }
+    if (!instituicao) return sendError(res, 400, "FORMACAO_INSTITUICAO_OBRIGATORIA");
+    if (!curso)       return sendError(res, 400, "FORMACAO_CURSO_OBRIGATORIO");
+    if (!Number.isFinite(anoConclusaoRaw) || anoConclusaoRaw < 1950 || anoConclusaoRaw > anoAtual) {
+      return sendError(res, 400, "FORMACAO_ANO_CONCLUSAO_INVALIDO",
+        { hint: `Ano entre 1950 e ${anoAtual}.` });
+    }
+    if (!Number.isFinite(anosExperienciaRaw) || anosExperienciaRaw < 0 || anosExperienciaRaw > 80) {
+      return sendError(res, 400, "ANOS_EXPERIENCIA_INVALIDO",
+        { hint: "Entre 0 e 80 anos." });
+    }
+
+    formacaoNaoRegulamentada = {
+      tipoPratica,
+      instituicao,
+      curso,
+      anoConclusao: anoConclusaoRaw,
+      anosExperiencia: anosExperienciaRaw
+    };
+  }
 
   // Tier escolhido na landing — define duração do trial. Aceita: "estudante",
   // "recem-formado" (alias: "recem"), "profissional" (default).
@@ -313,9 +358,13 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     intendedTierRaw === "recem-formado"  ? "recem-formado" :
     "profissional";
 
-  if (!displayName)   return sendError(res, 400, "NOME_OBRIGATORIO");
-  if (!consentLgpd)   return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
-  if (!tipoConselho || !numeroConselho) return sendError(res, 400, "REGISTRO_PROFISSIONAL_OBRIGATORIO");
+  if (!displayName) return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!consentLgpd) return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
+  // Conselhos regulamentados exigem número; SEM_CONSELHO não.
+  if (!tipoConselho) return sendError(res, 400, "REGISTRO_PROFISSIONAL_OBRIGATORIO");
+  if (tipoConselho !== "SEM_CONSELHO" && !numeroConselho) {
+    return sendError(res, 400, "REGISTRO_PROFISSIONAL_OBRIGATORIO");
+  }
   if (!e2eeSalt || e2eeSalt.length < 16 || e2eeSalt.length > 128) {
     return sendError(res, 400, "E2EE_SALT_INVALIDO");
   }
@@ -358,7 +407,9 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     } catch (_) { /* sem email — segue */ }
   }
 
-  await ref.set({
+  // Bloco de formação não-regulamentada — salva só pra SEM_CONSELHO; nos
+  // demais conselhos o registro no conselho já é o trust signal.
+  const therapistDoc = {
     uid,
     displayName,
     email: therapistEmail,
@@ -379,7 +430,15 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     consentLgpdAt: existingData?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
     createdAt: existingData?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+  if (formacaoNaoRegulamentada) {
+    therapistDoc.formacaoNaoRegulamentada = formacaoNaoRegulamentada;
+    // Marca verificação como pending-review já no cadastro — SEM_CONSELHO
+    // nunca passa por aprovação automática. Admin precisa revisar diploma
+    // (S22.1) antes de habilitar verificationStatus="verified".
+    therapistDoc.verificationStatus = existingData?.verificationStatus || "pending-review";
+  }
+  await ref.set(therapistDoc, { merge: true });
 
   await logAudit({
     type: "therapist_registered",

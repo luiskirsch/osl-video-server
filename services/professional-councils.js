@@ -91,6 +91,27 @@ const CONSELHOS = {
     numberFormat: "Ex.: 012345-G/SC",
     capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
     eligibleTiers: ["recem-formado", "profissional"]
+  },
+  // Pseudo-conselho pra terapeutas sem registro em conselho federal
+  // regulamentado: psicanalistas (sem CRP), terapeutas integrativos/holísticos,
+  // hipnoterapeutas. Aceita só após revisão MANUAL do diploma de formação +
+  // termo de responsabilidade reforçado. Capabilities mínimas — sem receita,
+  // sem documentos clínicos. Único tier: profissional (sem estudante/recém-formado).
+  //
+  // Diferenças vs. conselhos regulamentados:
+  // - isRegulamentado: false → frontend mostra badge "não regulamentado" no perfil público
+  // - requiresManualReview: true → nunca aprova automático, sempre passa por admin
+  // - acceptedPracticeTypes: lista de "tipoPratica" aceitos no cadastro
+  SEM_CONSELHO: {
+    sigla: "SEM_CONSELHO",
+    label: "Sem conselho regulamentado (psicanálise, terapia integrativa, hipnoterapia)",
+    profissional: "Terapeuta",
+    numberFormat: "—",
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
+    eligibleTiers: ["profissional"],
+    isRegulamentado: false,
+    requiresManualReview: true,
+    acceptedPracticeTypes: ["psicanalise", "terapia-integrativa", "hipnoterapia"]
   }
 };
 
@@ -146,6 +167,36 @@ function therapistCan(therapist, capability) {
   return hasCapability(resolveSiglaFromTherapist(therapist), capability);
 }
 
+// True se a sigla é de um conselho regulamentado por lei federal
+// (CRP/CRM/CRESS/CREFITO/CRFa/CRN/CRO/CREF). False pra SEM_CONSELHO.
+function isRegulamentado(sigla) {
+  const c = getConselho(sigla);
+  if (!c) return false;
+  return c.isRegulamentado !== false;
+}
+
+// True se este conselho exige revisão manual obrigatória (não aprova automático).
+// Hoje só SEM_CONSELHO; pode ser estendido pra qualquer conselho que vire
+// "alto risco" no futuro.
+function requiresManualReview(sigla) {
+  const c = getConselho(sigla);
+  return !!(c && c.requiresManualReview);
+}
+
+// Lista de tipos de prática aceitos pra um conselho. Hoje só faz sentido
+// pra SEM_CONSELHO (psicanalise/terapia-integrativa/hipnoterapia).
+function acceptedPracticeTypes(sigla) {
+  const c = getConselho(sigla);
+  return c?.acceptedPracticeTypes || [];
+}
+
+// Valida que um "tipoPratica" submetido no cadastro é aceito pra essa sigla.
+function isValidPracticeType(sigla, tipoPratica) {
+  const list = acceptedPracticeTypes(sigla);
+  if (list.length === 0) return false;
+  return list.includes(String(tipoPratica || "").trim().toLowerCase());
+}
+
 module.exports = {
   CONSELHOS,
   ALL_SIGLAS,
@@ -156,5 +207,9 @@ module.exports = {
   hasCapability,
   canUseTier,
   resolveSiglaFromTherapist,
-  therapistCan
+  therapistCan,
+  isRegulamentado,
+  requiresManualReview,
+  acceptedPracticeTypes,
+  isValidPracticeType
 };
