@@ -183,13 +183,20 @@ function canUseTier(sigla, tier) {
 // Resolve a sigla do conselho a partir de um doc therapist do Firestore.
 // Prefere o campo novo `tipoConselho`. Se ausente, infere a partir dos campos
 // legados crp/crm (cadastros pré-S21). Retorna sigla normalizada ou "".
+//
+// Fallback prioriza CRM sobre CRP quando ambos estão preenchidos — caso de
+// doc legado onde o user cadastrou primeiro como psicólogo e depois adicionou
+// CRM (médico/psiquiatra) sem migrar pra tipoConselho. CRM tem capabilities
+// superset (inclui receita), então a escolha de produto é dar acesso à
+// feature mais completa. Pra dual-license, esperamos que o user defina
+// tipoConselho explicitamente no perfil.
 function resolveSiglaFromTherapist(therapist) {
   if (!therapist) return "";
   if (therapist.tipoConselho && isValidSigla(therapist.tipoConselho)) {
     return normalizeSigla(therapist.tipoConselho);
   }
-  if (therapist.crp) return "CRP";
   if (therapist.crm) return "CRM";
+  if (therapist.crp) return "CRP";
   return "";
 }
 
