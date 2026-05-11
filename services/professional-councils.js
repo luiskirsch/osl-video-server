@@ -59,7 +59,11 @@ const CONSELHOS = {
     numberFormat: "Ex.: 12345-F (fisio) / 12345-TO (terapeuta ocupacional)",
     // Capabilities base do conselho. "receita" só fica disponível pra fisio/TO
     // que tenham subtipo definido (ver subtipos abaixo). Sem subtipo, sem receita.
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "receita"],
+    // "documentos-clinicos": fisio/TO emitem atestado, encaminhamento e relatório
+    // dentro do escopo da profissão (DL 938/1969, Res. COFFITO 415/2012 e 414/2012).
+    // Não é "atestado médico" — o título do PDF é específico por conselho (ver
+    // getDocumentoTitulo); fisio/TO sem CID-10 obrigatório.
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita"],
     prescriptionTypes: [], // delegado pro subtipo — fisio vs TO têm escopos diferentes
     requiresSubtipo: true,
     subtipos: {
@@ -239,6 +243,70 @@ function canPrescribeType(therapist, tipo) {
   return allowed.includes(String(tipo || "").trim().toLowerCase());
 }
 
+// Título do documento clínico no PDF, específico por conselho do profissional.
+// Importante juridicamente: fisio/TO não emite "atestado médico" — o título
+// errado caracteriza fraude profissional. Cada conselho tem sua nomenclatura.
+//
+// tipo: "atestado" | "encaminhamento" | "relatorio" | "exames"
+// Retorna par { titulo, cabecalho } pronto pro template do PDF.
+const DOCUMENTO_TITULOS = {
+  CRM: {
+    atestado:        { titulo: "Atestado Médico",                cabecalho: "ATESTADO MÉDICO" },
+    encaminhamento:  { titulo: "Encaminhamento Médico",          cabecalho: "ENCAMINHAMENTO MÉDICO" },
+    relatorio:       { titulo: "Relatório Médico",               cabecalho: "RELATÓRIO MÉDICO" },
+    exames:          { titulo: "Solicitação de exames",          cabecalho: "SOLICITAÇÃO DE EXAMES COMPLEMENTARES" }
+  },
+  CRP: {
+    atestado:        { titulo: "Atestado Psicológico",           cabecalho: "ATESTADO PSICOLÓGICO" },
+    encaminhamento:  { titulo: "Encaminhamento Psicológico",     cabecalho: "ENCAMINHAMENTO PSICOLÓGICO" },
+    relatorio:       { titulo: "Relatório Psicológico",          cabecalho: "RELATÓRIO PSICOLÓGICO" },
+    exames:          { titulo: "Solicitação de avaliação",       cabecalho: "SOLICITAÇÃO DE AVALIAÇÃO" }
+  },
+  CREFITO_FISIO: {
+    atestado:        { titulo: "Atestado Fisioterapêutico",      cabecalho: "ATESTADO FISIOTERAPÊUTICO" },
+    encaminhamento:  { titulo: "Encaminhamento Fisioterapêutico", cabecalho: "ENCAMINHAMENTO FISIOTERAPÊUTICO" },
+    relatorio:       { titulo: "Relatório Fisioterapêutico",     cabecalho: "RELATÓRIO FISIOTERAPÊUTICO" },
+    exames:          { titulo: "Solicitação de exames",          cabecalho: "SOLICITAÇÃO DE EXAMES" }
+  },
+  CREFITO_TO: {
+    atestado:        { titulo: "Atestado de Terapia Ocupacional", cabecalho: "ATESTADO DE TERAPIA OCUPACIONAL" },
+    encaminhamento:  { titulo: "Encaminhamento — Terapia Ocupacional", cabecalho: "ENCAMINHAMENTO — TERAPIA OCUPACIONAL" },
+    relatorio:       { titulo: "Relatório de Terapia Ocupacional", cabecalho: "RELATÓRIO DE TERAPIA OCUPACIONAL" },
+    exames:          { titulo: "Solicitação de exames",          cabecalho: "SOLICITAÇÃO DE EXAMES" }
+  }
+};
+
+const VALID_DOCUMENTO_TIPOS = ["atestado", "encaminhamento", "relatorio", "exames"];
+
+// Resolve o título correto do documento dado o therapist + tipo.
+// Fallback ("Atestado Profissional") nunca deveria disparar em prod porque
+// requireCapability("documentos-clinicos") bloqueia conselhos sem template,
+// mas evita PDF quebrado se algo escapar.
+function getDocumentoTitulo(therapist, tipo) {
+  const tipoNorm = String(tipo || "").trim().toLowerCase();
+  if (!VALID_DOCUMENTO_TIPOS.includes(tipoNorm)) {
+    return { titulo: "Documento", cabecalho: "DOCUMENTO" };
+  }
+  const sigla = resolveSiglaFromTherapist(therapist);
+  let key = sigla;
+  if (sigla === "CREFITO") {
+    const sub = String(therapist?.subtipoConselho || "").trim().toLowerCase();
+    key = sub === "to" ? "CREFITO_TO" : sub === "fisio" ? "CREFITO_FISIO" : null;
+  }
+  const set = key && DOCUMENTO_TITULOS[key];
+  if (!set || !set[tipoNorm]) {
+    // Fallback genérico — não-médico pra não caracterizar fraude.
+    const generic = {
+      atestado:       { titulo: "Atestado Profissional",       cabecalho: "ATESTADO PROFISSIONAL" },
+      encaminhamento: { titulo: "Encaminhamento Profissional", cabecalho: "ENCAMINHAMENTO PROFISSIONAL" },
+      relatorio:      { titulo: "Relatório Profissional",      cabecalho: "RELATÓRIO PROFISSIONAL" },
+      exames:         { titulo: "Solicitação",                 cabecalho: "SOLICITAÇÃO" }
+    };
+    return generic[tipoNorm];
+  }
+  return set[tipoNorm];
+}
+
 const VALID_PRESCRIPTION_TYPES = ["mip", "insumo-injetavel", "controlado"];
 
 function isValidPrescriptionType(tipo) {
@@ -280,6 +348,7 @@ module.exports = {
   ALL_SIGLAS,
   LEGACY_SIGLAS,
   VALID_PRESCRIPTION_TYPES,
+  VALID_DOCUMENTO_TIPOS,
   normalizeSigla,
   getConselho,
   isValidSigla,
@@ -296,5 +365,6 @@ module.exports = {
   isValidSubtipo,
   getPrescriptionTypesForTherapist,
   canPrescribeType,
-  isValidPrescriptionType
+  isValidPrescriptionType,
+  getDocumentoTitulo
 };

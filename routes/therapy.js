@@ -134,11 +134,20 @@ async function requirePaidPlan(req, res, uid) {
 // services/professional-councils.js (cada conselho lista suas features).
 //
 // Capabilities:
-//   "receita"             — só CRM (prescrição medicamentosa, RDC ANVISA)
-//   "documentos-clinicos" — CRM + CRP + CRN + CRO (atestado de doença,
-//                           relatório, encaminhamento). CRESS/CREFITO/CRFa/
-//                           CREF não emitem porque não é prerrogativa do
-//                           conselho deles.
+//   "receita"             — CRM (Portaria 344/98 — todos os tipos) +
+//                           CREFITO (Ac. COFFITO 735/2024 — fisio: MIP+injetável,
+//                           TO: MIP). Detalhes em prescriptionTypes por subtipo.
+//   "documentos-clinicos" — CRM, CRP e CREFITO. Atestado, encaminhamento e
+//                           relatório dentro do escopo de cada conselho:
+//                           CRM=médico, CRP=psicológico, CREFITO/fisio=
+//                           fisioterapêutico, CREFITO/to=de terapia ocupacional.
+//                           O título do PDF é dinâmico (getDocumentoTitulo) —
+//                           emitir "atestado médico" com inscrição não-CRM
+//                           caracteriza fraude profissional.
+//                           CRESS/CRFa/CRN/CRO/CREF: hoje sem capability porque
+//                           o template atual cobre só os escopos acima (CRN/CRO
+//                           têm prerrogativa legal mas precisam de template
+//                           próprio — pendente).
 //
 // Retorna true se ok; escreve 403 + retorna false se bloqueado.
 function requireCapability(therapist, res, capability, hint) {
@@ -3078,7 +3087,7 @@ router.post("/therapy/documentos", asyncHandler(async (req, res) => {
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
   if (!requireCapability(therapist, res, "documentos-clinicos",
-    "Atestado de doença, encaminhamento e relatório clínico só podem ser emitidos por médicos (CRM) e psicólogos (CRP).")) return;
+    "Atestado, encaminhamento e relatório clínico podem ser emitidos por CRM, CRP e CREFITO (fisio/TO) dentro do escopo da profissão.")) return;
 
   const tipo = String(req.body?.tipo || "").trim().toLowerCase();
   if (!DOCUMENTO_TIPOS.has(tipo)) {
@@ -3147,7 +3156,7 @@ router.patch("/therapy/documentos/:id", asyncHandler(async (req, res) => {
   // de conselho depois de criar o draft.
   const therapistDoc = await loadTherapist(uid);
   if (!requireCapability(therapistDoc, res, "documentos-clinicos",
-    "Apenas médicos (CRM) e psicólogos (CRP) podem editar documentos clínicos.")) return;
+    "Apenas CRM, CRP e CREFITO (fisio/TO) podem editar documentos clínicos.")) return;
 
   await ref.set({
     formCiphertext, formIv,
@@ -3219,7 +3228,7 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
   // Defesa em profundidade no momento da assinatura (ato legal).
   const therapistDoc = await loadTherapist(uid);
   if (!requireCapability(therapistDoc, res, "documentos-clinicos",
-    "Apenas médicos (CRM) e psicólogos (CRP) podem assinar documentos clínicos.")) return;
+    "Apenas CRM, CRP e CREFITO (fisio/TO) podem assinar documentos clínicos.")) return;
 
   let deliveryToken    = d.deliveryToken    || null;
   let deliveryTokenExp = d.deliveryTokenExp || null;
