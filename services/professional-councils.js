@@ -95,11 +95,12 @@ const CONSELHOS = {
     label: "CRN — Conselho Regional de Nutricionistas",
     profissional: "Nutricionista",
     numberFormat: "Ex.: CRN-2 12345",
-    // CRN tem prescrição dietética (não medicamentosa) — quando tivermos
-    // endpoint específico pra prescrição nutricional, adiciona capability
-    // própria. "documentos-clinicos" hoje cobre atestado/encaminhamento
-    // médico, restrito a CRM/CRP por decisão de produto.
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
+    // Atestado nutricional, relatório e encaminhamento dentro do escopo da
+    // profissão (Res. CFN 599/2018 Art. 6º, Res. CFN 600/2018). Título do PDF
+    // é específico (getDocumentoTitulo) — nutricionista não emite "atestado
+    // médico". Prescrição dietética é documento próprio (capability futura,
+    // não medicamentosa portanto não usa "receita").
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CRO: {
@@ -107,10 +108,12 @@ const CONSELHOS = {
     label: "CRO — Conselho Regional de Odontologia (ansiedade odontológica, bruxismo, DTM)",
     profissional: "Cirurgião(ã)-dentista",
     numberFormat: "Ex.: CRO-SC 12345",
-    // Dentista emite atestado odontológico, mas o endpoint /documentos
-    // hoje gera atestado/encaminhamento médico — restrito a CRM/CRP.
-    // Atestado odontológico precisa de endpoint próprio (futuro).
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
+    // Atestado odontológico, encaminhamento e relatório dentro do escopo
+    // (Lei 5.081/1966, Res. CFO 63/2005). Atestado odontológico é
+    // juridicamente equivalente ao médico pra afastamentos relacionados a
+    // tratamento odontológico (TST consolidado). Título do PDF é específico
+    // via getDocumentoTitulo.
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CREF: {
@@ -272,6 +275,18 @@ const DOCUMENTO_TITULOS = {
     atestado:        { titulo: "Atestado de Terapia Ocupacional", cabecalho: "ATESTADO DE TERAPIA OCUPACIONAL" },
     encaminhamento:  { titulo: "Encaminhamento — Terapia Ocupacional", cabecalho: "ENCAMINHAMENTO — TERAPIA OCUPACIONAL" },
     relatorio:       { titulo: "Relatório de Terapia Ocupacional", cabecalho: "RELATÓRIO DE TERAPIA OCUPACIONAL" },
+    exames:          { titulo: "Solicitação de exames",          cabecalho: "SOLICITAÇÃO DE EXAMES" }
+  },
+  CRN: {
+    atestado:        { titulo: "Atestado Nutricional",           cabecalho: "ATESTADO NUTRICIONAL" },
+    encaminhamento:  { titulo: "Encaminhamento Nutricional",     cabecalho: "ENCAMINHAMENTO NUTRICIONAL" },
+    relatorio:       { titulo: "Relatório Nutricional",          cabecalho: "RELATÓRIO NUTRICIONAL" },
+    exames:          { titulo: "Solicitação de exames bioquímicos", cabecalho: "SOLICITAÇÃO DE EXAMES BIOQUÍMICOS" }
+  },
+  CRO: {
+    atestado:        { titulo: "Atestado Odontológico",          cabecalho: "ATESTADO ODONTOLÓGICO" },
+    encaminhamento:  { titulo: "Encaminhamento Odontológico",    cabecalho: "ENCAMINHAMENTO ODONTOLÓGICO" },
+    relatorio:       { titulo: "Relatório Odontológico",         cabecalho: "RELATÓRIO ODONTOLÓGICO" },
     exames:          { titulo: "Solicitação de exames",          cabecalho: "SOLICITAÇÃO DE EXAMES" }
   }
 };
