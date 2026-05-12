@@ -1214,6 +1214,23 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     }
   }
 
+  // Configuração da agenda (janela de trabalho + duração padrão da consulta).
+  // Defaults aplicados pelo frontend: 8h-21h, 50min. Bounds validados aqui.
+  if (req.body?.agendaConfig !== undefined && req.body.agendaConfig !== null) {
+    const ac = req.body.agendaConfig || {};
+    const startHour   = Number(ac.startHour);
+    const endHour     = Number(ac.endHour);
+    const slotMinutes = Number(ac.slotMinutes);
+    const cfg = {};
+    if (Number.isFinite(startHour)   && startHour >= 0  && startHour <= 22)  cfg.startHour   = startHour;
+    if (Number.isFinite(endHour)     && endHour   > 0   && endHour   <= 24)  cfg.endHour     = endHour;
+    if (Number.isFinite(slotMinutes) && slotMinutes >= 15 && slotMinutes <= 240) cfg.slotMinutes = slotMinutes;
+    if (cfg.startHour !== undefined && cfg.endHour !== undefined && cfg.endHour <= cfg.startHour) {
+      return sendError(res, 400, "AGENDA_CONFIG_INVALIDO", { hint: "endHour deve ser > startHour" });
+    }
+    if (Object.keys(cfg).length) updates.agendaConfig = cfg;
+  }
+
   // Foto de perfil (avatar). Mesmo padrão da logo — cliente redimensiona
   // pra 256x256 antes de enviar, mantendo o doc pequeno (~50 KB).
   if (req.body?.photoBase64 !== undefined) {
