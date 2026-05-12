@@ -5664,6 +5664,92 @@ router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, transactions, categories: CATEGORY_LABELS });
 }));
 
+// GET /therapy/financeiro/export.csv
+// Export CSV de transações pra contador / declaração de IR.
+// Range padrão: ano vigente. Aceita ?year=YYYY ou ?from=YYYY-MM-DD&to=YYYY-MM-DD.
+// Encoding: UTF-8 com BOM (Excel BR abre certo sem precisar configurar).
+router.get("/therapy/financeiro/export.csv", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  let rangeStart, rangeEnd;
+  const yearStr = String(req.query?.year || "").trim();
+  const fromStr = String(req.query?.from || "").trim();
+  const toStr   = String(req.query?.to   || "").trim();
+  if (fromStr && toStr) {
+    const f = new Date(fromStr);
+    const t = new Date(toStr);
+    if (isNaN(f) || isNaN(t)) return sendError(res, 400, "DATA_INVALIDA");
+    rangeStart = f.getTime();
+    rangeEnd   = t.getTime() + 86_400_000; // inclusivo do dia "to"
+  } else if (yearStr && /^\d{4}$/.test(yearStr)) {
+    const y = Number(yearStr);
+    rangeStart = new Date(y, 0, 1).getTime();
+    rangeEnd   = new Date(y + 1, 0, 1).getTime();
+  } else {
+    // default: ano corrente
+    const y = new Date().getFullYear();
+    rangeStart = new Date(y, 0, 1).getTime();
+    rangeEnd   = new Date(y + 1, 0, 1).getTime();
+  }
+
+  const db = getDb();
+  const snap = await db.collection("therapy_transactions")
+    .where("therapistUid", "==", uid)
+    .get();
+
+  const txs = snap.docs
+    .map(d => d.data())
+    .filter(tx => typeof tx.issueDate === "number" && tx.issueDate >= rangeStart && tx.issueDate < rangeEnd)
+    .sort((a, b) => (a.issueDate || 0) - (b.issueDate || 0));
+
+  function csvEscape(s) {
+    const v = String(s == null ? "" : s);
+    // Escapa aspas, vírgula, quebra de linha — wrap em aspas se necessário.
+    if (/[",\r\n;]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+    return v;
+  }
+  function fmtDate(ms) {
+    if (!ms) return "";
+    return new Date(ms).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  }
+  function fmtCents(c) {
+    if (c == null) return "";
+    return (Number(c) / 100).toFixed(2).replace(".", ",");
+  }
+  function typeLabel(t) { return t === "income" ? "Receita" : t === "expense" ? "Despesa" : t || ""; }
+  function statusLabel(s) {
+    return s === "paid" ? "Pago" : s === "pending" ? "Pendente" : s === "overdue" ? "Atrasado" : s || "";
+  }
+
+  const headers = [
+    "Data emissão", "Tipo", "Categoria", "Descrição",
+    "Valor (R$)", "Status", "Data pagamento", "Método", "Paciente", "Observação"
+  ];
+  const rows = txs.map(tx => [
+    fmtDate(tx.issueDate),
+    typeLabel(tx.type),
+    CATEGORY_LABELS?.[tx.category] || tx.category || "",
+    tx.description || "",
+    fmtCents(tx.amountCents),
+    statusLabel(tx.status),
+    fmtDate(tx.paidDate),
+    tx.paymentMethod || "",
+    tx.patientName || "",
+    tx.notes || ""
+  ]);
+
+  // BOM (﻿) sinaliza UTF-8 pro Excel; separador ; é o padrão pt-BR
+  // (vírgula é decimal). Fica mais compatível que ',' como sep.
+  const csv = "﻿" + [headers, ...rows].map(r => r.map(csvEscape).join(";")).join("\r\n");
+
+  const filename = `financeiro-${(req.query?.year || new Date().getFullYear())}.csv`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(csv);
+}));
+
 // PATCH /therapy/financeiro/transacoes/:id
 // Atualiza campos editáveis. Mais comum: marcar como "pago" (status + paidDate).
 // Permite mudar tudo exceto txId e therapistUid.
