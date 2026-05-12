@@ -5664,6 +5664,143 @@ router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, transactions, categories: CATEGORY_LABELS });
 }));
 
+// GET /therapy/relatorios/analytics?range=30d|90d|year|all
+// Analytics não-financeiro: volume, no-show rate, frequência por dia/hora,
+// novos vs retorno. Lê de therapy_sessions.
+// Sem dados sensíveis: só metadados (status, timestamps, patientId), não
+// expõe nome/notas (que estão E2EE de qualquer forma).
+router.get("/therapy/relatorios/analytics", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const range = String(req.query?.range || "30d").trim();
+  const now = Date.now();
+  let rangeStart;
+  if      (range === "30d")  rangeStart = now - 30  * 86_400_000;
+  else if (range === "90d")  rangeStart = now - 90  * 86_400_000;
+  else if (range === "year") rangeStart = now - 365 * 86_400_000;
+  else if (range === "all")  rangeStart = 0;
+  else                       rangeStart = now - 30  * 86_400_000;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .limit(2000)
+    .get();
+
+  const sessions = snap.docs.map(d => d.data());
+
+  // Filtra por scheduledAt no range; sessões sem scheduledAt usam createdAt.
+  function getTs(s) {
+    return Number(s.scheduledAt) ||
+           (s.createdAt?.toMillis ? s.createdAt.toMillis() : Number(s.createdAt)) || 0;
+  }
+  const inRange = sessions.filter(s => {
+    const t = getTs(s);
+    return t >= rangeStart && t <= now;
+  });
+
+  // Totais por status. canceled_24h = cancelado com <24h antes (no-show).
+  let completed = 0, canceled = 0, noShow = 0, scheduled = 0, inProgress = 0;
+  for (const s of inRange) {
+    const at = Number(s.scheduledAt || 0);
+    const canceledAtMs = Number(s.canceledAt) || (s.canceledAt?.toMillis ? s.canceledAt.toMillis() : 0);
+    if (s.status === "completed")   completed++;
+    else if (s.status === "in_progress") inProgress++;
+    else if (s.status === "canceled") {
+      canceled++;
+      // No-show heurístico: canceled com <24h antes da sessão (inclui o "esqueceu de avisar")
+      if (at && canceledAtMs && (at - canceledAtMs) < 24 * 60 * 60 * 1000) noShow++;
+    } else {
+      scheduled++;
+    }
+  }
+  const totals = { sessions: inRange.length, completed, canceled, noShow, scheduled, inProgress };
+  const completionDenom = completed + canceled;
+  const rates = {
+    completionRate: completionDenom > 0 ? completed / completionDenom : null,
+    noShowRate:     completionDenom > 0 ? noShow    / completionDenom : null
+  };
+
+  // Por mês (últimos 12). Usa scheduledAt; fallback pra createdAt.
+  const monthCounts = new Map();
+  for (const s of inRange) {
+    const t = getTs(s);
+    if (!t) continue;
+    const d = new Date(t);
+    const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    monthCounts.set(key, (monthCounts.get(key) || 0) + 1);
+  }
+  const byMonth = Array.from(monthCounts.entries())
+    .map(([month, count]) => ({ month, count }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  // Por dia da semana (0=domingo, 6=sábado).
+  const dayCounts = [0,0,0,0,0,0,0];
+  for (const s of inRange) {
+    const t = getTs(s);
+    if (!t) continue;
+    dayCounts[new Date(t).getDay()]++;
+  }
+  const byDayOfWeek = dayCounts.map((count, day) => ({ day, count }));
+
+  // Por hora do dia (0-23).
+  const hourCounts = new Array(24).fill(0);
+  for (const s of inRange) {
+    const t = getTs(s);
+    if (!t) continue;
+    hourCounts[new Date(t).getHours()]++;
+  }
+  const byHour = hourCounts.map((count, hour) => ({ hour, count }));
+
+  // Novos vs retorno. "Novo" = 1ª sessão DO PACIENTE caiu dentro do range
+  // (precisa olhar histórico completo, não só o range).
+  const allByPatient = new Map(); // patientId → [timestamps]
+  for (const s of sessions) {
+    const pid = s.patientId || `_anon_${s.sessionId}`; // sessões sem patientId tratadas como avulsas
+    const t = getTs(s);
+    if (!t) continue;
+    if (!allByPatient.has(pid)) allByPatient.set(pid, []);
+    allByPatient.get(pid).push(t);
+  }
+  let newPatients = 0, returningSessionCount = 0, newPatientSessionCount = 0;
+  const patientsSeen = new Set();
+  for (const s of inRange) {
+    const pid = s.patientId || `_anon_${s.sessionId}`;
+    const allTs = (allByPatient.get(pid) || []).sort((a,b) => a-b);
+    const firstTs = allTs[0] || 0;
+    if (firstTs >= rangeStart) {
+      // 1ª sessão do paciente caiu DENTRO do range → conta como novo
+      newPatientSessionCount++;
+      if (!patientsSeen.has(pid)) { newPatients++; patientsSeen.add(pid); }
+    } else {
+      returningSessionCount++;
+    }
+  }
+  const distinctPatients = new Set(inRange.map(s => s.patientId || `_anon_${s.sessionId}`)).size;
+  const patients = {
+    distinct: distinctPatients,
+    new: newPatients,
+    returning: distinctPatients - newPatients,
+    sessionsFromNew: newPatientSessionCount,
+    sessionsFromReturning: returningSessionCount
+  };
+
+  return res.json({
+    ok: true,
+    range,
+    rangeStartMs: rangeStart,
+    rangeEndMs: now,
+    totals,
+    rates,
+    byMonth,
+    byDayOfWeek,
+    byHour,
+    patients
+  });
+}));
+
 // GET /therapy/financeiro/export.csv
 // Export CSV de transações pra contador / declaração de IR.
 // Range padrão: ano vigente. Aceita ?year=YYYY ou ?from=YYYY-MM-DD&to=YYYY-MM-DD.
