@@ -1106,6 +1106,10 @@ router.get("/therapy/profissional/comprovante-formacao/status", asyncHandler(asy
 
 const LOGO_MAX_BASE64 = 300 * 1024; // ~225 KB binário
 const LOGO_ALLOWED_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
+// Foto de perfil (avatar circular do topbar). Mais leve que a logo da clínica:
+// o cliente redimensiona pra 256x256 antes de enviar.
+const PHOTO_MAX_BASE64 = 150 * 1024; // ~110 KB binário
+const PHOTO_ALLOWED_MIMES = LOGO_ALLOWED_MIMES;
 
 router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -1207,6 +1211,22 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       // Remove logo
       updates.logoBase64 = admin.firestore.FieldValue.delete();
       updates.logoMime   = admin.firestore.FieldValue.delete();
+    }
+  }
+
+  // Foto de perfil (avatar). Mesmo padrão da logo — cliente redimensiona
+  // pra 256x256 antes de enviar, mantendo o doc pequeno (~50 KB).
+  if (req.body?.photoBase64 !== undefined) {
+    const photoBase64 = String(req.body.photoBase64 || "").trim();
+    const photoMime   = String(req.body.photoMime   || "").trim().toLowerCase();
+    if (photoBase64) {
+      if (photoBase64.length > PHOTO_MAX_BASE64) return sendError(res, 413, "FOTO_GRANDE_DEMAIS");
+      if (!PHOTO_ALLOWED_MIMES.has(photoMime))   return sendError(res, 400, "FOTO_TIPO_INVALIDO");
+      updates.photoBase64 = photoBase64;
+      updates.photoMime   = photoMime;
+    } else {
+      updates.photoBase64 = admin.firestore.FieldValue.delete();
+      updates.photoMime   = admin.firestore.FieldValue.delete();
     }
   }
 
