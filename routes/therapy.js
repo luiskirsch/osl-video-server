@@ -22,6 +22,7 @@ const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
+const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
@@ -1274,9 +1275,14 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const capabilities = conselho?.capabilities || [];
   const prescriptionTypes = getPrescriptionTypesForTherapist(therapist);
 
+  // Remove secrets do payload — twoFactorSecret/twoFactorPendingSecret nunca
+  // saem do servidor. Mantém só flags públicas (enabled).
+  const { twoFactorSecret, twoFactorPendingSecret, ...therapistPublic } = therapist;
+  therapistPublic.twoFactorEnabled = !!therapist.twoFactorEnabled;
+
   return res.json({
     ok: true,
-    therapist,
+    therapist: therapistPublic,
     planAccess: {
       canUseFeatures: access.ok,
       reason: access.reason || null,
@@ -2062,6 +2068,141 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 
   await ref.delete();
   await logAudit({ type: "blackout_deleted", blackoutId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// 2FA (TOTP) — autenticação de 2 fatores opcional pro profissional
+//
+// Fluxo:
+// 1. /2fa/setup — gera secret pendente + QR code. Profissional escaneia.
+// 2. /2fa/enable body: { code } — verifica código com pending; se OK, ativa.
+// 3. /2fa/verify body: { code } — após login Firebase, gera token de sessão.
+// 4. /2fa/disable body: { code } — verifica código antes de desativar.
+//
+// Storage: therapists/{uid}.twoFactorSecret, twoFactorEnabled,
+//          twoFactorPendingSecret (durante setup).
+// Secrets NUNCA saem do servidor (filtrados em /me).
+// Enforcement: frontend (auth-guard) — se enabled, redirect pra 2fa-verify
+// quando não houver token válido em sessionStorage.
+// ─────────────────────────────────────────────────────────────────────────
+const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000; // 8h (mesmo do access)
+
+router.post("/therapy/2fa/setup", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (therapist.twoFactorEnabled) return sendError(res, 409, "JA_ATIVADO");
+
+  const secret = gen2faSecret();
+  const label = therapist.displayName || therapist.email || uid;
+  const url = otpauthUrl({ secret, label, issuer: "Espaço Prelúdio" });
+
+  await getDb().collection("therapists").doc(uid).set({
+    twoFactorPendingSecret: secret,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, secret, otpauthUrl: url });
+}));
+
+router.post("/therapy/2fa/enable", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const code = String(req.body?.code || "").trim();
+  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (therapist.twoFactorEnabled) return sendError(res, 409, "JA_ATIVADO");
+  if (!therapist.twoFactorPendingSecret) return sendError(res, 400, "SETUP_NAO_INICIADO");
+
+  if (!verifyTotp(therapist.twoFactorPendingSecret, code)) {
+    return sendError(res, 401, "CODIGO_INCORRETO");
+  }
+
+  await getDb().collection("therapists").doc(uid).set({
+    twoFactorEnabled: true,
+    twoFactorSecret: therapist.twoFactorPendingSecret,
+    twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
+    twoFactorEnabledAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "twofa_enabled", therapistUid: uid });
+
+  // Emite token de sessão imediato pra evitar redirect logo após enable.
+  const sessionToken = signPayload({
+    token_type: "twofa_session",
+    uid,
+    iat: Date.now(),
+    exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+
+  return res.json({ ok: true, sessionToken });
+}));
+
+router.post("/therapy/2fa/verify", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const code = String(req.body?.code || "").trim();
+  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!therapist.twoFactorEnabled || !therapist.twoFactorSecret) {
+    return sendError(res, 400, "TWOFA_NAO_ATIVADO");
+  }
+
+  if (!verifyTotp(therapist.twoFactorSecret, code)) {
+    return sendError(res, 401, "CODIGO_INCORRETO");
+  }
+
+  await logAudit({ type: "twofa_verified", therapistUid: uid });
+
+  const sessionToken = signPayload({
+    token_type: "twofa_session",
+    uid,
+    iat: Date.now(),
+    exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+
+  return res.json({ ok: true, sessionToken });
+}));
+
+router.post("/therapy/2fa/disable", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const code = String(req.body?.code || "").trim();
+  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!therapist.twoFactorEnabled) return sendError(res, 409, "NAO_ATIVADO");
+
+  if (!verifyTotp(therapist.twoFactorSecret, code)) {
+    return sendError(res, 401, "CODIGO_INCORRETO");
+  }
+
+  await getDb().collection("therapists").doc(uid).set({
+    twoFactorEnabled: false,
+    twoFactorSecret: admin.firestore.FieldValue.delete(),
+    twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
+    twoFactorDisabledAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({ type: "twofa_disabled", therapistUid: uid });
+
   return res.json({ ok: true });
 }));
 
