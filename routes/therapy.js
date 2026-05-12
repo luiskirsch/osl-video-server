@@ -33,6 +33,17 @@ const {
   MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
+const {
+  CATEGORY_LABELS,
+  DESCRIPTION_MAX,
+  isValidType: isValidFinType,
+  isValidStatus: isValidFinStatus,
+  isValidPaymentMethod: isValidFinPaymentMethod,
+  validateCategoryForType: validateFinCategoryForType,
+  isValidAmount: isValidFinAmount,
+  computeSummary: computeFinSummary,
+  parseMonthRange: parseFinMonthRange
+} = require("../services/financial");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
@@ -4954,5 +4965,281 @@ router.get("/therapy/health", (req, res) => {
     docValidatorProvider: String(process.env.DOC_VALIDATOR_PROVIDER || "claude").toLowerCase()
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// FINANCEIRO — controle de receitas e despesas do profissional
+//
+// Coleção: therapy_transactions/{txId}
+// Helpers: services/financial.js (categorias, validação, cálculo de resumo)
+//
+// Modelo de privacidade: dados financeiros ficam em plaintext pra permitir
+// agrupamento/relatório server-side. description é texto livre limitado a 200
+// chars; recomendar ao user não pôr dado clínico ali (apenas tags tipo
+// "Sessão 15/05"). patientNameSnapshot é gravado pra manter histórico legível
+// mesmo se o paciente for deletado.
+//
+// Versão atual v1: CRUD + resumo mensal. Próxima versão: integração Mercado
+// Pago pra cobrar Pix/boleto a partir de uma transação pendente (mpPaymentId,
+// mpPixQrCode, mpBoletoUrl). Webhook /webhooks/mp/financeiro marca como pago.
+// ═════════════════════════════════════════════════════════════════════════
+
+// POST /therapy/financeiro/transacoes
+// Body: { type, category, amount (centavos), description?, paymentMethod,
+//         status, patientId?, sessionId?, issueDate, dueDate?, paidDate? }
+router.post("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const type     = String(req.body?.type || "").trim().toLowerCase();
+  const category = String(req.body?.category || "").trim().toLowerCase();
+  const status   = String(req.body?.status || "pendente").trim().toLowerCase();
+  const paymentMethod = String(req.body?.paymentMethod || "outro").trim().toLowerCase();
+
+  if (!isValidFinType(type))            return sendError(res, 400, "TIPO_INVALIDO");
+  if (!isValidFinStatus(status))        return sendError(res, 400, "STATUS_INVALIDO");
+  if (!isValidFinPaymentMethod(paymentMethod)) return sendError(res, 400, "METODO_PAGAMENTO_INVALIDO");
+
+  const catCheck = validateFinCategoryForType(type, category);
+  if (!catCheck.ok) return sendError(res, 400, catCheck.reason);
+
+  const amount = Number(req.body?.amount);
+  if (!isValidFinAmount(amount)) return sendError(res, 400, "VALOR_INVALIDO", { hint: "amount em centavos (integer)" });
+
+  const description = String(req.body?.description || "").trim().slice(0, DESCRIPTION_MAX);
+
+  const issueDateRaw = Number(req.body?.issueDate);
+  if (!Number.isFinite(issueDateRaw) || issueDateRaw <= 0) return sendError(res, 400, "DATA_EMISSAO_INVALIDA");
+  const issueDate = issueDateRaw;
+
+  const dueDateRaw  = Number(req.body?.dueDate || 0);
+  const paidDateRaw = Number(req.body?.paidDate || 0);
+  const dueDate  = Number.isFinite(dueDateRaw) && dueDateRaw > 0  ? dueDateRaw  : null;
+  const paidDate = Number.isFinite(paidDateRaw) && paidDateRaw > 0 ? paidDateRaw : null;
+
+  // Coerência: status=pago exige paidDate. Se user não mandou, usa issueDate
+  // como fallback (ele lançou tx pago sem informar data exata).
+  let paidDateFinal = paidDate;
+  if (status === "pago" && !paidDateFinal) paidDateFinal = issueDate;
+  if (status !== "pago") paidDateFinal = null; // limpa se mudou status
+
+  // Validação do paciente (se passado, precisa ser do próprio therapist).
+  // patientNameSnapshot é o que o user envia — não buscamos do paciente
+  // (que está cifrado E2EE), o frontend já mandou o nome decifrado.
+  let patientId = String(req.body?.patientId || "").trim() || null;
+  const patientNameSnapshot = String(req.body?.patientNameSnapshot || "").trim().slice(0, PATIENT_NAME_MAX) || null;
+  if (patientId) {
+    const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
+
+  const sessionId = String(req.body?.sessionId || "").trim() || null;
+  if (sessionId) {
+    const ssnap = await getDb().collection("therapy_sessions").doc(sessionId).get();
+    if (!ssnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+    if (ssnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
+
+  const txId = newId("tx");
+  const db = getDb();
+  await db.collection("therapy_transactions").doc(txId).set({
+    txId,
+    therapistUid: uid,
+    type, category, amount,
+    description: description || null,
+    paymentMethod,
+    status,
+    patientId, patientNameSnapshot,
+    sessionId,
+    issueDate,
+    dueDate,
+    paidDate: paidDateFinal,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "transacao_created", txId, therapistUid: uid, txType: type, category, amount });
+  return res.json({ ok: true, txId });
+}));
+
+// GET /therapy/financeiro/transacoes?month=YYYY-MM&type=&category=&status=&patientId=
+// Filtros opcionais. Sem filtros retorna últimos 6 meses pra não estourar
+// bandwidth no primeiro acesso. Ordenado por issueDate desc.
+router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  let q = db.collection("therapy_transactions").where("therapistUid", "==", uid);
+
+  const monthStr = String(req.query?.month || "").trim();
+  if (monthStr) {
+    const range = parseFinMonthRange(monthStr);
+    if (!range) return sendError(res, 400, "MES_INVALIDO", { hint: "Use YYYY-MM" });
+    q = q.where("issueDate", ">=", range.startMs).where("issueDate", "<", range.endMs);
+  } else {
+    // Default: últimos 6 meses (pra dashboard inicial não vazio).
+    const sixMonthsAgo = Date.now() - 6 * 30 * 86_400_000;
+    q = q.where("issueDate", ">=", sixMonthsAgo);
+  }
+
+  const typeFilter     = String(req.query?.type || "").trim().toLowerCase();
+  const categoryFilter = String(req.query?.category || "").trim().toLowerCase();
+  const statusFilter   = String(req.query?.status || "").trim().toLowerCase();
+  const patientFilter  = String(req.query?.patientId || "").trim();
+
+  if (typeFilter     && isValidFinType(typeFilter))         q = q.where("type", "==", typeFilter);
+  if (categoryFilter && CATEGORY_LABELS[categoryFilter])    q = q.where("category", "==", categoryFilter);
+  if (statusFilter   && isValidFinStatus(statusFilter))     q = q.where("status", "==", statusFilter);
+  if (patientFilter)                                        q = q.where("patientId", "==", patientFilter);
+
+  q = q.orderBy("issueDate", "desc").limit(500);
+
+  const snap = await q.get();
+  const transactions = snap.docs.map(d => d.data());
+  return res.json({ ok: true, transactions, categories: CATEGORY_LABELS });
+}));
+
+// PATCH /therapy/financeiro/transacoes/:id
+// Atualiza campos editáveis. Mais comum: marcar como "pago" (status + paidDate).
+// Permite mudar tudo exceto txId e therapistUid.
+router.patch("/therapy/financeiro/transacoes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const txId = String(req.params.id || "").trim();
+  if (!txId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_transactions").doc(txId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "TRANSACAO_NAO_ENCONTRADA");
+  const current = snap.data();
+  if (current.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = {};
+
+  if (req.body?.type !== undefined) {
+    const t = String(req.body.type).trim().toLowerCase();
+    if (!isValidFinType(t)) return sendError(res, 400, "TIPO_INVALIDO");
+    updates.type = t;
+  }
+  if (req.body?.category !== undefined) {
+    const c = String(req.body.category).trim().toLowerCase();
+    const typeForCheck = updates.type || current.type;
+    const check = validateFinCategoryForType(typeForCheck, c);
+    if (!check.ok) return sendError(res, 400, check.reason);
+    updates.category = c;
+  }
+  if (req.body?.amount !== undefined) {
+    const a = Number(req.body.amount);
+    if (!isValidFinAmount(a)) return sendError(res, 400, "VALOR_INVALIDO");
+    updates.amount = a;
+  }
+  if (req.body?.description !== undefined) {
+    updates.description = String(req.body.description || "").trim().slice(0, DESCRIPTION_MAX) || null;
+  }
+  if (req.body?.paymentMethod !== undefined) {
+    const m = String(req.body.paymentMethod).trim().toLowerCase();
+    if (!isValidFinPaymentMethod(m)) return sendError(res, 400, "METODO_PAGAMENTO_INVALIDO");
+    updates.paymentMethod = m;
+  }
+  if (req.body?.status !== undefined) {
+    const s = String(req.body.status).trim().toLowerCase();
+    if (!isValidFinStatus(s)) return sendError(res, 400, "STATUS_INVALIDO");
+    updates.status = s;
+    // Side-effect: status=pago + sem paidDate → seta paidDate=now.
+    // status≠pago → limpa paidDate (consistência).
+    if (s === "pago" && !req.body?.paidDate && !current.paidDate) {
+      updates.paidDate = Date.now();
+    } else if (s !== "pago") {
+      updates.paidDate = null;
+    }
+  }
+  if (req.body?.issueDate !== undefined) {
+    const d = Number(req.body.issueDate);
+    if (!Number.isFinite(d) || d <= 0) return sendError(res, 400, "DATA_EMISSAO_INVALIDA");
+    updates.issueDate = d;
+  }
+  if (req.body?.dueDate !== undefined) {
+    const d = Number(req.body.dueDate || 0);
+    updates.dueDate = Number.isFinite(d) && d > 0 ? d : null;
+  }
+  if (req.body?.paidDate !== undefined) {
+    const d = Number(req.body.paidDate || 0);
+    updates.paidDate = Number.isFinite(d) && d > 0 ? d : null;
+  }
+
+  if (Object.keys(updates).length === 0) return sendError(res, 400, "NADA_PARA_ATUALIZAR");
+
+  updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+  await ref.set(updates, { merge: true });
+
+  await logAudit({ type: "transacao_updated", txId, therapistUid: uid, fields: Object.keys(updates) });
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/financeiro/transacoes/:id
+// Hard delete + audit log. Status=cancelado fica como alternativa pra
+// preservar histórico sem deletar.
+router.delete("/therapy/financeiro/transacoes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const txId = String(req.params.id || "").trim();
+  if (!txId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_transactions").doc(txId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "TRANSACAO_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  await logAudit({ type: "transacao_deleted", txId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/financeiro/resumo?month=YYYY-MM
+// Dashboard mensal: saldo, previsto, totais por tipo+status, top categorias.
+// Default month = mês atual UTC se omitido. Querymonth deve ser YYYY-MM.
+router.get("/therapy/financeiro/resumo", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const requestedMonth = String(req.query?.month || "").trim();
+  let monthStr = requestedMonth;
+  if (!monthStr) {
+    const now = new Date();
+    monthStr = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+  const range = parseFinMonthRange(monthStr);
+  if (!range) return sendError(res, 400, "MES_INVALIDO", { hint: "Use YYYY-MM" });
+
+  const db = getDb();
+  const snap = await db.collection("therapy_transactions")
+    .where("therapistUid", "==", uid)
+    .where("issueDate", ">=", range.startMs)
+    .where("issueDate", "<", range.endMs)
+    .get();
+
+  const transactions = snap.docs.map(d => d.data());
+  const summary = computeFinSummary(transactions);
+
+  return res.json({
+    ok: true,
+    month: monthStr,
+    summary,
+    count: transactions.length
+  });
+}));
 
 module.exports = router;
