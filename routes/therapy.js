@@ -64,6 +64,12 @@ const {
   NAME_MAX:  CLINIC_NAME_MAX,
   CNPJ_MAX:  CLINIC_CNPJ_MAX
 } = require("../services/clinic");
+const {
+  valorPorExtenso,
+  PAYMENT_METHOD_LABELS: RECEIPT_PAYMENT_LABELS,
+  PATIENT_NAME_MAX: RECEIPT_PATIENT_NAME_MAX,
+  DESCRIPTION_MAX:  RECEIPT_DESCRIPTION_MAX
+} = require("../services/receipts");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
@@ -6047,6 +6053,181 @@ router.get("/therapy/clinicas/:id/repasse", asyncHandler(async (req, res) => {
       sobraClinicaCents: totalReceitaConsultas - totalRepasseGeral
     }
   });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// RECIBOS — recibo eletrônico de pagamento (não-fiscal)
+//
+// Coleções:
+//   therapy_receipts/{receiptId}         — recibo emitido
+//   therapy_receipt_counters/{uid}       — { seq: number } pra numeração
+//
+// Recibo NÃO é NF — não vai pra prefeitura, não gera ISS. Tem validade
+// jurídica como recibo de pagamento (CC Art. 320). Algumas operadoras de
+// saúde aceitam pra reembolso.
+//
+// Numeração sequencial por user: Firestore transaction garante atomicidade
+// contra emissões simultâneas. Sem gaps.
+//
+// Idempotência: 1 transação financeira tem no máximo 1 recibo. Se chamarem
+// POST de novo pra mesma txId, retorna o existente (não cria duplicado).
+//
+// Snapshot do emitente: preserva histórico se profissional editar perfil
+// depois (mudou conselho, endereço, etc).
+// ═════════════════════════════════════════════════════════════════════════
+
+// POST /therapy/recibos
+// Body: { txId }
+//
+// Gera recibo a partir de uma transação financeira "Pago" do tipo "Receita".
+// Idempotente: retorna recibo existente se já tiver sido emitido pra essa tx.
+router.post("/therapy/recibos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const txId = String(req.body?.txId || "").trim();
+  if (!txId) return sendError(res, 400, "TX_ID_OBRIGATORIO");
+
+  const db = getDb();
+
+  // 1) Valida a transação
+  const txRef = db.collection("therapy_transactions").doc(txId);
+  const txSnap = await txRef.get();
+  if (!txSnap.exists) return sendError(res, 404, "TRANSACAO_NAO_ENCONTRADA");
+  const tx = txSnap.data();
+  if (tx.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (tx.type !== "receita") return sendError(res, 400, "TX_NAO_E_RECEITA");
+  if (tx.status !== "pago") return sendError(res, 400, "TX_NAO_ESTA_PAGA");
+
+  // 2) Idempotência: já existe recibo pra essa tx?
+  const existingSnap = await db.collection("therapy_receipts")
+    .where("therapistUid", "==", uid)
+    .where("txId", "==", txId)
+    .limit(1).get();
+  if (!existingSnap.empty) {
+    return res.json({ ok: true, receipt: existingSnap.docs[0].data(), existed: true });
+  }
+
+  // 3) Snapshot do emitente (do doc therapist + consultorio)
+  const c = therapist.consultorio || {};
+  const idsEmitente = [];
+  if (therapist.crm) idsEmitente.push("CRM " + therapist.crm);
+  if (therapist.crp) idsEmitente.push("CRP " + therapist.crp);
+  const isLegacy = therapist.crm || therapist.crp;
+  if (!isLegacy && therapist.tipoConselho && therapist.numeroConselho) {
+    const sub = therapist.subtipoConselho ? ` (${therapist.subtipoConselho === "to" ? "TO" : "fisio"})` : "";
+    idsEmitente.push(`${therapist.tipoConselho} ${therapist.numeroConselho}${sub}`);
+  }
+  if (therapist.rqe) idsEmitente.push("RQE " + String(therapist.rqe).replace(/^RQE\s*/i, ""));
+
+  const emitterSnapshot = {
+    displayName:  therapist.displayName || "",
+    ids:          idsEmitente.join("  ·  "),
+    especialidade: therapist.especialidade || "",
+    cnpj:         therapist.cnpj || null,
+    cpf:          therapist.cpf || null,
+    address: c.endereco ? [
+      c.endereco + (c.numero ? `, ${c.numero}` : "") + (c.complemento ? ` — ${c.complemento}` : ""),
+      [c.bairro, c.cidade, c.uf, c.cep].filter(Boolean).join(" · ")
+    ].filter(Boolean).join(" / ") : "",
+    phone: c.telefone || "",
+    logoBase64: therapist.logoBase64 || null,
+    logoMime:   therapist.logoMime   || null
+  };
+
+  // 4) Aloca número sequencial via transaction
+  const counterRef = db.collection("therapy_receipt_counters").doc(uid);
+  const receiptId = newId("rcp");
+  const receiptRef = db.collection("therapy_receipts").doc(receiptId);
+
+  const valorExtensoTxt = valorPorExtenso(tx.amount);
+  const patientName = (tx.patientNameSnapshot || "").slice(0, RECEIPT_PATIENT_NAME_MAX);
+  const description = (tx.description || "").slice(0, RECEIPT_DESCRIPTION_MAX);
+
+  const sequentialNumber = await db.runTransaction(async (txx) => {
+    const counterSnap = await txx.get(counterRef);
+    const current = counterSnap.exists ? (counterSnap.data().seq || 0) : 0;
+    const next = current + 1;
+    txx.set(counterRef, {
+      seq: next,
+      therapistUid: uid,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    txx.set(receiptRef, {
+      receiptId,
+      therapistUid: uid,
+      txId,
+      sequentialNumber: next,
+      patientName: patientName || null,
+      patientCpf: tx.patientCpf || null,
+      amount: tx.amount,
+      amountExtenso: valorExtensoTxt,
+      description: description || null,
+      issueDate: tx.issueDate,
+      paidDate: tx.paidDate || tx.issueDate,
+      paymentMethod: tx.paymentMethod || "outro",
+      paymentMethodLabel: RECEIPT_PAYMENT_LABELS[tx.paymentMethod] || "Outro",
+      emitterSnapshot,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return next;
+  });
+
+  const finalSnap = await receiptRef.get();
+  await logAudit({ type: "receipt_created", receiptId, therapistUid: uid, txId, sequentialNumber });
+  return res.json({ ok: true, receipt: finalSnap.data(), existed: false });
+}));
+
+// GET /therapy/recibos?txId=&month=YYYY-MM
+// Lista recibos do user. Filtros opcionais. Ordenado por sequentialNumber desc.
+router.get("/therapy/recibos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_receipts")
+    .where("therapistUid", "==", uid)
+    .get();
+
+  const txIdFilter = String(req.query?.txId || "").trim();
+  const monthStr   = String(req.query?.month || "").trim();
+  let rangeStart = 0;
+  let rangeEnd   = Infinity;
+  if (monthStr) {
+    const range = parseFinMonthRange(monthStr);
+    if (!range) return sendError(res, 400, "MES_INVALIDO");
+    rangeStart = range.startMs;
+    rangeEnd   = range.endMs;
+  }
+
+  const receipts = snap.docs.map(d => d.data()).filter(r => {
+    if (txIdFilter && r.txId !== txIdFilter) return false;
+    if (typeof r.issueDate === "number" && (r.issueDate < rangeStart || r.issueDate >= rangeEnd)) return false;
+    return true;
+  }).sort((a, b) => (b.sequentialNumber || 0) - (a.sequentialNumber || 0));
+
+  return res.json({ ok: true, receipts });
+}));
+
+// GET /therapy/recibos/:id
+router.get("/therapy/recibos/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const receiptId = String(req.params.id || "").trim();
+  if (!receiptId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_receipts").doc(receiptId).get();
+  if (!snap.exists) return sendError(res, 404, "RECIBO_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  return res.json({ ok: true, receipt: snap.data() });
 }));
 
 module.exports = router;
