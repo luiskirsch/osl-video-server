@@ -2066,6 +2066,143 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// ANIVERSARIANTES — opt-in pra envio automático de e-mail no aniversário
+//
+// Modelo: therapy_birthday_optins/{optinId}
+//   { optinId, therapistUid, patientName, patientEmail, birthMonthDay (MMDD),
+//     createdAt, lastSentAt? (atualizado pelo scheduler pra idempotência) }
+//
+// Coleção separada (plain text) porque o therapy_patients é E2EE — backend
+// não consegue ler nome/email/aniversário do paciente sem a chave. Opt-in
+// explícito do profissional (LGPD: birthday é dado pessoal, exige base legal —
+// consentimento via cadastro).
+// ─────────────────────────────────────────────────────────────────────────
+const BIRTHDAY_NAME_MAX  = 80;
+const BIRTHDAY_EMAIL_MAX = 120;
+const BIRTHDAY_MMDD_RX   = /^(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/; // 0101..1231
+
+router.post("/therapy/aniversarios", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientName  = String(req.body?.patientName  || "").trim().slice(0, BIRTHDAY_NAME_MAX);
+  const patientEmail = String(req.body?.patientEmail || "").trim().toLowerCase().slice(0, BIRTHDAY_EMAIL_MAX);
+  const birthMonthDay = String(req.body?.birthMonthDay || "").trim();
+
+  if (!patientName)  return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!patientEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmail)) {
+    return sendError(res, 400, "EMAIL_INVALIDO");
+  }
+  if (!BIRTHDAY_MMDD_RX.test(birthMonthDay)) {
+    return sendError(res, 400, "DATA_INVALIDA", { hint: "Formato MMDD (ex.: 0512 para 12 de maio)" });
+  }
+
+  const optinId = newId("bdy");
+  const db = getDb();
+  await db.collection("therapy_birthday_optins").doc(optinId).set({
+    optinId,
+    therapistUid: uid,
+    patientName, patientEmail, birthMonthDay,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "birthday_optin_created", optinId, therapistUid: uid });
+  return res.json({ ok: true, optinId });
+}));
+
+router.patch("/therapy/aniversarios/:optinId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const optinId = String(req.params.optinId || "").trim();
+  if (!optinId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_birthday_optins").doc(optinId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "OPTIN_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (req.body?.patientName !== undefined) {
+    const v = String(req.body.patientName || "").trim().slice(0, BIRTHDAY_NAME_MAX);
+    if (!v) return sendError(res, 400, "NOME_OBRIGATORIO");
+    updates.patientName = v;
+  }
+  if (req.body?.patientEmail !== undefined) {
+    const v = String(req.body.patientEmail || "").trim().toLowerCase().slice(0, BIRTHDAY_EMAIL_MAX);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return sendError(res, 400, "EMAIL_INVALIDO");
+    updates.patientEmail = v;
+  }
+  if (req.body?.birthMonthDay !== undefined) {
+    const v = String(req.body.birthMonthDay || "").trim();
+    if (!BIRTHDAY_MMDD_RX.test(v)) return sendError(res, 400, "DATA_INVALIDA");
+    updates.birthMonthDay = v;
+  }
+
+  await ref.set(updates, { merge: true });
+  return res.json({ ok: true });
+}));
+
+router.delete("/therapy/aniversarios/:optinId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const optinId = String(req.params.optinId || "").trim();
+  if (!optinId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_birthday_optins").doc(optinId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "OPTIN_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  return res.json({ ok: true });
+}));
+
+router.get("/therapy/aniversarios", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_birthday_optins")
+    .where("therapistUid", "==", uid)
+    .limit(500)
+    .get();
+
+  // Ordena por proximidade do próximo aniversário (do dia atual em diante,
+  // dando a volta no ano). Útil pra UI mostrar quem vem primeiro.
+  const todayMMDD = (() => {
+    const d = new Date();
+    return String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+  })();
+  function distFromToday(mmdd) {
+    return mmdd >= todayMMDD ? Number(mmdd) - Number(todayMMDD) : 10000 + (Number(mmdd) - Number(todayMMDD));
+  }
+
+  const items = snap.docs
+    .map(d => {
+      const x = d.data();
+      return {
+        optinId: x.optinId,
+        patientName: x.patientName,
+        patientEmail: x.patientEmail,
+        birthMonthDay: x.birthMonthDay,
+        lastSentAt: x.lastSentAt?.toMillis ? x.lastSentAt.toMillis() : (Number(x.lastSentAt) || null)
+      };
+    })
+    .sort((a, b) => distFromToday(a.birthMonthDay) - distFromToday(b.birthMonthDay));
+
+  return res.json({ ok: true, items });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // LISTA DE ESPERA — pacientes aguardando vaga
 //
 // Modelo: therapy_waitlist/{waitlistId}

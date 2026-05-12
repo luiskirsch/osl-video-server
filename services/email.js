@@ -331,10 +331,32 @@ function templateFormacaoRejected({ therapistName, reason, retryUrl }) {
   return { subject, html, text };
 }
 
+// Template de aniversário — disparado pelo cron diário às 9h BRT pra pacientes
+// com opt-in cadastrado. Tom carinhoso, sem CTA agressivo (não é marketing).
+// `therapistName` aparece no subject e na assinatura — o paciente percebe como
+// envio "do profissional", não "da plataforma".
+function templateBirthday({ patientName, therapistName, clinicName }) {
+  const firstName = String(patientName || "").split(/\s+/)[0] || "Paciente";
+  const fromWhom = clinicName || therapistName || "Espaço Prelúdio";
+  const subject = `Feliz aniversário, ${firstName}!`;
+  const html = renderShell({
+    heading: `Feliz aniversário, ${escHtml(firstName)}! 🎉`,
+    bodyHtml: `
+      <p style="margin:0 0 14px;">Hoje é o seu dia.</p>
+      <p style="margin:0 0 14px;">Que este novo ciclo traga saúde, leveza e tempo pra você cuidar do que importa.</p>
+      <p style="margin:0 0 20px;">Um abraço,<br><strong>${escHtml(therapistName || fromWhom)}</strong>${clinicName && clinicName !== therapistName ? `<br><span style="color:rgba(28,31,29,0.55); font-size:13px;">${escHtml(clinicName)}</span>` : ""}</p>
+    `,
+    footer: "Você recebeu este e-mail porque seu profissional ativou um lembrete de aniversário pra você no Espaço Prelúdio. Se preferir não receber, fale com seu profissional."
+  });
+  const text = `Feliz aniversário, ${firstName}!\n\nHoje é o seu dia. Que este novo ciclo traga saúde, leveza e tempo pra você cuidar do que importa.\n\nUm abraço,\n${therapistName || fromWhom}${clinicName && clinicName !== therapistName ? `\n${clinicName}` : ""}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 module.exports = {
   sendEmail,
   templateConfirmation,
   templateReminder,
+  templateBirthday,
   templateDispensacaoNotice,
   templateStudentApproved,
   templateStudentRejected,

@@ -13,7 +13,7 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
-const { sendEmail, templateReminder, buildJoinUrl, buildCancelUrl } = require("./email");
+const { sendEmail, templateReminder, templateBirthday, buildJoinUrl, buildCancelUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { processPendingReferrals } = require("./affiliate");
 
@@ -153,6 +153,87 @@ async function runFullTick() {
   // LGPD: apaga fileBase64 de comprovantes-estudante com mais de 90 dias.
   // Mantém metadados (decision, reasons) pra audit.
   await runStudentDocCleanup().catch(e => logError("student_doc_cleanup_unhandled", e));
+  // Aniversariantes: dispara 1×/dia às 9h BRT (=12h UTC). Idempotência via
+  // lastSentAt comparado com a data de hoje (YYYY-MM-DD).
+  await runBirthdayTick().catch(e => logError("birthday_tick_unhandled", e));
+}
+
+// ─── Aniversariantes ─────────────────────────────────────────────────
+// Roda 1×/dia. Como o scheduler já gira de hora em hora (runFullTick),
+// usamos uma "janela" de hora alvo (9h BRT) + lastSentAt como guard idempotente.
+// Sem cron dedicado pra não introduzir nova dependência.
+
+const BIRTHDAY_TARGET_HOUR_BRT = 9; // hora local brasileira de envio
+const BIRTHDAY_TARGET_HOUR_UTC = 12; // ~9h BRT (sem DST no Brasil desde 2019)
+
+async function runBirthdayTick() {
+  const db = getDb();
+  if (!db) return;
+
+  const now = new Date();
+  // Só dispara na "janela" da hora alvo. Outros ticks do dia passam batido.
+  if (now.getUTCHours() !== BIRTHDAY_TARGET_HOUR_UTC) return;
+
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(now.getUTCDate()).padStart(2, "0");
+  const todayMMDD = `${mm}${dd}`;
+  const todayYMD  = `${now.getUTCFullYear()}-${mm}-${dd}`;
+
+  const snap = await db.collection("therapy_birthday_optins")
+    .where("birthMonthDay", "==", todayMMDD)
+    .limit(500)
+    .get();
+
+  if (snap.empty) return;
+
+  let sent = 0, skipped = 0, errors = 0;
+  for (const doc of snap.docs) {
+    const o = doc.data();
+    // Idempotência: se já enviou hoje, pula. Compara dia (não timestamp exato)
+    // pra cobrir reruns dentro do mesmo dia (ex.: scheduler reiniciado).
+    const lastSentMs = o.lastSentAt?.toMillis ? o.lastSentAt.toMillis() : Number(o.lastSentAt) || 0;
+    if (lastSentMs) {
+      const last = new Date(lastSentMs);
+      const lastYMD = `${last.getUTCFullYear()}-${String(last.getUTCMonth()+1).padStart(2,"0")}-${String(last.getUTCDate()).padStart(2,"0")}`;
+      if (lastYMD === todayYMD) { skipped++; continue; }
+    }
+
+    // Busca o therapist pra montar nome no template.
+    let therapistName = "";
+    let clinicName = "";
+    try {
+      const tsnap = await db.collection("therapists").doc(o.therapistUid).get();
+      if (tsnap.exists) {
+        const t = tsnap.data();
+        therapistName = t.displayName || "";
+        clinicName    = t.consultorio?.nome || t.whatsappConfig?.clinicName || "";
+      }
+    } catch (e) { /* segue com defaults */ }
+
+    try {
+      const tpl = templateBirthday({
+        patientName: o.patientName,
+        therapistName,
+        clinicName
+      });
+      const r = await sendEmail({ to: o.patientEmail, ...tpl });
+      if (r.ok || r.skipped) {
+        await doc.ref.set({
+          lastSentAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        sent++;
+      } else {
+        errors++;
+      }
+    } catch (e) {
+      logError("birthday_email_failed", e, { optinId: o.optinId });
+      errors++;
+    }
+  }
+
+  if (sent > 0 || errors > 0) {
+    logInfo("birthday_tick", { matched: snap.size, sent, skipped, errors, todayMMDD });
+  }
 }
 
 // Itera therapy_student_docs/{uid}/uploads/* e apaga fileBase64 quando
@@ -218,4 +299,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup, runBirthdayTick };
