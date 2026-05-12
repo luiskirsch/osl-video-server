@@ -70,6 +70,15 @@ const {
   PATIENT_NAME_MAX: RECEIPT_PATIENT_NAME_MAX,
   DESCRIPTION_MAX:  RECEIPT_DESCRIPTION_MAX
 } = require("../services/receipts");
+const {
+  normalizePhone: normalizeWaPhone,
+  isConfigured:   isWaConfigured,
+  getInstanceStatus: getWaInstanceStatus,
+  sendText: sendWaText,
+  sendConfirmation: sendWaConfirmation,
+  sendCancellation: sendWaCancellation,
+  DEFAULT_TEMPLATES: WA_DEFAULT_TEMPLATES
+} = require("../services/whatsapp");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
@@ -1276,6 +1285,11 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   const patientId   = String(req.body?.patientId || "").trim();
   const patientEmailRaw = String(req.body?.patientEmail || "").trim().toLowerCase();
   const patientEmail = patientEmailRaw && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw) ? patientEmailRaw : null;
+  // patientPhone: normaliza pra E.164 BR (5548988637670). Validação leve
+  // — se não conseguir normalizar, fica null (não envia WhatsApp).
+  const patientPhoneRaw = String(req.body?.patientPhone || "").trim();
+  const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
 
@@ -1342,6 +1356,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       patientName,
       patientId: patientId || null,
       patientEmail,
+      patientPhone,
       livekitRoom: room,
       e2eeKey,
       scheduledAt: at,
@@ -1383,6 +1398,32 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       hasJoinToken: Boolean(firstJoinToken)
     });
   }
+
+  // Confirmação por WhatsApp (fire-and-forget). Só dispara se:
+  // - patientPhone foi normalizado com sucesso
+  // - therapist.whatsappConfig.enabled = true
+  // - ZAPI configurado (env vars presentes)
+  // Mesma estratégia do e-mail: 1ª ocorrência só; recorrência usa lembrete 24h.
+  if (patientPhone && firstJoinToken && therapist?.whatsappConfig?.enabled) {
+    const cancelTokenInfo = buildCancelToken(created[0].sessionId);
+    const sessionForWa = {
+      sessionId: created[0].sessionId,
+      patientName, patientPhone,
+      scheduledAt: created[0].scheduledAt || Date.now()
+    };
+    sendWaConfirmation({
+      session: sessionForWa, therapist,
+      joinUrl:   buildPatientJoinUrl(firstJoinToken),
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+    }).then(r => {
+      if (r.ok)        logInfo("therapy_confirmation_wa_sent",    { sessionId: created[0].sessionId, messageId: r.messageId });
+      else if (r.skipped) logInfo("therapy_confirmation_wa_skipped", { sessionId: created[0].sessionId, reason: r.reason });
+      else             logWarn("therapy_confirmation_wa_failed",  { sessionId: created[0].sessionId, error: r.error });
+    }).catch(e =>
+      logError("therapy_confirmation_wa_exception", e, { sessionId: created[0].sessionId })
+    );
+  }
+
   await logAudit({
     type: "session_created",
     sessionId: created[0].sessionId,
@@ -1802,6 +1843,34 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
     canceledBy,
     hasReason: Boolean(reason)
   });
+
+  // WhatsApp de cancelamento (fire-and-forget). Só dispara se patientPhone
+  // está setado E therapist.whatsappConfig.enabled. Carrega therapist do
+  // doc pra acessar a config — sessão tem só therapistUid.
+  if (sessData.patientPhone && canceledBy !== "patient_public") {
+    try {
+      const tsnap = await db.collection("therapists").doc(sessData.therapistUid).get();
+      const therapist = tsnap.exists ? tsnap.data() : null;
+      if (therapist?.whatsappConfig?.enabled) {
+        sendWaCancellation({
+          session: {
+            patientName: sessData.patientName,
+            patientPhone: sessData.patientPhone,
+            scheduledAt: sessData.scheduledAt
+          },
+          therapist
+        }).then(r => {
+          if (r.ok)        logInfo("therapy_cancellation_wa_sent",    { sessionId, messageId: r.messageId });
+          else if (r.skipped) logInfo("therapy_cancellation_wa_skipped", { sessionId, reason: r.reason });
+          else             logWarn("therapy_cancellation_wa_failed",  { sessionId, error: r.error });
+        }).catch(e =>
+          logError("therapy_cancellation_wa_exception", e, { sessionId })
+        );
+      }
+    } catch (e) {
+      logError("therapy_cancellation_wa_load_therapist_failed", e, { sessionId });
+    }
+  }
 }
 
 // (a) Terapeuta autenticado cancela. scope="forward" cancela esta + todas
@@ -6228,6 +6297,171 @@ router.get("/therapy/recibos/:id", asyncHandler(async (req, res) => {
   if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   return res.json({ ok: true, receipt: snap.data() });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// WHATSAPP — configuração por profissional + endpoint de teste + webhook
+//
+// Provider: Z-API (ver services/whatsapp.js). Disparo automático em:
+//   - POST /therapy/sessao/criar (acima) — confirmação
+//   - applyCancellation (acima) — cancelamento
+//   - services/scheduler.js — lembrete 24h antes
+//
+// Config vive em therapists/{uid}.whatsappConfig:
+//   { enabled, clinicName, phoneClinic, templates: { confirmacao, lembrete,
+//     cancelamento } }
+// Templates default ficam em services/whatsapp.js — só sobrescritos pelo
+// profissional via PATCH abaixo.
+// ═════════════════════════════════════════════════════════════════════════
+
+// GET /therapy/profissional/whatsapp/config
+// Retorna config atual + templates default (pra UI usar como placeholder)
+// + status da instância (conectada/desconectada).
+router.get("/therapy/profissional/whatsapp/config", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  // Status só consultado sob demanda (faz HTTP call pra Z-API). Pra UI
+  // primária é OK; pode ser cacheado client-side se virar bottleneck.
+  const status = await getWaInstanceStatus().catch(() => ({ connected: false, reason: "ERROR" }));
+
+  return res.json({
+    ok: true,
+    config: therapist.whatsappConfig || {
+      enabled: false,
+      clinicName: therapist.displayName || "",
+      phoneClinic: "",
+      templates: {}
+    },
+    defaults: WA_DEFAULT_TEMPLATES,
+    instanceStatus: {
+      configured: isWaConfigured(),
+      connected:  status.connected,
+      reason:     status.reason || null
+    }
+  });
+}));
+
+// PATCH /therapy/profissional/whatsapp/config
+// Body: { enabled?, clinicName?, phoneClinic?, templates? }
+// templates aceita objeto parcial: { confirmacao?, lembrete?, cancelamento? }
+const WA_TEMPLATE_MAX = 1500; // SMS-like cap, gera mensagem visível no WA
+const WA_CLINIC_NAME_MAX = 100;
+const WA_PHONE_MAX = 30;
+router.patch("/therapy/profissional/whatsapp/config", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const current = therapist.whatsappConfig || {};
+  const next = { ...current };
+
+  if (req.body?.enabled !== undefined)     next.enabled     = Boolean(req.body.enabled);
+  if (req.body?.clinicName !== undefined)  next.clinicName  = String(req.body.clinicName).trim().slice(0, WA_CLINIC_NAME_MAX);
+  if (req.body?.phoneClinic !== undefined) next.phoneClinic = String(req.body.phoneClinic).trim().slice(0, WA_PHONE_MAX);
+
+  if (req.body?.templates && typeof req.body.templates === "object") {
+    const tplIn = req.body.templates;
+    const tplOut = { ...(current.templates || {}) };
+    for (const k of ["confirmacao", "lembrete", "cancelamento"]) {
+      if (tplIn[k] === undefined) continue;
+      const v = String(tplIn[k] || "").slice(0, WA_TEMPLATE_MAX);
+      // Vazio significa "voltar ao default" — apaga override.
+      if (v.trim() === "") delete tplOut[k];
+      else tplOut[k] = v;
+    }
+    next.templates = tplOut;
+  }
+
+  const db = getDb();
+  await db.collection("therapists").doc(uid).set({
+    whatsappConfig: next,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "whatsapp_config_updated",
+    therapistUid: uid,
+    enabled: next.enabled,
+    customTemplates: Object.keys(next.templates || {})
+  });
+  return res.json({ ok: true, config: next });
+}));
+
+// POST /therapy/profissional/whatsapp/teste
+// Body: { to } — número de teste pra disparar uma mensagem "Olá! Teste do
+// Espaço Prelúdio." Usado pra validar que credenciais + número estão OK
+// antes de ativar pra pacientes.
+router.post("/therapy/profissional/whatsapp/teste", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!isWaConfigured()) {
+    return sendError(res, 503, "ZAPI_NAO_CONFIGURADO", {
+      detail: "Credenciais Z-API ainda não configuradas no servidor. Avise o suporte."
+    });
+  }
+
+  const to = String(req.body?.to || "").trim();
+  if (!to) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+
+  const nome = therapist.whatsappConfig?.clinicName || therapist.displayName || "Espaço Prelúdio";
+  const msg = `Olá! Teste de integração WhatsApp do Espaço Prelúdio.
+
+Esta mensagem foi enviada por ${nome}.
+
+Se você recebeu, o canal está funcionando corretamente. Não é necessário responder.`;
+
+  const result = await sendWaText({ to, message: msg });
+  if (!result.ok) {
+    return res.status(502).json({
+      ok: false,
+      error: result.error || "ENVIO_FALHOU",
+      data: result.data || null
+    });
+  }
+  await logAudit({ type: "whatsapp_test_sent", therapistUid: uid, to: normalizeWaPhone(to) });
+  return res.json({ ok: true, messageId: result.messageId });
+}));
+
+// POST /therapy/webhook/zapi
+// Recebe eventos do Z-API. Pelo briefing, pacientes não respondem direto
+// (número é só de envio + ligação telefônica pra contato). Mas registramos
+// mensagens recebidas pra audit/debug. Sem ação automatizada por enquanto.
+router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
+  // Z-API envia múltiplos tipos de evento: ReceivedCallback, MessageStatusCallback,
+  // ConnectionUpdate, etc. Logamos tudo pra observabilidade inicial.
+  const type = req.body?.type || req.body?.event || "unknown";
+  const phone = req.body?.phone || req.body?.from || null;
+  const messageId = req.body?.messageId || req.body?.id || null;
+
+  logInfo("zapi_webhook", { type, phone, messageId, hasBody: !!req.body });
+
+  // Audit log pra ações inbound dignas de nota (paciente respondendo,
+  // mensagem entregue, etc).
+  if (ensureDb({ status: () => ({ json: () => null }) })) {
+    try {
+      await logAudit({
+        type: "zapi_webhook_received",
+        eventType: String(type).slice(0, 50),
+        phone: phone ? String(phone).slice(0, 30) : null,
+        messageId: messageId ? String(messageId).slice(0, 100) : null
+      });
+    } catch {}
+  }
+
+  // Sempre 200 — Z-API retry se receber não-200, e não queremos loop.
+  return res.json({ ok: true, ignored: type === "unknown" });
 }));
 
 module.exports = router;

@@ -14,6 +14,7 @@ const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
 const { sendEmail, templateReminder, buildJoinUrl, buildCancelUrl } = require("./email");
+const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { processPendingReferrals } = require("./affiliate");
 
 const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1h
@@ -62,13 +63,14 @@ async function runReminderTick() {
     .limit(500)
     .get();
 
-  let candidates = 0, sent = 0, errors = 0;
+  let candidates = 0, sent = 0, errors = 0, waSent = 0;
   for (const doc of snap.docs) {
     const s = doc.data();
     const at = Number(s.scheduledAt || 0);
     if (!at || at <= lookaheadStart || at > lookaheadEnd) continue;
     if (s.reminderSentAt) continue;
-    if (!s.patientEmail) continue; // sem e-mail, no-op silencioso
+    // Sem nenhum canal de contato (email NEM phone) → no-op
+    if (!s.patientEmail && !s.patientPhone) continue;
     candidates++;
 
     // Marca antes de enviar pra evitar duplicação se este tick crashar.
@@ -82,33 +84,64 @@ async function runReminderTick() {
       continue;
     }
 
-    try {
-      const joinToken   = buildJoinTokenForSession(s);
-      const cancelToken = buildCancelTokenForSession(s.sessionId);
-      const tpl = templateReminder({
-        patientName: s.patientName || "Paciente",
-        therapistName: s.therapistDisplayName || "seu profissional",
-        scheduledAt: at,
-        joinUrl:   buildJoinUrl(joinToken),
-        cancelUrl: buildCancelUrl(cancelToken)
-      });
-      const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
-      if (!result.ok && !result.skipped) {
-        // Reverte reminderSentAt pra retry no próximo tick.
-        await doc.ref.set({ reminderSentAt: null }, { merge: true });
-        errors++;
-        continue;
+    const joinToken   = buildJoinTokenForSession(s);
+    const cancelToken = buildCancelTokenForSession(s.sessionId);
+    const joinUrl   = buildJoinUrl(joinToken);
+    const cancelUrl = buildCancelUrl(cancelToken);
+
+    // E-mail (canal primário, mais antigo).
+    let emailOk = false;
+    if (s.patientEmail) {
+      try {
+        const tpl = templateReminder({
+          patientName: s.patientName || "Paciente",
+          therapistName: s.therapistDisplayName || "seu profissional",
+          scheduledAt: at,
+          joinUrl, cancelUrl
+        });
+        const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
+        emailOk = result.ok || result.skipped;
+        if (!emailOk) errors++;
+      } catch (e) {
+        logError("reminder_email_failed", e, { sessionId: s.sessionId });
       }
-      sent++;
-    } catch (e) {
-      logError("reminder_send_failed", e, { sessionId: s.sessionId });
-      try { await doc.ref.set({ reminderSentAt: null }, { merge: true }); } catch {}
-      errors++;
+    } else {
+      emailOk = true; // no-op não conta como erro
     }
+
+    // WhatsApp (canal secundário). Só envia se o therapist tem
+    // whatsappConfig.enabled — busca lazy do doc.
+    if (s.patientPhone) {
+      try {
+        const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
+        const therapist = tsnap.exists ? tsnap.data() : null;
+        if (therapist?.whatsappConfig?.enabled) {
+          const session = {
+            patientName: s.patientName, patientPhone: s.patientPhone,
+            scheduledAt: at
+          };
+          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
+          if (r.ok) waSent++;
+        }
+      } catch (e) {
+        logError("reminder_wa_failed", e, { sessionId: s.sessionId });
+      }
+    }
+
+    // Se nenhum canal funcionou (e tinha algum pra tentar), reverte
+    // reminderSentAt pra retry. Caso contrário, conta como enviado.
+    if (!emailOk && !s.patientEmail) {
+      // não tinha email, não tinha como falhar nele
+    }
+    if (!emailOk && s.patientEmail) {
+      await doc.ref.set({ reminderSentAt: null }, { merge: true });
+      continue;
+    }
+    sent++;
   }
 
   if (candidates > 0 || errors > 0) {
-    logInfo("reminder_tick", { candidates, sent, errors, lookaheadHours: REMINDER_LOOKAHEAD_HOURS });
+    logInfo("reminder_tick", { candidates, sent, waSent, errors, lookaheadHours: REMINDER_LOOKAHEAD_HOURS });
   }
 }
 

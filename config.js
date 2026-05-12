@@ -198,6 +198,23 @@ const EMAIL_FROM     = process.env.EMAIL_FROM     || "Espaço Prelúdio <agendas
 // 1h de janela permite que o cron rode 1×/h sem perder eventos.
 const REMINDER_LOOKAHEAD_HOURS = Number(process.env.REMINDER_LOOKAHEAD_HOURS || 24);
 
+// ─── WhatsApp via Z-API ──────────────────────────────────────────────────
+// Provider: https://z-api.io — número único da plataforma envia mensagens
+// (confirmação, lembrete, cancelamento) pros pacientes. Custo mensal fixo
+// absorvido no plano Pro.
+//
+// Setup: criar instância no painel Z-API, parear número 48988637670 via
+// QR code, pegar instanceId + clientToken + securityToken aqui:
+//   https://app.z-api.io/instances
+// Webhook de recebimento (opcional): aponta pra
+//   ${BACKEND_BASE_URL}/therapy/webhook/zapi
+// Se ZAPI_INSTANCE_ID vazio, services/whatsapp.js vira no-op com log
+// silencioso — funcionalidade degrada sem quebrar criação de sessão.
+const ZAPI_INSTANCE_ID    = process.env.ZAPI_INSTANCE_ID    || "";
+const ZAPI_CLIENT_TOKEN   = process.env.ZAPI_CLIENT_TOKEN   || "";
+const ZAPI_SECURITY_TOKEN = process.env.ZAPI_SECURITY_TOKEN || "";
+const ZAPI_BASE_URL       = process.env.ZAPI_BASE_URL       || "https://api.z-api.io";
+
 const DISCORD_CLIENT_ID       = process.env.DISCORD_CLIENT_ID       || "";
 const DISCORD_CLIENT_SECRET   = process.env.DISCORD_CLIENT_SECRET   || "";
 const DISCORD_BOT_TOKEN       = process.env.DISCORD_BOT_TOKEN       || "";
@@ -229,6 +246,7 @@ module.exports = {
   THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   RESEND_API_KEY, EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
+  ZAPI_INSTANCE_ID, ZAPI_CLIENT_TOKEN, ZAPI_SECURITY_TOKEN, ZAPI_BASE_URL,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE
 };
