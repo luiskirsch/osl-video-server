@@ -5069,23 +5069,33 @@ router.post("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
 // GET /therapy/financeiro/transacoes?month=YYYY-MM&type=&category=&status=&patientId=
 // Filtros opcionais. Sem filtros retorna últimos 6 meses pra não estourar
 // bandwidth no primeiro acesso. Ordenado por issueDate desc.
+//
+// Query Firestore usa só WHERE therapistUid pra evitar composite index
+// (Firestore exige index pra where múltiplo + orderBy). Filtros adicionais
+// e ordenação são feitos em memória. Pra escala atual (até ~milhares de tx
+// por user) é instantâneo. Quando crescer, basta criar os indexes no
+// firebase console e mover filtros pro Firestore.
 router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
   const db = getDb();
-  let q = db.collection("therapy_transactions").where("therapistUid", "==", uid);
+  const snap = await db.collection("therapy_transactions")
+    .where("therapistUid", "==", uid)
+    .get();
 
+  // Range padrão: últimos 6 meses se não foi pedido mês específico.
   const monthStr = String(req.query?.month || "").trim();
+  let rangeStart = 0;
+  let rangeEnd   = Infinity;
   if (monthStr) {
     const range = parseFinMonthRange(monthStr);
     if (!range) return sendError(res, 400, "MES_INVALIDO", { hint: "Use YYYY-MM" });
-    q = q.where("issueDate", ">=", range.startMs).where("issueDate", "<", range.endMs);
+    rangeStart = range.startMs;
+    rangeEnd   = range.endMs;
   } else {
-    // Default: últimos 6 meses (pra dashboard inicial não vazio).
-    const sixMonthsAgo = Date.now() - 6 * 30 * 86_400_000;
-    q = q.where("issueDate", ">=", sixMonthsAgo);
+    rangeStart = Date.now() - 6 * 30 * 86_400_000;
   }
 
   const typeFilter     = String(req.query?.type || "").trim().toLowerCase();
@@ -5093,15 +5103,19 @@ router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   const statusFilter   = String(req.query?.status || "").trim().toLowerCase();
   const patientFilter  = String(req.query?.patientId || "").trim();
 
-  if (typeFilter     && isValidFinType(typeFilter))         q = q.where("type", "==", typeFilter);
-  if (categoryFilter && CATEGORY_LABELS[categoryFilter])    q = q.where("category", "==", categoryFilter);
-  if (statusFilter   && isValidFinStatus(statusFilter))     q = q.where("status", "==", statusFilter);
-  if (patientFilter)                                        q = q.where("patientId", "==", patientFilter);
+  const allTx = snap.docs.map(d => d.data());
+  const filtered = allTx.filter(tx => {
+    if (typeof tx.issueDate !== "number") return false;
+    if (tx.issueDate < rangeStart || tx.issueDate >= rangeEnd) return false;
+    if (typeFilter     && tx.type !== typeFilter) return false;
+    if (categoryFilter && tx.category !== categoryFilter) return false;
+    if (statusFilter   && tx.status !== statusFilter) return false;
+    if (patientFilter  && tx.patientId !== patientFilter) return false;
+    return true;
+  });
+  filtered.sort((a, b) => (b.issueDate || 0) - (a.issueDate || 0));
+  const transactions = filtered.slice(0, 500);
 
-  q = q.orderBy("issueDate", "desc").limit(500);
-
-  const snap = await q.get();
-  const transactions = snap.docs.map(d => d.data());
   return res.json({ ok: true, transactions, categories: CATEGORY_LABELS });
 }));
 
@@ -5225,13 +5239,18 @@ router.get("/therapy/financeiro/resumo", asyncHandler(async (req, res) => {
   if (!range) return sendError(res, 400, "MES_INVALIDO", { hint: "Use YYYY-MM" });
 
   const db = getDb();
+  // Mesma estratégia do GET /transacoes: busca por therapistUid e filtra
+  // em memória — evita composite index Firestore.
   const snap = await db.collection("therapy_transactions")
     .where("therapistUid", "==", uid)
-    .where("issueDate", ">=", range.startMs)
-    .where("issueDate", "<", range.endMs)
     .get();
 
-  const transactions = snap.docs.map(d => d.data());
+  const allTx = snap.docs.map(d => d.data());
+  const transactions = allTx.filter(tx =>
+    typeof tx.issueDate === "number" &&
+    tx.issueDate >= range.startMs &&
+    tx.issueDate < range.endMs
+  );
   const summary = computeFinSummary(transactions);
 
   return res.json({
