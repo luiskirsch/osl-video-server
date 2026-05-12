@@ -56,6 +56,14 @@ const {
   DESCRIPTION_MAX: INV_DESCRIPTION_MAX,
   REASON_MAX:      INV_REASON_MAX
 } = require("../services/inventory");
+const {
+  isValidRepasseRule,
+  isValidEmail: isValidClinicEmail,
+  normalizeEmail: normalizeClinicEmail,
+  computeMonthlyRepasse,
+  NAME_MAX:  CLINIC_NAME_MAX,
+  CNPJ_MAX:  CLINIC_CNPJ_MAX
+} = require("../services/clinic");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
@@ -5056,11 +5064,34 @@ router.post("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
     if (ssnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   }
 
+  // performedByUid: quem atendeu o paciente. Usado pelo módulo de clínica
+  // pra calcular repasse mensal. Pode ser o próprio dono (uid) ou um membro
+  // ativo da clínica do user. Validamos ownership antes de aceitar.
+  let performedByUid = String(req.body?.performedByUid || "").trim() || null;
+  if (performedByUid && performedByUid !== uid) {
+    // Tem que ser membro ativo de UMA clínica cujo owner é o user.
+    const clinicSnap = await getDb().collection("therapy_clinics")
+      .where("ownerUid", "==", uid).limit(1).get();
+    if (clinicSnap.empty) return sendError(res, 403, "PERFORMED_BY_INVALIDO", {
+      detail: "Você não tem clínica — só pode lançar transações onde você mesmo atendeu."
+    });
+    const clinicId = clinicSnap.docs[0].id;
+    const memberSnap = await getDb().collection("therapy_clinic_members")
+      .where("clinicId", "==", clinicId)
+      .where("therapistUid", "==", performedByUid)
+      .where("status", "==", "active")
+      .limit(1).get();
+    if (memberSnap.empty) return sendError(res, 403, "PERFORMED_BY_INVALIDO", {
+      detail: "O profissional informado não é membro ativo da sua clínica."
+    });
+  }
+
   const txId = newId("tx");
   const db = getDb();
   await db.collection("therapy_transactions").doc(txId).set({
     txId,
     therapistUid: uid,
+    performedByUid,           // null se foi o próprio dono; uid de membro caso contrário
     type, category, amount,
     description: description || null,
     paymentMethod,
@@ -5584,6 +5615,438 @@ router.get("/therapy/inventario/movimentos", asyncHandler(async (req, res) => {
     .slice(0, 500);
 
   return res.json({ ok: true, movements });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// CLÍNICA — gestão multidisciplinar com repasse por % ou valor fixo
+//
+// Coleções:
+//   therapy_clinics/{clinicId}        — dono + nome + cnpj?
+//   therapy_clinic_members/{memberId} — convites + membros ativos
+//
+// Helpers: services/clinic.js
+//
+// Regras de negócio:
+// - 1 user pode ter no máximo 1 clínica como dono (simplifica UI/permissões)
+// - User pode ser membro de várias clínicas (como funcionário/parceiro)
+// - Convite: dono digita email; busca conta com aquele email na Firestore;
+//   membro fica pending até aceitar; ao aceitar, status=active + therapistUid
+//   populado.
+// - Repasse: calculado a partir de therapy_transactions com performedByUid
+//   = member.therapistUid no mês selecionado.
+// ═════════════════════════════════════════════════════════════════════════
+
+// Helper: encontra a clínica onde o user é DONO. Retorna doc data ou null.
+async function findOwnedClinic(uid) {
+  const snap = await getDb().collection("therapy_clinics")
+    .where("ownerUid", "==", uid).limit(1).get();
+  if (snap.empty) return null;
+  return snap.docs[0].data();
+}
+
+// Helper: enriquece um membro com displayName do therapist (busca em therapists).
+// Retorna o membro com campo `name`. Sem name se membro ainda não aceitou.
+async function enrichMember(member) {
+  if (!member.therapistUid) return { ...member, name: null };
+  const tsnap = await getDb().collection("therapists").doc(member.therapistUid).get();
+  if (!tsnap.exists) return { ...member, name: null };
+  return { ...member, name: tsnap.data().displayName || null };
+}
+
+// POST /therapy/clinicas
+// Cria clínica (1 por user como dono).
+router.post("/therapy/clinicas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const existing = await findOwnedClinic(uid);
+  if (existing) return sendError(res, 409, "CLINICA_JA_EXISTE", { clinicId: existing.clinicId });
+
+  const name = String(req.body?.name || "").trim().slice(0, CLINIC_NAME_MAX);
+  if (!name) return sendError(res, 400, "NOME_OBRIGATORIO");
+  const cnpj = String(req.body?.cnpj || "").trim().slice(0, CLINIC_CNPJ_MAX) || null;
+
+  const clinicId = newId("clinic");
+  const db = getDb();
+  await db.collection("therapy_clinics").doc(clinicId).set({
+    clinicId,
+    ownerUid: uid,
+    name,
+    cnpj,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "clinic_created", clinicId, ownerUid: uid, name });
+  return res.json({ ok: true, clinicId });
+}));
+
+// GET /therapy/clinicas/me
+// Info da clínica do user: como dono (se houver) + memberships como funcionário.
+router.get("/therapy/clinicas/me", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const [ownedClinic, memberSnap] = await Promise.all([
+    findOwnedClinic(uid),
+    db.collection("therapy_clinic_members")
+      .where("therapistUid", "==", uid)
+      .where("status", "==", "active")
+      .get()
+  ]);
+
+  const memberships = await Promise.all(memberSnap.docs.map(async d => {
+    const m = d.data();
+    const csnap = await db.collection("therapy_clinics").doc(m.clinicId).get();
+    return {
+      memberId: m.memberId,
+      clinicId: m.clinicId,
+      clinicName: csnap.exists ? csnap.data().name : null,
+      repasseRule: m.repasseRule,
+      acceptedAt: m.acceptedAt || null
+    };
+  }));
+
+  return res.json({
+    ok: true,
+    ownedClinic: ownedClinic || null,
+    memberships
+  });
+}));
+
+// PATCH /therapy/clinicas/:id
+// Edita nome/cnpj. Só dono.
+router.patch("/therapy/clinicas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const clinicId = String(req.params.id || "").trim();
+  if (!clinicId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_clinics").doc(clinicId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (snap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = {};
+  if (req.body?.name !== undefined) {
+    const n = String(req.body.name).trim().slice(0, CLINIC_NAME_MAX);
+    if (!n) return sendError(res, 400, "NOME_OBRIGATORIO");
+    updates.name = n;
+  }
+  if (req.body?.cnpj !== undefined) {
+    updates.cnpj = String(req.body.cnpj).trim().slice(0, CLINIC_CNPJ_MAX) || null;
+  }
+  if (Object.keys(updates).length === 0) return sendError(res, 400, "NADA_PARA_ATUALIZAR");
+  updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+  await ref.set(updates, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/clinicas/:id/membros
+// Body: { email, repasseRule: { type, value } }
+// Cria convite. Busca user pelo email — se encontrar, popula therapistUid
+// na hora; senão, fica pending até criar conta com aquele email.
+router.post("/therapy/clinicas/:id/membros", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const clinicId = String(req.params.id || "").trim();
+  if (!clinicId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const csnap = await db.collection("therapy_clinics").doc(clinicId).get();
+  if (!csnap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (csnap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const invitedEmail = normalizeClinicEmail(req.body?.email);
+  if (!isValidClinicEmail(invitedEmail)) return sendError(res, 400, "EMAIL_INVALIDO");
+
+  // Não pode convidar a si mesmo.
+  const ownerSnap = await db.collection("therapists").doc(uid).get();
+  if (ownerSnap.exists && normalizeClinicEmail(ownerSnap.data().email) === invitedEmail) {
+    return sendError(res, 400, "NAO_PODE_CONVIDAR_VOCE_MESMO");
+  }
+
+  // Não duplicar: se já há membro com esse email (pending OU active), bloqueia.
+  const dupSnap = await db.collection("therapy_clinic_members")
+    .where("clinicId", "==", clinicId)
+    .where("invitedEmail", "==", invitedEmail)
+    .get();
+  const hasActiveOrPending = dupSnap.docs.some(d => {
+    const s = d.data().status;
+    return s === "active" || s === "pending";
+  });
+  if (hasActiveOrPending) return sendError(res, 409, "MEMBRO_JA_EXISTE_OU_CONVIDADO");
+
+  const repasseRule = req.body?.repasseRule;
+  if (!isValidRepasseRule(repasseRule)) return sendError(res, 400, "REPASSE_RULE_INVALIDA");
+
+  // Tenta achar therapist com esse email pra já vincular UID (acelera UX).
+  const tQuery = await db.collection("therapists")
+    .where("email", "==", invitedEmail).limit(1).get();
+  const therapistUid = tQuery.empty ? null : tQuery.docs[0].id;
+
+  const memberId = newId("mbr");
+  await db.collection("therapy_clinic_members").doc(memberId).set({
+    memberId,
+    clinicId,
+    invitedEmail,
+    therapistUid,            // pode ser null — vincula no aceite
+    status: "pending",
+    repasseRule,
+    invitedByUid: uid,
+    invitedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "clinic_member_invited", clinicId, memberId, invitedEmail, by: uid });
+  return res.json({ ok: true, memberId, therapistUidResolvido: !!therapistUid });
+}));
+
+// GET /therapy/clinicas/:id/membros
+// Lista membros (todos os status). Só dono.
+router.get("/therapy/clinicas/:id/membros", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const clinicId = String(req.params.id || "").trim();
+
+  const db = getDb();
+  const csnap = await db.collection("therapy_clinics").doc(clinicId).get();
+  if (!csnap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (csnap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const msnap = await db.collection("therapy_clinic_members")
+    .where("clinicId", "==", clinicId).get();
+  const raw = msnap.docs.map(d => d.data()).filter(m => m.status !== "removed");
+  const enriched = await Promise.all(raw.map(enrichMember));
+  enriched.sort((a, b) =>
+    (a.name || a.invitedEmail || "").localeCompare(b.name || b.invitedEmail || "", "pt-BR")
+  );
+  return res.json({ ok: true, members: enriched });
+}));
+
+// PATCH /therapy/clinicas/:id/membros/:memberId
+// Edita regra de repasse de um membro. Só dono.
+router.patch("/therapy/clinicas/:id/membros/:memberId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { id: clinicId, memberId } = req.params;
+
+  const db = getDb();
+  const csnap = await db.collection("therapy_clinics").doc(clinicId).get();
+  if (!csnap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (csnap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const mref = db.collection("therapy_clinic_members").doc(memberId);
+  const msnap = await mref.get();
+  if (!msnap.exists || msnap.data().clinicId !== clinicId) return sendError(res, 404, "MEMBRO_NAO_ENCONTRADO");
+
+  const updates = {};
+  if (req.body?.repasseRule !== undefined) {
+    if (!isValidRepasseRule(req.body.repasseRule)) return sendError(res, 400, "REPASSE_RULE_INVALIDA");
+    updates.repasseRule = req.body.repasseRule;
+  }
+  if (Object.keys(updates).length === 0) return sendError(res, 400, "NADA_PARA_ATUALIZAR");
+  await mref.set(updates, { merge: true });
+
+  await logAudit({ type: "clinic_member_updated", clinicId, memberId, by: uid });
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/clinicas/:id/membros/:memberId
+// Remove membro (soft: status="removed"). Histórico de transações preservado.
+router.delete("/therapy/clinicas/:id/membros/:memberId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { id: clinicId, memberId } = req.params;
+
+  const db = getDb();
+  const csnap = await db.collection("therapy_clinics").doc(clinicId).get();
+  if (!csnap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (csnap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const mref = db.collection("therapy_clinic_members").doc(memberId);
+  const msnap = await mref.get();
+  if (!msnap.exists || msnap.data().clinicId !== clinicId) return sendError(res, 404, "MEMBRO_NAO_ENCONTRADO");
+
+  await mref.set({
+    status: "removed",
+    removedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "clinic_member_removed", clinicId, memberId, by: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/clinicas/convites-pendentes
+// Convites pendentes pro user atual. Match por email (case-insensitive)
+// OU por therapistUid já populado pelo dono.
+router.get("/therapy/clinicas/convites-pendentes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const tsnap = await db.collection("therapists").doc(uid).get();
+  if (!tsnap.exists) return res.json({ ok: true, invites: [] });
+  const email = normalizeClinicEmail(tsnap.data().email);
+
+  // Busca por email OU therapistUid
+  const [byEmail, byUid] = await Promise.all([
+    email ? db.collection("therapy_clinic_members").where("invitedEmail", "==", email).get() : { docs: [] },
+    db.collection("therapy_clinic_members").where("therapistUid", "==", uid).get()
+  ]);
+
+  const seen = new Set();
+  const all = [...byEmail.docs, ...byUid.docs]
+    .map(d => d.data())
+    .filter(m => {
+      if (m.status !== "pending") return false;
+      if (seen.has(m.memberId)) return false;
+      seen.add(m.memberId);
+      return true;
+    });
+
+  // Enriquece com nome da clínica.
+  const enriched = await Promise.all(all.map(async m => {
+    const csnap = await db.collection("therapy_clinics").doc(m.clinicId).get();
+    return {
+      memberId: m.memberId,
+      clinicId: m.clinicId,
+      clinicName: csnap.exists ? csnap.data().name : null,
+      ownerName: null, // poderia enriquecer, mas opcional
+      repasseRule: m.repasseRule,
+      invitedAt: m.invitedAt || null
+    };
+  }));
+
+  return res.json({ ok: true, invites: enriched });
+}));
+
+// POST /therapy/clinicas/convites/:memberId/aceitar
+router.post("/therapy/clinicas/convites/:memberId/aceitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const memberId = String(req.params.memberId || "").trim();
+
+  const db = getDb();
+  const tsnap = await db.collection("therapists").doc(uid).get();
+  if (!tsnap.exists) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  const userEmail = normalizeClinicEmail(tsnap.data().email);
+
+  const mref = db.collection("therapy_clinic_members").doc(memberId);
+  const msnap = await mref.get();
+  if (!msnap.exists) return sendError(res, 404, "CONVITE_NAO_ENCONTRADO");
+  const member = msnap.data();
+  if (member.status !== "pending") return sendError(res, 409, "CONVITE_JA_PROCESSADO");
+
+  // Só aceita se o email do user bate com o convidado OU therapistUid já está vinculado.
+  const emailMatch = member.invitedEmail && userEmail && member.invitedEmail === userEmail;
+  const uidMatch   = member.therapistUid === uid;
+  if (!emailMatch && !uidMatch) return sendError(res, 403, "CONVITE_NAO_DESTINADO_A_VOCE");
+
+  await mref.set({
+    status: "active",
+    therapistUid: uid,
+    acceptedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "clinic_member_accepted", clinicId: member.clinicId, memberId, by: uid });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/clinicas/convites/:memberId/recusar
+router.post("/therapy/clinicas/convites/:memberId/recusar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const memberId = String(req.params.memberId || "").trim();
+
+  const db = getDb();
+  const tsnap = await db.collection("therapists").doc(uid).get();
+  const userEmail = tsnap.exists ? normalizeClinicEmail(tsnap.data().email) : "";
+
+  const mref = db.collection("therapy_clinic_members").doc(memberId);
+  const msnap = await mref.get();
+  if (!msnap.exists) return sendError(res, 404, "CONVITE_NAO_ENCONTRADO");
+  const member = msnap.data();
+  if (member.status !== "pending") return sendError(res, 409, "CONVITE_JA_PROCESSADO");
+
+  const emailMatch = member.invitedEmail && userEmail && member.invitedEmail === userEmail;
+  const uidMatch   = member.therapistUid === uid;
+  if (!emailMatch && !uidMatch) return sendError(res, 403, "CONVITE_NAO_DESTINADO_A_VOCE");
+
+  await mref.set({
+    status: "removed",
+    removedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "clinic_member_declined", clinicId: member.clinicId, memberId, by: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/clinicas/:id/repasse?month=YYYY-MM
+// Relatório de repasse mensal. Só dono.
+router.get("/therapy/clinicas/:id/repasse", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const clinicId = String(req.params.id || "").trim();
+
+  const db = getDb();
+  const csnap = await db.collection("therapy_clinics").doc(clinicId).get();
+  if (!csnap.exists) return sendError(res, 404, "CLINICA_NAO_ENCONTRADA");
+  if (csnap.data().ownerUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const monthStr = String(req.query?.month || "").trim() || (() => {
+    const n = new Date();
+    return `${n.getUTCFullYear()}-${String(n.getUTCMonth() + 1).padStart(2, "0")}`;
+  })();
+  const range = parseFinMonthRange(monthStr);
+  if (!range) return sendError(res, 400, "MES_INVALIDO");
+
+  // Membros ativos da clínica (enriquecidos com displayName).
+  const msnap = await db.collection("therapy_clinic_members")
+    .where("clinicId", "==", clinicId).get();
+  const activeMembers = await Promise.all(
+    msnap.docs.map(d => d.data())
+      .filter(m => m.status === "active" && m.therapistUid)
+      .map(enrichMember)
+  );
+
+  // Transações do dono no mês (ele é quem recebe o $; repasse sai daqui).
+  const txSnap = await db.collection("therapy_transactions")
+    .where("therapistUid", "==", uid).get();
+  const txInMonth = txSnap.docs.map(d => d.data()).filter(tx =>
+    typeof tx.issueDate === "number" &&
+    tx.issueDate >= range.startMs &&
+    tx.issueDate < range.endMs
+  );
+
+  const repasses = computeMonthlyRepasse(activeMembers, txInMonth);
+  const totalRepasseGeral = repasses.reduce((acc, r) => acc + r.totalRepasseCents, 0);
+  const totalReceitaConsultas = repasses.reduce((acc, r) => acc + r.totalConsultasCents, 0);
+
+  return res.json({
+    ok: true,
+    clinicId,
+    month: monthStr,
+    members: repasses,
+    totals: {
+      totalConsultasCents: totalReceitaConsultas,
+      totalRepasseCents: totalRepasseGeral,
+      // Sobra pra clínica = receita das consultas - soma dos repasses
+      sobraClinicaCents: totalReceitaConsultas - totalRepasseGeral
+    }
+  });
 }));
 
 module.exports = router;
