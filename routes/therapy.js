@@ -2066,6 +2066,171 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// NPS — Net Promoter Score pós-consulta
+//
+// Modelo: therapy_nps_responses/{responseId}
+//   { responseId, therapistUid, sessionId, patientEmail, score (0-10),
+//     comment?, sentAt, respondedAt? }
+//
+// Disparo: scheduler dispara e-mail 24h após sessão completar (token assinado
+// no link). Paciente clica, página pública nps.html lê o token, submete
+// score+comment. Backend valida token (HMAC) + sessionId não respondido.
+// ─────────────────────────────────────────────────────────────────────────
+const NPS_TOKEN_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
+const NPS_COMMENT_MAX = 500;
+
+// GET /nps/info/:token — público. Devolve dados pra renderizar a página.
+router.get("/nps/info/:token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.params.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
+
+  const db = getDb();
+  // Já respondeu? Procura pela sessionId existente.
+  const existing = await db.collection("therapy_nps_responses")
+    .where("sessionId", "==", payload.sessionId)
+    .where("respondedAt", ">", 0)
+    .limit(1)
+    .get()
+    .catch(() => null);
+  const alreadyAnswered = existing && !existing.empty;
+
+  // Dados pra exibição (nome do profissional / paciente).
+  let therapistName = "seu profissional";
+  let clinicName = "";
+  try {
+    const tsnap = await db.collection("therapists").doc(payload.therapistUid).get();
+    if (tsnap.exists) {
+      const t = tsnap.data();
+      therapistName = t.displayName || therapistName;
+      clinicName    = t.consultorio?.nome || t.whatsappConfig?.clinicName || "";
+    }
+  } catch {}
+
+  return res.json({
+    ok: true,
+    therapistName, clinicName,
+    patientNameHint: payload.patientNameHint || "",
+    alreadyAnswered
+  });
+}));
+
+// POST /nps/:token — público. Submete resposta.
+router.post("/nps/:token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.params.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
+
+  const score = Number(req.body?.score);
+  if (!Number.isFinite(score) || score < 0 || score > 10) return sendError(res, 400, "SCORE_INVALIDO");
+  const comment = String(req.body?.comment || "").trim().slice(0, NPS_COMMENT_MAX);
+
+  const db = getDb();
+  // Idempotência: se já tem resposta pra essa sessionId, devolve OK
+  // (não cria duplicada).
+  const existing = await db.collection("therapy_nps_responses")
+    .where("sessionId", "==", payload.sessionId)
+    .limit(1)
+    .get();
+
+  if (!existing.empty) {
+    const docRef = existing.docs[0].ref;
+    await docRef.set({
+      score: Math.floor(score),
+      comment: comment || null,
+      respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return res.json({ ok: true, updated: true });
+  }
+
+  const responseId = newId("nps");
+  await db.collection("therapy_nps_responses").doc(responseId).set({
+    responseId,
+    therapistUid: payload.therapistUid,
+    sessionId: payload.sessionId,
+    patientEmail: payload.patientEmail || null,
+    score: Math.floor(score),
+    comment: comment || null,
+    sentAt: payload.iat || null,
+    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/nps — profissional vê suas respostas + métricas agregadas.
+router.get("/therapy/nps", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const range = String(req.query?.range || "90d").trim();
+  const now = Date.now();
+  let rangeStart;
+  if      (range === "30d")  rangeStart = now - 30  * 86_400_000;
+  else if (range === "90d")  rangeStart = now - 90  * 86_400_000;
+  else if (range === "year") rangeStart = now - 365 * 86_400_000;
+  else if (range === "all")  rangeStart = 0;
+  else                       rangeStart = now - 90  * 86_400_000;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_nps_responses")
+    .where("therapistUid", "==", uid)
+    .limit(1000)
+    .get();
+
+  const all = snap.docs.map(d => {
+    const x = d.data();
+    return {
+      responseId: x.responseId,
+      sessionId: x.sessionId,
+      score: x.score,
+      comment: x.comment,
+      respondedAt: x.respondedAt?.toMillis ? x.respondedAt.toMillis() : (Number(x.respondedAt) || 0)
+    };
+  }).filter(r => r.respondedAt > 0);
+
+  const inRange = all.filter(r => r.respondedAt >= rangeStart);
+
+  // Categorias NPS clássicas: 0-6 detractor, 7-8 passive, 9-10 promoter
+  let detractors = 0, passives = 0, promoters = 0;
+  let sum = 0;
+  for (const r of inRange) {
+    sum += r.score;
+    if (r.score <= 6) detractors++;
+    else if (r.score <= 8) passives++;
+    else promoters++;
+  }
+  const total = inRange.length;
+  const npsScore = total > 0 ? Math.round(((promoters - detractors) / total) * 100) : null;
+  const avg      = total > 0 ? Math.round((sum / total) * 10) / 10 : null;
+
+  // Últimos comentários (top 20, mais recentes primeiro).
+  const recentComments = inRange
+    .filter(r => r.comment)
+    .sort((a, b) => b.respondedAt - a.respondedAt)
+    .slice(0, 20)
+    .map(r => ({ score: r.score, comment: r.comment, respondedAt: r.respondedAt }));
+
+  return res.json({
+    ok: true,
+    range,
+    metrics: { total, npsScore, avg, detractors, passives, promoters },
+    recentComments
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // ANIVERSARIANTES — opt-in pra envio automático de e-mail no aniversário
 //
 // Modelo: therapy_birthday_optins/{optinId}

@@ -13,7 +13,7 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
-const { sendEmail, templateReminder, templateBirthday, buildJoinUrl, buildCancelUrl } = require("./email");
+const { sendEmail, templateReminder, templateBirthday, templateNps, buildJoinUrl, buildCancelUrl, buildNpsUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { processPendingReferrals } = require("./affiliate");
 
@@ -156,6 +156,93 @@ async function runFullTick() {
   // Aniversariantes: dispara 1×/dia às 9h BRT (=12h UTC). Idempotência via
   // lastSentAt comparado com a data de hoje (YYYY-MM-DD).
   await runBirthdayTick().catch(e => logError("birthday_tick_unhandled", e));
+  // NPS: 24h após sessão completada, dispara pesquisa por e-mail.
+  await runNpsTick().catch(e => logError("nps_tick_unhandled", e));
+}
+
+// ─── NPS pós-consulta ────────────────────────────────────────────────
+// Roda a cada hora. Busca sessões completadas entre 24h e 48h atrás (janela
+// suficiente pra o scheduler pegar mesmo se rodar atrasado). Idempotência:
+// salva `npsSentAt` no doc da sessão; pula se já tem.
+
+const NPS_WINDOW_START_MS = 24 * 60 * 60 * 1000;  // 24h após completar
+const NPS_WINDOW_END_MS   = 48 * 60 * 60 * 1000;  // até 48h após
+const NPS_TOKEN_VALIDITY_MS_SCH = 30 * 24 * 60 * 60 * 1000;
+
+async function runNpsTick() {
+  const db = getDb();
+  if (!db) return;
+
+  const now = Date.now();
+  const windowEnd   = now - NPS_WINDOW_START_MS; // sessão completou antes disso
+  const windowStart = now - NPS_WINDOW_END_MS;   // mas não antes disso
+
+  // Query: status=completed e completedAt na janela. completedAt pode ser
+  // Firestore Timestamp ou número — filtramos depois.
+  const snap = await db.collection("therapy_sessions")
+    .where("status", "==", "completed")
+    .limit(500)
+    .get();
+
+  let candidates = 0, sent = 0, skipped = 0, errors = 0;
+  for (const doc of snap.docs) {
+    const s = doc.data();
+    const completedAtMs = s.completedAt?.toMillis ? s.completedAt.toMillis() : Number(s.completedAt) || 0;
+    if (!completedAtMs) continue;
+    if (completedAtMs < windowStart || completedAtMs > windowEnd) continue;
+    if (s.npsSentAt) { skipped++; continue; }
+    if (!s.patientEmail) { skipped++; continue; }
+
+    candidates++;
+    // Marca antes pra evitar dupla — se enviar falhar, próximo tick não retenta (aceitável).
+    try {
+      await doc.ref.set({
+        npsSentAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (e) {
+      logError("nps_mark_failed", e, { sessionId: s.sessionId });
+      errors++;
+      continue;
+    }
+
+    // Busca therapist pra incluir nome no template.
+    let therapistName = "seu profissional";
+    try {
+      const tsnap = await db.collection("therapists").doc(s.therapistUid).get();
+      if (tsnap.exists) therapistName = tsnap.data().displayName || therapistName;
+    } catch {}
+
+    // Token assinado.
+    const npsToken = signPayload({
+      token_type: "nps",
+      sessionId: s.sessionId,
+      therapistUid: s.therapistUid,
+      patientEmail: s.patientEmail,
+      patientNameHint: s.patientName || "",
+      iat: Date.now(),
+      exp: Date.now() + NPS_TOKEN_VALIDITY_MS_SCH
+    }, ACCESS_TOKEN_SECRET);
+
+    const npsUrl = buildNpsUrl(npsToken);
+
+    try {
+      const tpl = templateNps({
+        patientName: s.patientName || "Paciente",
+        therapistName,
+        npsUrl
+      });
+      const r = await sendEmail({ to: s.patientEmail, ...tpl });
+      if (r.ok || r.skipped) sent++;
+      else errors++;
+    } catch (e) {
+      logError("nps_email_failed", e, { sessionId: s.sessionId });
+      errors++;
+    }
+  }
+
+  if (candidates > 0 || errors > 0) {
+    logInfo("nps_tick", { candidates, sent, skipped, errors });
+  }
 }
 
 // ─── Aniversariantes ─────────────────────────────────────────────────
@@ -299,4 +386,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup, runBirthdayTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup, runBirthdayTick, runNpsTick };

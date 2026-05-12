@@ -276,6 +276,9 @@ function buildJoinUrl(joinToken) {
 function buildCancelUrl(cancelToken) {
   return `${THERAPY_FRONTEND_BASE}/cancelar.html?t=${encodeURIComponent(cancelToken)}`;
 }
+function buildNpsUrl(npsToken) {
+  return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
+}
 
 function buildPainelUrl() {
   return `${THERAPY_FRONTEND_BASE}/painel.html`;
@@ -331,6 +334,26 @@ function templateFormacaoRejected({ therapistName, reason, retryUrl }) {
   return { subject, html, text };
 }
 
+// Template NPS — disparado 24h após o término de uma sessão completada.
+// Tom respeitoso, não-invasivo. Link único expira em 30 dias.
+function templateNps({ patientName, therapistName, npsUrl }) {
+  const firstName = String(patientName || "").split(/\s+/)[0] || "Paciente";
+  const subject = `Como foi sua consulta com ${therapistName}?`;
+  const html = renderShell({
+    heading: "Sua opinião conta",
+    bodyHtml: `
+      <p style="margin:0 0 14px;">Olá ${escHtml(firstName)},</p>
+      <p style="margin:0 0 14px;">Ontem você teve uma consulta com <strong>${escHtml(therapistName)}</strong>. Gostaríamos de saber como foi.</p>
+      <p style="margin:0 0 20px;">Leva menos de 30 segundos:</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(npsUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Avaliar a consulta</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.55);">Seu feedback ajuda ${escHtml(therapistName)} a oferecer um cuidado cada vez melhor. Você pode escrever um comentário também, se quiser.</p>
+    `,
+    footer: "Você recebeu este e-mail porque teve uma consulta agendada no Espaço Prelúdio. Se preferir não receber mais avaliações, basta ignorar."
+  });
+  const text = `Olá ${firstName},\n\nOntem você teve uma consulta com ${therapistName}. Gostaríamos de saber como foi.\n\nLeva menos de 30 segundos:\n${npsUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 // Template de aniversário — disparado pelo cron diário às 9h BRT pra pacientes
 // com opt-in cadastrado. Tom carinhoso, sem CTA agressivo (não é marketing).
 // `therapistName` aparece no subject e na assinatura — o paciente percebe como
@@ -357,6 +380,7 @@ module.exports = {
   templateConfirmation,
   templateReminder,
   templateBirthday,
+  templateNps,
   templateDispensacaoNotice,
   templateStudentApproved,
   templateStudentRejected,
@@ -366,6 +390,7 @@ module.exports = {
   templateFormacaoRejected,
   buildJoinUrl,
   buildCancelUrl,
+  buildNpsUrl,
   buildPainelUrl,
   buildPlanosUrl,
   buildComprovanteEstudanteUrl,
