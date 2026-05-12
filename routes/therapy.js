@@ -2066,6 +2066,140 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// LISTA DE ESPERA — pacientes aguardando vaga
+//
+// Modelo: therapy_waitlist/{waitlistId}
+//   { waitlistId, therapistUid, patientName, patientId?, contact?, priority:
+//     "low"|"med"|"high", note?, createdAt, updatedAt }
+//
+// priority padrão "med". Frontend ordena: high → med → low → createdAt asc.
+// ─────────────────────────────────────────────────────────────────────────
+const WAITLIST_NAME_MAX  = 80;
+const WAITLIST_NOTE_MAX  = 500;
+const WAITLIST_CONTACT_MAX = 80;
+const WAITLIST_PRIORITIES = new Set(["low", "med", "high"]);
+
+router.post("/therapy/waitlist", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientName = String(req.body?.patientName || "").trim().slice(0, WAITLIST_NAME_MAX);
+  if (!patientName) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const patientId = String(req.body?.patientId || "").trim().slice(0, 60) || null;
+  const contact   = String(req.body?.contact   || "").trim().slice(0, WAITLIST_CONTACT_MAX) || null;
+  const note      = String(req.body?.note      || "").trim().slice(0, WAITLIST_NOTE_MAX) || null;
+  let priority    = String(req.body?.priority  || "med").trim().toLowerCase();
+  if (!WAITLIST_PRIORITIES.has(priority)) priority = "med";
+
+  const waitlistId = newId("wlt");
+  const db = getDb();
+  await db.collection("therapy_waitlist").doc(waitlistId).set({
+    waitlistId,
+    therapistUid: uid,
+    patientName, patientId, contact, note, priority,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "waitlist_created", waitlistId, therapistUid: uid });
+  return res.json({ ok: true, waitlistId });
+}));
+
+router.patch("/therapy/waitlist/:waitlistId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const waitlistId = String(req.params.waitlistId || "").trim();
+  if (!waitlistId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_waitlist").doc(waitlistId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ENTRADA_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (req.body?.patientName !== undefined) {
+    const v = String(req.body.patientName || "").trim().slice(0, WAITLIST_NAME_MAX);
+    if (!v) return sendError(res, 400, "NOME_OBRIGATORIO");
+    updates.patientName = v;
+  }
+  if (req.body?.contact !== undefined) {
+    updates.contact = String(req.body.contact || "").trim().slice(0, WAITLIST_CONTACT_MAX) || null;
+  }
+  if (req.body?.note !== undefined) {
+    updates.note = String(req.body.note || "").trim().slice(0, WAITLIST_NOTE_MAX) || null;
+  }
+  if (req.body?.priority !== undefined) {
+    const p = String(req.body.priority || "").trim().toLowerCase();
+    if (WAITLIST_PRIORITIES.has(p)) updates.priority = p;
+  }
+  if (req.body?.patientId !== undefined) {
+    updates.patientId = String(req.body.patientId || "").trim().slice(0, 60) || null;
+  }
+
+  await ref.set(updates, { merge: true });
+  return res.json({ ok: true });
+}));
+
+router.delete("/therapy/waitlist/:waitlistId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const waitlistId = String(req.params.waitlistId || "").trim();
+  if (!waitlistId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_waitlist").doc(waitlistId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ENTRADA_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  return res.json({ ok: true });
+}));
+
+router.get("/therapy/waitlist", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_waitlist")
+    .where("therapistUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const PRIORITY_ORDER = { high: 0, med: 1, low: 2 };
+  const items = snap.docs
+    .map(d => {
+      const x = d.data();
+      const createdAtMs = x.createdAt?.toMillis ? x.createdAt.toMillis() : Number(x.createdAt) || 0;
+      return {
+        waitlistId: x.waitlistId,
+        patientName: x.patientName,
+        patientId: x.patientId || null,
+        contact: x.contact || null,
+        note: x.note || null,
+        priority: x.priority || "med",
+        createdAt: createdAtMs
+      };
+    })
+    .sort((a, b) => {
+      const pa = PRIORITY_ORDER[a.priority] ?? 1;
+      const pb = PRIORITY_ORDER[b.priority] ?? 1;
+      if (pa !== pb) return pa - pb;
+      return (a.createdAt || 0) - (b.createdAt || 0);
+    });
+
+  return res.json({ ok: true, items });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // AGENDA — Observações (notas em slots vazios)
 //
 // Modelo: therapy_agenda_notes/{noteId}
