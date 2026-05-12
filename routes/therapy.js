@@ -2065,6 +2065,125 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
   return res.json({ ok: true });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// AGENDA — Observações (notas em slots vazios)
+//
+// Modelo: therapy_agenda_notes/{noteId}
+//   { therapistUid, at (ms), durationMin, text, createdAt, updatedAt }
+//
+// Diferente de blackout (bloqueia tempo): nota é só um lembrete visual no
+// horário — não impede criação de consulta no mesmo slot. Útil pra "almoço",
+// "ligar pro paciente X", "supervisão semanal", etc.
+// ─────────────────────────────────────────────────────────────────────────
+const AGENDA_NOTE_TEXT_MAX = 300;
+const AGENDA_NOTE_DURATION_MAX_MIN = 12 * 60; // 12h
+
+router.post("/therapy/agenda/note", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const at = Number(req.body?.at || 0);
+  const durationMin = Math.max(15, Math.min(AGENDA_NOTE_DURATION_MAX_MIN,
+    Number(req.body?.durationMin || 30)));
+  const text = String(req.body?.text || "").trim().slice(0, AGENDA_NOTE_TEXT_MAX);
+
+  if (!Number.isFinite(at) || at <= 0) return sendError(res, 400, "HORARIO_INVALIDO");
+  if (!text) return sendError(res, 400, "TEXTO_OBRIGATORIO");
+
+  const noteId = newId("ntn");
+  const db = getDb();
+  await db.collection("therapy_agenda_notes").doc(noteId).set({
+    noteId,
+    therapistUid: uid,
+    at,
+    durationMin,
+    text,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "agenda_note_created", noteId, therapistUid: uid });
+  return res.json({ ok: true, noteId, at, durationMin, text });
+}));
+
+router.patch("/therapy/agenda/note/:noteId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const noteId = String(req.params.noteId || "").trim();
+  if (!noteId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_agenda_notes").doc(noteId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "NOTA_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (req.body?.text !== undefined) {
+    const text = String(req.body.text || "").trim().slice(0, AGENDA_NOTE_TEXT_MAX);
+    if (!text) return sendError(res, 400, "TEXTO_OBRIGATORIO");
+    updates.text = text;
+  }
+  if (req.body?.durationMin !== undefined) {
+    updates.durationMin = Math.max(15, Math.min(AGENDA_NOTE_DURATION_MAX_MIN,
+      Number(req.body.durationMin) || 30));
+  }
+  if (req.body?.at !== undefined) {
+    const at = Number(req.body.at);
+    if (Number.isFinite(at) && at > 0) updates.at = at;
+  }
+
+  await ref.set(updates, { merge: true });
+  return res.json({ ok: true });
+}));
+
+router.delete("/therapy/agenda/note/:noteId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const noteId = String(req.params.noteId || "").trim();
+  if (!noteId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_agenda_notes").doc(noteId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "NOTA_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.delete();
+  return res.json({ ok: true });
+}));
+
+router.get("/therapy/agenda/notes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_agenda_notes")
+    .where("therapistUid", "==", uid)
+    .limit(500)
+    .get();
+
+  const notes = snap.docs
+    .map(d => {
+      const x = d.data();
+      return {
+        noteId: x.noteId,
+        at: x.at,
+        durationMin: x.durationMin || 30,
+        text: x.text || ""
+      };
+    })
+    .sort((a, b) => (a.at || 0) - (b.at || 0));
+
+  return res.json({ ok: true, notes });
+}));
+
 router.get("/therapy/agenda/blackouts", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
