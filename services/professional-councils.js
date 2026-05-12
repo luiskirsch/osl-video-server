@@ -39,7 +39,7 @@ const CONSELHOS = {
     label: "CRM — Conselho Regional de Medicina (médicos, psiquiatras)",
     profissional: "Médico(a)",
     numberFormat: "Ex.: 123456-SC",
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita"],
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita", "calculadora-clinica"],
     // Médico prescreve qualquer tipo, incluindo controlados (Portaria 344/98).
     prescriptionTypes: ["mip", "insumo-injetavel", "controlado"],
     eligibleTiers: ["estudante", "recem-formado", "profissional"]
@@ -63,7 +63,7 @@ const CONSELHOS = {
     // dentro do escopo da profissão (DL 938/1969, Res. COFFITO 415/2012 e 414/2012).
     // Não é "atestado médico" — o título do PDF é específico por conselho (ver
     // getDocumentoTitulo); fisio/TO sem CID-10 obrigatório.
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita"],
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "receita", "calculadora-clinica"],
     prescriptionTypes: [], // delegado pro subtipo — fisio vs TO têm escopos diferentes
     requiresSubtipo: true,
     subtipos: {
@@ -100,7 +100,9 @@ const CONSELHOS = {
     // é específico (getDocumentoTitulo) — nutricionista não emite "atestado
     // médico". Prescrição dietética é documento próprio (capability futura,
     // não medicamentosa portanto não usa "receita").
-    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
+    // calculadora-clinica: dosagens de nutrientes por peso, IMC, idade
+    // gestacional/pediátrica são parte da rotina clínica nutricional.
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos", "calculadora-clinica"],
     eligibleTiers: ["recem-formado", "profissional"]
   },
   CRO: {
