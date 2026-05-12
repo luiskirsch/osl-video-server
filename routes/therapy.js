@@ -44,6 +44,18 @@ const {
   computeSummary: computeFinSummary,
   parseMonthRange: parseFinMonthRange
 } = require("../services/financial");
+const {
+  isValidUnit: isValidInvUnit,
+  isValidMovementType: isValidInvMovementType,
+  isValidStockValue: isValidInvStockValue,
+  isValidMovementQuantity: isValidInvMovementQuantity,
+  isLowStock: isInvLowStock,
+  applyMovement: applyInvMovement,
+  NAME_MAX:        INV_NAME_MAX,
+  CATEGORY_MAX:    INV_CATEGORY_MAX,
+  DESCRIPTION_MAX: INV_DESCRIPTION_MAX,
+  REASON_MAX:      INV_REASON_MAX
+} = require("../services/inventory");
 const { getValidator: getCfpValidator } = require("../services/cfp-validator");
 const { getValidator: getDocValidator, AUTO_APPROVE_CONFIDENCE, RECEM_FORMADO_MAX_MONTHS } = require("../services/document-validator");
 const {
@@ -5259,6 +5271,319 @@ router.get("/therapy/financeiro/resumo", asyncHandler(async (req, res) => {
     summary,
     count: transactions.length
   });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// ESTOQUE — controle de itens em estoque do profissional
+//
+// Coleções:
+//   therapy_inventory_items/{itemId}     — definição + saldo atual
+//   therapy_inventory_movements/{movId}  — histórico de entradas/saídas
+//
+// Helpers: services/inventory.js (validação, applyMovement, alertas).
+//
+// Concorrência: updates de currentStock usam Firestore transaction pra evitar
+// race condition (2 movimentos simultâneos no mesmo item).
+//
+// Como o financeiro, queries Firestore usam só where(therapistUid) e
+// filtragem em memória — evita necessidade de composite index.
+// ═════════════════════════════════════════════════════════════════════════
+
+// POST /therapy/inventario/itens
+// Cria item. currentStock inicial padrão 0 — usuário cria movimento de
+// entrada depois pra carregar saldo inicial.
+router.post("/therapy/inventario/itens", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const name = String(req.body?.name || "").trim().slice(0, INV_NAME_MAX);
+  if (!name) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const unit = String(req.body?.unit || "unidade").trim().toLowerCase();
+  if (!isValidInvUnit(unit)) return sendError(res, 400, "UNIDADE_INVALIDA");
+
+  const category    = String(req.body?.category || "").trim().slice(0, INV_CATEGORY_MAX);
+  const description = String(req.body?.description || "").trim().slice(0, INV_DESCRIPTION_MAX);
+
+  // currentStock inicial: aceita >=0. Se omitido, 0.
+  const initialStockRaw = req.body?.currentStock;
+  const currentStock = initialStockRaw !== undefined ? Number(initialStockRaw) : 0;
+  if (!isValidInvStockValue(currentStock)) return sendError(res, 400, "ESTOQUE_INICIAL_INVALIDO");
+
+  // minStock opcional. 0 = sem alerta.
+  const minStockRaw = req.body?.minStock;
+  const minStock = minStockRaw !== undefined ? Number(minStockRaw) : 0;
+  if (!isValidInvStockValue(minStock)) return sendError(res, 400, "ESTOQUE_MINIMO_INVALIDO");
+
+  const itemId = newId("inv");
+  const db = getDb();
+  await db.collection("therapy_inventory_items").doc(itemId).set({
+    itemId,
+    therapistUid: uid,
+    name,
+    category: category || null,
+    unit,
+    currentStock,
+    minStock,
+    description: description || null,
+    archived: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // Se foi criado com stock inicial > 0, registra movimento "entrada" pra
+  // preservar rastreabilidade do saldo inicial.
+  if (currentStock > 0) {
+    const movId = newId("mov");
+    await db.collection("therapy_inventory_movements").doc(movId).set({
+      movId,
+      itemId,
+      therapistUid: uid,
+      type: "entrada",
+      quantity: currentStock,
+      reason: "Saldo inicial",
+      movDate: Date.now(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+
+  await logAudit({ type: "inv_item_created", itemId, therapistUid: uid, name });
+  return res.json({ ok: true, itemId });
+}));
+
+// GET /therapy/inventario/itens?lowStock=1&category=
+// Lista itens do user. Filtros opcionais: lowStock=1 só retorna abaixo do
+// mínimo; category filtra por string exata.
+router.get("/therapy/inventario/itens", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_inventory_items")
+    .where("therapistUid", "==", uid)
+    .get();
+
+  const items = snap.docs.map(d => d.data()).filter(i => !i.archived);
+
+  const lowStockOnly = req.query?.lowStock === "1";
+  const categoryFilter = String(req.query?.category || "").trim();
+
+  const filtered = items.filter(i => {
+    if (lowStockOnly && !isInvLowStock(i)) return false;
+    if (categoryFilter && i.category !== categoryFilter) return false;
+    return true;
+  });
+
+  // Ordena: itens em baixo estoque primeiro, depois por nome.
+  filtered.sort((a, b) => {
+    const aLow = isInvLowStock(a) ? 0 : 1;
+    const bLow = isInvLowStock(b) ? 0 : 1;
+    if (aLow !== bLow) return aLow - bLow;
+    return (a.name || "").localeCompare(b.name || "", "pt-BR");
+  });
+
+  return res.json({ ok: true, items: filtered });
+}));
+
+// PATCH /therapy/inventario/itens/:id
+// Edita atributos do item. NÃO altera currentStock diretamente — saldo só
+// muda via /movimentos pra preservar rastreabilidade. Pra ajuste manual de
+// saldo, crie um movimento "entrada"/"saida" com reason="Ajuste de saldo".
+router.patch("/therapy/inventario/itens/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const itemId = String(req.params.id || "").trim();
+  if (!itemId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_inventory_items").doc(itemId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ITEM_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = {};
+  if (req.body?.name !== undefined) {
+    const n = String(req.body.name).trim().slice(0, INV_NAME_MAX);
+    if (!n) return sendError(res, 400, "NOME_OBRIGATORIO");
+    updates.name = n;
+  }
+  if (req.body?.unit !== undefined) {
+    const u = String(req.body.unit).trim().toLowerCase();
+    if (!isValidInvUnit(u)) return sendError(res, 400, "UNIDADE_INVALIDA");
+    updates.unit = u;
+  }
+  if (req.body?.category !== undefined) {
+    updates.category = String(req.body.category).trim().slice(0, INV_CATEGORY_MAX) || null;
+  }
+  if (req.body?.description !== undefined) {
+    updates.description = String(req.body.description).trim().slice(0, INV_DESCRIPTION_MAX) || null;
+  }
+  if (req.body?.minStock !== undefined) {
+    const m = Number(req.body.minStock);
+    if (!isValidInvStockValue(m)) return sendError(res, 400, "ESTOQUE_MINIMO_INVALIDO");
+    updates.minStock = m;
+  }
+
+  if (Object.keys(updates).length === 0) return sendError(res, 400, "NADA_PARA_ATUALIZAR");
+  updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+  await ref.set(updates, { merge: true });
+
+  await logAudit({ type: "inv_item_updated", itemId, therapistUid: uid, fields: Object.keys(updates) });
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/inventario/itens/:id
+// Soft delete (archived=true) pra preservar histórico de movimentos. Item
+// some das listagens mas movimentos antigos continuam acessíveis.
+router.delete("/therapy/inventario/itens/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const itemId = String(req.params.id || "").trim();
+  if (!itemId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_inventory_items").doc(itemId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ITEM_NAO_ENCONTRADO");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await ref.set({ archived: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await logAudit({ type: "inv_item_archived", itemId, therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/inventario/movimentos
+// Body: { itemId, type, quantity, reason?, movDate? }
+//
+// Aplica movimento via Firestore transaction: lê item + atualiza saldo +
+// grava movimento atomicamente. Bloqueia saída se saldo insuficiente.
+router.post("/therapy/inventario/movimentos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const itemId = String(req.body?.itemId || "").trim();
+  if (!itemId) return sendError(res, 400, "ITEM_OBRIGATORIO");
+
+  const type = String(req.body?.type || "").trim().toLowerCase();
+  if (!isValidInvMovementType(type)) return sendError(res, 400, "TIPO_MOVIMENTO_INVALIDO");
+
+  const quantity = Number(req.body?.quantity);
+  if (!isValidInvMovementQuantity(quantity)) return sendError(res, 400, "QUANTIDADE_INVALIDA");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, INV_REASON_MAX);
+  const movDateRaw = Number(req.body?.movDate || 0);
+  const movDate = Number.isFinite(movDateRaw) && movDateRaw > 0 ? movDateRaw : Date.now();
+
+  const db = getDb();
+  const itemRef = db.collection("therapy_inventory_items").doc(itemId);
+  const movId = newId("mov");
+  const movRef = db.collection("therapy_inventory_movements").doc(movId);
+
+  try {
+    const finalStock = await db.runTransaction(async (tx) => {
+      const itemSnap = await tx.get(itemRef);
+      if (!itemSnap.exists) {
+        const e = new Error("ITEM_NAO_ENCONTRADO");
+        e.code = "ITEM_NAO_ENCONTRADO";
+        throw e;
+      }
+      const item = itemSnap.data();
+      if (item.therapistUid !== uid) {
+        const e = new Error("ACESSO_NEGADO");
+        e.code = "ACESSO_NEGADO";
+        throw e;
+      }
+      if (item.archived) {
+        const e = new Error("ITEM_ARQUIVADO");
+        e.code = "ITEM_ARQUIVADO";
+        throw e;
+      }
+      const newStock = applyInvMovement(item.currentStock, type, quantity);
+      tx.set(itemRef, {
+        currentStock: newStock,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(movRef, {
+        movId,
+        itemId,
+        therapistUid: uid,
+        type,
+        quantity,
+        reason: reason || null,
+        movDate,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return newStock;
+    });
+
+    await logAudit({ type: "inv_movement", movId, itemId, therapistUid: uid, movType: type, quantity, finalStock });
+    return res.json({ ok: true, movId, finalStock });
+  } catch (err) {
+    if (err.code === "ESTOQUE_INSUFICIENTE") {
+      return sendError(res, 409, "ESTOQUE_INSUFICIENTE", {
+        currentStock: err.currentStock,
+        requested: err.requested
+      });
+    }
+    if (err.code === "ITEM_NAO_ENCONTRADO" || err.code === "ACESSO_NEGADO" || err.code === "ITEM_ARQUIVADO") {
+      return sendError(res, err.code === "ACESSO_NEGADO" ? 403 : 404, err.code);
+    }
+    if (err.code === "ESTOQUE_LIMITE_EXCEDIDO") {
+      return sendError(res, 400, "ESTOQUE_LIMITE_EXCEDIDO");
+    }
+    throw err;
+  }
+}));
+
+// GET /therapy/inventario/movimentos?itemId=&month=YYYY-MM
+// Histórico de movimentos. Filtros opcionais por item e mês. Default:
+// últimos 90 dias.
+router.get("/therapy/inventario/movimentos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_inventory_movements")
+    .where("therapistUid", "==", uid)
+    .get();
+
+  const itemIdFilter = String(req.query?.itemId || "").trim();
+  const monthStr     = String(req.query?.month || "").trim();
+  let rangeStart = Date.now() - 90 * 86_400_000;
+  let rangeEnd   = Infinity;
+  if (monthStr) {
+    const range = parseFinMonthRange(monthStr);
+    if (!range) return sendError(res, 400, "MES_INVALIDO");
+    rangeStart = range.startMs;
+    rangeEnd   = range.endMs;
+  }
+
+  const movements = snap.docs
+    .map(d => d.data())
+    .filter(m => {
+      if (typeof m.movDate !== "number") return false;
+      if (m.movDate < rangeStart || m.movDate >= rangeEnd) return false;
+      if (itemIdFilter && m.itemId !== itemIdFilter) return false;
+      return true;
+    })
+    .sort((a, b) => (b.movDate || 0) - (a.movDate || 0))
+    .slice(0, 500);
+
+  return res.json({ ok: true, movements });
 }));
 
 module.exports = router;
