@@ -1233,6 +1233,43 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     updates.cnpj = String(req.body.cnpj || "").trim().slice(0, 20);
   }
 
+  // NFS-e config — objeto com inscMunicipal, codServicoMunicipal, aliquotaIss,
+  // regimeTributario, certA1Encrypted ({ciphertext, iv}), certSenhaEncrypted.
+  // Cert + senha vêm cifrados com DEK do user — backend só armazena. Quando
+  // emissão real for ligada, função server-side decifra na hora de assinar
+  // o XML (vai precisar do DEK em contexto, provável via fluxo manual).
+  if (req.body?.nfseConfig && typeof req.body.nfseConfig === "object") {
+    const n = req.body.nfseConfig;
+    const cfg = {
+      inscMunicipal:       n.inscMunicipal ? String(n.inscMunicipal).trim().slice(0, 30) : null,
+      codServicoMunicipal: n.codServicoMunicipal ? String(n.codServicoMunicipal).trim().slice(0, 20) : null,
+      aliquotaIss:         Number.isFinite(Number(n.aliquotaIss)) ? Number(n.aliquotaIss) : null,
+      regimeTributario:    ["mei", "simples", "presumido", "real"].includes(n.regimeTributario) ? n.regimeTributario : null
+    };
+    // Cert .pfx cifrado: aceita só se for objeto com ciphertext + iv (strings).
+    if (n.certA1Encrypted && typeof n.certA1Encrypted === "object"
+        && typeof n.certA1Encrypted.ciphertext === "string"
+        && typeof n.certA1Encrypted.iv === "string") {
+      // Cap em ~400KB cifrado (.pfx ~50-150KB raw, base64 ~33% overhead, AES-GCM ~16B tag).
+      if (n.certA1Encrypted.ciphertext.length > 600_000) {
+        return sendError(res, 413, "CERTIFICADO_GRANDE_DEMAIS");
+      }
+      cfg.certA1Encrypted = {
+        ciphertext: n.certA1Encrypted.ciphertext,
+        iv: n.certA1Encrypted.iv
+      };
+    }
+    if (n.certSenhaEncrypted && typeof n.certSenhaEncrypted === "object"
+        && typeof n.certSenhaEncrypted.ciphertext === "string"
+        && typeof n.certSenhaEncrypted.iv === "string") {
+      cfg.certSenhaEncrypted = {
+        ciphertext: n.certSenhaEncrypted.ciphertext,
+        iv: n.certSenhaEncrypted.iv
+      };
+    }
+    updates.nfseConfig = cfg;
+  }
+
   // Consultório (objeto)
   if (req.body?.consultorio && typeof req.body.consultorio === "object") {
     const c = req.body.consultorio;
@@ -1931,6 +1968,36 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   }, { merge: true });
 
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
+
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /therapy/sessao/:sessionId/recording-consent
+// Audit log do consentimento do profissional pra gravar a sessão. Gravação
+// em si é client-side (MediaRecorder + cifragem com DEK, download .ep-rec).
+// Servidor só registra que o terapeuta declarou ter obtido consentimento do
+// paciente — pra eventual demanda LGPD/CFP.
+// ─────────────────────────────────────────────────────────────────────────
+router.post("/therapy/sessao/:sessionId/recording-consent", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await logAudit({
+    type: "session_recording_consent",
+    sessionId,
+    therapistUid: uid,
+    consentedAt: Number(req.body?.consentedAt) || Date.now()
+  });
 
   return res.json({ ok: true });
 }));
@@ -8557,6 +8624,12 @@ router.post("/therapy/sessao/:sessionId/recibo/enviar", asyncHandler(async (req,
 
   const description = String(req.body?.description || `Consulta - ${sess.patientName || ""}`).trim().slice(0, DESCRIPTION_MAX);
 
+  // TUSS opcional pra reembolso de convênio. Frontend manda code + label do
+  // catálogo TUSS (RN ANS 305/2012). Persistido no recibo; renderizado no PDF
+  // como bloco "Procedimento (TUSS)".
+  const tussCode  = String(req.body?.tussCode  || "").trim().slice(0, 20) || null;
+  const tussLabel = String(req.body?.tussLabel || "").trim().slice(0, 200) || null;
+
   // 1) Cria transação (status=pago, category=consulta-particular default)
   const txId = newId("tx");
   await db.collection("therapy_transactions").doc(txId).set({
@@ -8633,6 +8706,8 @@ router.post("/therapy/sessao/:sessionId/recibo/enviar", asyncHandler(async (req,
       paidDate,
       paymentMethod,
       paymentMethodLabel: RECEIPT_PAYMENT_LABELS[paymentMethod] || "Outro",
+      tussCode,
+      tussLabel,
       emitterSnapshot,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
