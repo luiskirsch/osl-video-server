@@ -6353,9 +6353,39 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
 router.get("/public/profissionais", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
-  const filterEspecialidade = String(req.query?.especialidade || "").trim().toLowerCase();
-  const filterCidade        = String(req.query?.cidade || "").trim().toLowerCase();
-  const filterUf            = String(req.query?.uf || "").trim().toUpperCase();
+  // Normalização agressiva pro filtro de cidade: lowercase + remove acentos +
+  // colapsa espaços + remove "s" final de palavras com >3 chars (plural simples
+  // — "torres" vira "torre", "anjos" vira "anjo", mas "anos" continua "ano").
+  // Isso casa "passo de torres" com "passo de torre".
+  const normSearch = (s) => String(s || "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ").trim()
+    .replace(/(\w{3,})s\b/g, "$1");
+
+  // Mapa nome do estado → sigla. Aceita o nome completo ou a sigla em qualquer
+  // ponta: paciente filtra "SC", profissional tem "Santa Catarina" cadastrado
+  // (ou vice-versa) → ainda casa.
+  const UF_BY_NAME = {
+    "acre": "AC", "alagoas": "AL", "amapa": "AP", "amazonas": "AM",
+    "bahia": "BA", "ceara": "CE", "distrito federal": "DF", "espirito santo": "ES",
+    "goias": "GO", "maranhao": "MA", "mato grosso": "MT", "mato grosso do sul": "MS",
+    "minas gerais": "MG", "para": "PA", "paraiba": "PB", "parana": "PR",
+    "pernambuco": "PE", "piaui": "PI", "rio de janeiro": "RJ",
+    "rio grande do norte": "RN", "rio grande do sul": "RS", "rondonia": "RO",
+    "roraima": "RR", "santa catarina": "SC", "sao paulo": "SP", "sergipe": "SE",
+    "tocantins": "TO"
+  };
+  const toSigla = (raw) => {
+    const s = String(raw || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+    if (!s) return "";
+    if (s.length === 2) return s.toUpperCase();    // já é sigla
+    return UF_BY_NAME[s] || raw.toUpperCase();     // nome → sigla; fallback mantém
+  };
+
+  const filterEspecialidade = normSearch(req.query?.especialidade);
+  const filterCidade        = normSearch(req.query?.cidade);
+  const filterUf            = toSigla(req.query?.uf);
   const limit               = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
   const db = getDb();
@@ -6374,10 +6404,13 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     if (!evaluatePlanAccess(t).ok) return;
 
     const c = t.consultorio || {};
-    const esp = String(t.especialidade || "").toLowerCase();
+    const esp = normSearch(t.especialidade);
+    const cidadeNorm = normSearch(c.cidade);
+    const ufSigla    = toSigla(c.uf);
+
     if (filterEspecialidade && !esp.includes(filterEspecialidade)) return;
-    if (filterCidade && !String(c.cidade || "").toLowerCase().includes(filterCidade)) return;
-    if (filterUf && String(c.uf || "").toUpperCase() !== filterUf) return;
+    if (filterCidade && !cidadeNorm.includes(filterCidade)) return;
+    if (filterUf && ufSigla !== filterUf) return;
 
     const conselhoSigla = resolveSiglaFromTherapist(t);
     const conselhoMeta  = getConselho(conselhoSigla);
