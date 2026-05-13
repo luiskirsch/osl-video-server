@@ -40,6 +40,7 @@ const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const pushService = require("../services/push");
 const cid10 = require("../services/cid10");
+const nfseNfeio = require("../services/nfse-nfeio");
 const scales = require("../services/scales");
 const {
   CATEGORY_LABELS,
@@ -1233,40 +1234,51 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     updates.cnpj = String(req.body.cnpj || "").trim().slice(0, 20);
   }
 
-  // NFS-e config — objeto com inscMunicipal, codServicoMunicipal, aliquotaIss,
-  // regimeTributario, certA1Encrypted ({ciphertext, iv}), certSenhaEncrypted.
-  // Cert + senha vêm cifrados com DEK do user — backend só armazena. Quando
-  // emissão real for ligada, função server-side decifra na hora de assinar
-  // o XML (vai precisar do DEK em contexto, provável via fluxo manual).
+  // NFS-e via NFE.io — objeto com companyId, codServicoMunicipal, aliquotaIss,
+  // regimeTributario, environment ("sandbox" | "production"), apiTokenEncrypted
+  // ({ciphertext, iv}). O token vem cifrado com DEK do user (frontend cifra
+  // antes de enviar); backend só armazena. Na hora de emitir, frontend manda
+  // o token decifrado no header X-Nfse-Token pra essa request específica —
+  // backend NÃO persiste o token em claro.
+  //
+  // Merge inteligente: PATCH parcial preserva campos não enviados (importante
+  // pra salvar só configuração sem reenviar token a cada vez).
   if (req.body?.nfseConfig && typeof req.body.nfseConfig === "object") {
     const n = req.body.nfseConfig;
-    const cfg = {
-      inscMunicipal:       n.inscMunicipal ? String(n.inscMunicipal).trim().slice(0, 30) : null,
-      codServicoMunicipal: n.codServicoMunicipal ? String(n.codServicoMunicipal).trim().slice(0, 20) : null,
-      aliquotaIss:         Number.isFinite(Number(n.aliquotaIss)) ? Number(n.aliquotaIss) : null,
-      regimeTributario:    ["mei", "simples", "presumido", "real"].includes(n.regimeTributario) ? n.regimeTributario : null
-    };
-    // Cert .pfx cifrado: aceita só se for objeto com ciphertext + iv (strings).
-    if (n.certA1Encrypted && typeof n.certA1Encrypted === "object"
-        && typeof n.certA1Encrypted.ciphertext === "string"
-        && typeof n.certA1Encrypted.iv === "string") {
-      // Cap em ~400KB cifrado (.pfx ~50-150KB raw, base64 ~33% overhead, AES-GCM ~16B tag).
-      if (n.certA1Encrypted.ciphertext.length > 600_000) {
-        return sendError(res, 413, "CERTIFICADO_GRANDE_DEMAIS");
+    const existing = therapist.nfseConfig || {};
+    const cfg = { ...existing };
+
+    if (n.companyId !== undefined) {
+      cfg.companyId = n.companyId ? String(n.companyId).trim().slice(0, 50) : null;
+    }
+    if (n.codServicoMunicipal !== undefined) {
+      cfg.codServicoMunicipal = n.codServicoMunicipal ? String(n.codServicoMunicipal).trim().slice(0, 20) : null;
+    }
+    if (n.aliquotaIss !== undefined) {
+      cfg.aliquotaIss = Number.isFinite(Number(n.aliquotaIss)) ? Number(n.aliquotaIss) : null;
+    }
+    if (n.regimeTributario !== undefined) {
+      cfg.regimeTributario = ["mei", "simples", "presumido", "real"].includes(n.regimeTributario)
+        ? n.regimeTributario : null;
+    }
+    if (n.environment !== undefined) {
+      cfg.environment = ["sandbox", "production"].includes(n.environment) ? n.environment : "sandbox";
+    }
+
+    // API token cifrado: substitui só se enviado novo. Frontend não envia
+    // quando user deixa input em branco (mantém o atual).
+    if (n.apiTokenEncrypted && typeof n.apiTokenEncrypted === "object"
+        && typeof n.apiTokenEncrypted.ciphertext === "string"
+        && typeof n.apiTokenEncrypted.iv === "string") {
+      if (n.apiTokenEncrypted.ciphertext.length > 2000) {
+        return sendError(res, 413, "TOKEN_GRANDE_DEMAIS");
       }
-      cfg.certA1Encrypted = {
-        ciphertext: n.certA1Encrypted.ciphertext,
-        iv: n.certA1Encrypted.iv
+      cfg.apiTokenEncrypted = {
+        ciphertext: n.apiTokenEncrypted.ciphertext,
+        iv: n.apiTokenEncrypted.iv
       };
     }
-    if (n.certSenhaEncrypted && typeof n.certSenhaEncrypted === "object"
-        && typeof n.certSenhaEncrypted.ciphertext === "string"
-        && typeof n.certSenhaEncrypted.iv === "string") {
-      cfg.certSenhaEncrypted = {
-        ciphertext: n.certSenhaEncrypted.ciphertext,
-        iv: n.certSenhaEncrypted.iv
-      };
-    }
+
     updates.nfseConfig = cfg;
   }
 
@@ -1440,6 +1452,16 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const { twoFactorSecret, twoFactorPendingSecret, asaasApiKey, ...therapistPublic } = therapist;
   therapistPublic.twoFactorEnabled = !!therapist.twoFactorEnabled;
   therapistPublic.asaasConfigured  = !!asaasApiKey;
+
+  // NFS-e: nunca devolve o apiTokenEncrypted (mesmo cifrado, evita exposição
+  // desnecessária). Mostra só flag pública pro frontend renderizar "já configurado".
+  if (therapistPublic.nfseConfig) {
+    const { apiTokenEncrypted, ...nfsePublic } = therapistPublic.nfseConfig;
+    therapistPublic.nfseConfig = {
+      ...nfsePublic,
+      apiTokenConfigured: !!apiTokenEncrypted
+    };
+  }
 
   return res.json({
     ok: true,
@@ -2000,6 +2022,169 @@ router.post("/therapy/sessao/:sessionId/recording-consent", asyncHandler(async (
   });
 
   return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// NFS-e via NFE.io
+//
+// Fluxo de emissão:
+//   1. Profissional configura companyId + apiToken (cifrado com DEK) em
+//      /perfil → PATCH /therapy/profissional/perfil { nfseConfig: {...} }.
+//   2. Frontend busca o token cifrado via GET /therapy/nfse/encrypted-token
+//      (precisa autenticação Firebase + recibo no header não exposto).
+//   3. Frontend decifra o token com DEK localmente.
+//   4. Frontend POSTa /therapy/nfse/test ou /emitir passando o token raw no
+//      header X-Nfse-Token. Backend usa pra essa request, não persiste em claro.
+//   5. Resposta da NFE.io é persistida no recibo (nfseId, status, pdfUrl).
+//
+// Por que o token vai no header: passar como Bearer entraria em conflito com
+// Firebase ID token. Header customizado deixa claro o propósito.
+// ═════════════════════════════════════════════════════════════════════════
+
+// GET /therapy/nfse/encrypted-token — devolve { ciphertext, iv } do próprio
+// user pra decifrar client-side antes de emitir.
+router.get("/therapy/nfse/encrypted-token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  const enc = therapist.nfseConfig?.apiTokenEncrypted;
+  if (!enc) return sendError(res, 404, "TOKEN_NAO_CONFIGURADO");
+  return res.json({ ok: true, apiTokenEncrypted: enc });
+}));
+
+// POST /therapy/nfse/test — valida companyId + token chamando NFE.io.
+router.post("/therapy/nfse/test", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const nfse = therapist.nfseConfig;
+  if (!nfse?.companyId) return sendError(res, 400, "NFSE_NAO_CONFIGURADO", { hint: "Cadastre companyId no perfil" });
+
+  const apiToken = String(req.headers["x-nfse-token"] || "").trim();
+  if (!apiToken) return sendError(res, 400, "NFSE_TOKEN_AUSENTE", { hint: "Envie o token decifrado em X-Nfse-Token" });
+
+  try {
+    const r = await nfseNfeio.testConnection({
+      apiToken,
+      companyId: nfse.companyId,
+      environment: nfse.environment || "sandbox"
+    });
+    return res.json(r);
+  } catch (e) {
+    return sendError(res, e.status || 502, "NFSE_API_ERRO", {
+      detail: String(e?.message || e),
+      hint: "Confira token + companyId no painel NFE.io"
+    });
+  }
+}));
+
+// POST /therapy/nfse/emitir — emite NFS-e a partir de um recibo já criado.
+// Body: { receiptId, borrower?: { name, email, cpf, address } }
+router.post("/therapy/nfse/emitir", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const nfse = therapist.nfseConfig;
+  if (!nfse?.companyId)           return sendError(res, 400, "NFSE_NAO_CONFIGURADO");
+  if (!nfse?.codServicoMunicipal) return sendError(res, 400, "CODIGO_SERVICO_AUSENTE");
+  if (nfse.aliquotaIss == null)   return sendError(res, 400, "ALIQUOTA_AUSENTE");
+
+  const apiToken = String(req.headers["x-nfse-token"] || "").trim();
+  if (!apiToken) return sendError(res, 400, "NFSE_TOKEN_AUSENTE");
+
+  const receiptId = String(req.body?.receiptId || "").trim();
+  if (!receiptId) return sendError(res, 400, "RECIBO_ID_AUSENTE");
+
+  const db = getDb();
+  const receiptRef = db.collection("therapy_receipts").doc(receiptId);
+  const receiptSnap = await receiptRef.get();
+  if (!receiptSnap.exists) return sendError(res, 404, "RECIBO_NAO_ENCONTRADO");
+  const receipt = receiptSnap.data();
+  if (receipt.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (receipt.nfseId) return sendError(res, 409, "NFSE_JA_EMITIDA", { nfseId: receipt.nfseId, status: receipt.nfseStatus });
+
+  // Borrower opcional vem do frontend (paciente é cifrado E2EE, frontend
+  // decifrou e mandou os campos necessários).
+  const borrower = req.body?.borrower || null;
+  if (borrower && typeof borrower !== "object") return sendError(res, 400, "BORROWER_INVALIDO");
+
+  try {
+    const r = await nfseNfeio.emitirNfse({
+      apiToken,
+      companyId: nfse.companyId,
+      environment: nfse.environment || "sandbox",
+      receipt,
+      therapist,
+      borrower
+    });
+
+    await receiptRef.set({
+      nfseId:        r.nfseId,
+      nfseStatus:    r.status,
+      nfsePdfUrl:    r.pdfUrl,
+      nfseXmlUrl:    r.xmlUrl,
+      nfseNumber:    r.number,
+      nfseIssuedOn:  r.issuedOn,
+      nfseEmittedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await logAudit({ type: "nfse_emitida", therapistUid: uid, receiptId, nfseId: r.nfseId, status: r.status });
+
+    return res.json({ ok: true, nfseId: r.nfseId, status: r.status, pdfUrl: r.pdfUrl, number: r.number });
+  } catch (e) {
+    await logAudit({ type: "nfse_falha", therapistUid: uid, receiptId, error: String(e?.message || e) });
+    return sendError(res, e.status || 502, "NFSE_API_ERRO", {
+      detail: String(e?.message || e)
+    });
+  }
+}));
+
+// GET /therapy/nfse/consultar/:nfseId — atualiza status de NFS-e que ficou
+// "Processing" depois da emissão (assíncrono).
+router.get("/therapy/nfse/consultar/:nfseId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const nfse = therapist.nfseConfig;
+  if (!nfse?.companyId) return sendError(res, 400, "NFSE_NAO_CONFIGURADO");
+
+  const apiToken = String(req.headers["x-nfse-token"] || "").trim();
+  if (!apiToken) return sendError(res, 400, "NFSE_TOKEN_AUSENTE");
+
+  const nfseId = String(req.params.nfseId || "").trim();
+  if (!nfseId) return sendError(res, 400, "NFSE_ID_AUSENTE");
+
+  try {
+    const r = await nfseNfeio.consultarNfse({ apiToken, companyId: nfse.companyId, nfseId });
+
+    // Atualiza recibo associado (busca por nfseId).
+    const db = getDb();
+    const rSnap = await db.collection("therapy_receipts").where("nfseId", "==", nfseId).where("therapistUid", "==", uid).limit(1).get();
+    if (!rSnap.empty) {
+      await rSnap.docs[0].ref.set({
+        nfseStatus:   r.status,
+        nfsePdfUrl:   r.pdfUrl,
+        nfseXmlUrl:   r.xmlUrl,
+        nfseNumber:   r.number,
+        nfseIssuedOn: r.issuedOn
+      }, { merge: true });
+    }
+
+    return res.json({ ok: true, ...r, raw: undefined });
+  } catch (e) {
+    return sendError(res, e.status || 502, "NFSE_API_ERRO", { detail: String(e?.message || e) });
+  }
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
