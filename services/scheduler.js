@@ -13,17 +13,22 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
-const { sendEmail, templateReminder, templateBirthday, templateNps, buildJoinUrl, buildCancelUrl, buildNpsUrl } = require("./email");
+const { sendEmail, templateReminder, templateBirthday, templateNps, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { processPendingReferrals } = require("./affiliate");
 
-const TICK_INTERVAL_MS = 60 * 60 * 1000; // 1h
+// Intervalo do tick principal. 15min é fino o suficiente pra cobrir o
+// reminder de 1h (paciente recebe entre T-75min e T-60min). Os outros
+// jobs (NPS, aniversário, cleanup) também rodam a cada tick mas têm
+// idempotência própria.
+const TICK_INTERVAL_MS = 15 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const JOIN_TOKEN_VALIDITY_MS = 2 * HOUR_MS; // bate com routes/therapy.js
 
 let timer = null;
 
 const REMINDER_CANCEL_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60d
+const REMINDER_CONFIRM_VALIDITY_MS = REMINDER_CANCEL_VALIDITY_MS;
 
 function buildJoinTokenForSession(session) {
   // Gera fresco — válido na janela de uso (paciente clica no link).
@@ -44,6 +49,15 @@ function buildCancelTokenForSession(sessionId) {
     sessionId,
     iat: Date.now(),
     exp: Date.now() + REMINDER_CANCEL_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+}
+
+function buildConfirmTokenForSession(sessionId) {
+  return signPayload({
+    token_type: "session_confirm",
+    sessionId,
+    iat: Date.now(),
+    exp: Date.now() + REMINDER_CONFIRM_VALIDITY_MS
   }, ACCESS_TOKEN_SECRET);
 }
 
@@ -84,10 +98,12 @@ async function runReminderTick() {
       continue;
     }
 
-    const joinToken   = buildJoinTokenForSession(s);
-    const cancelToken = buildCancelTokenForSession(s.sessionId);
-    const joinUrl   = buildJoinUrl(joinToken);
-    const cancelUrl = buildCancelUrl(cancelToken);
+    const joinToken    = buildJoinTokenForSession(s);
+    const cancelToken  = buildCancelTokenForSession(s.sessionId);
+    const confirmToken = buildConfirmTokenForSession(s.sessionId);
+    const joinUrl    = buildJoinUrl(joinToken);
+    const cancelUrl  = buildCancelUrl(cancelToken);
+    const confirmUrl = buildConfirmUrl(confirmToken);
 
     // E-mail (canal primário, mais antigo).
     let emailOk = false;
@@ -97,7 +113,7 @@ async function runReminderTick() {
           patientName: s.patientName || "Paciente",
           therapistName: s.therapistDisplayName || "seu profissional",
           scheduledAt: at,
-          joinUrl, cancelUrl
+          joinUrl, cancelUrl, confirmUrl
         });
         const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
         emailOk = result.ok || result.skipped;
@@ -145,8 +161,108 @@ async function runReminderTick() {
   }
 }
 
+// Reminder T-1h: dispara para sessões cujo scheduledAt cai em
+// (now + 30min, now + 90min). Idempotência via reminder1hSentAt.
+// Tick é 15min, então cada sessão entra na janela em ~4 ticks; primeiro
+// marca, demais skipam.
+//
+// Razão de existir além do 24h: reduz no-show drástico — paciente já viu
+// o lembrete da manhã anterior + recebe um "tá começando" colado no
+// horário. Padrão de mercado (Doctoralia, iClinic) reporta queda de
+// ~30-40% de faltas com 2 lembretes vs. 1.
+const REMINDER_1H_WINDOW_START_MS = 30 * 60 * 1000;
+const REMINDER_1H_WINDOW_END_MS   = 90 * 60 * 1000;
+
+async function runReminder1hTick() {
+  const db = getDb();
+  if (!db) return;
+
+  const now = Date.now();
+  const windowStart = now + REMINDER_1H_WINDOW_START_MS;
+  const windowEnd   = now + REMINDER_1H_WINDOW_END_MS;
+
+  const snap = await db.collection("therapy_sessions")
+    .where("status", "==", "scheduled")
+    .limit(500)
+    .get();
+
+  let candidates = 0, sent = 0, errors = 0, waSent = 0;
+  for (const doc of snap.docs) {
+    const s = doc.data();
+    const at = Number(s.scheduledAt || 0);
+    if (!at || at <= windowStart || at > windowEnd) continue;
+    if (s.reminder1hSentAt) continue;
+    if (!s.patientEmail && !s.patientPhone) continue;
+    candidates++;
+
+    try {
+      await doc.ref.set({
+        reminder1hSentAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (e) {
+      logError("reminder_1h_mark_failed", e, { sessionId: s.sessionId });
+      errors++;
+      continue;
+    }
+
+    const joinToken    = buildJoinTokenForSession(s);
+    const cancelToken  = buildCancelTokenForSession(s.sessionId);
+    const confirmToken = buildConfirmTokenForSession(s.sessionId);
+    const joinUrl    = buildJoinUrl(joinToken);
+    const cancelUrl  = buildCancelUrl(cancelToken);
+    const confirmUrl = buildConfirmUrl(confirmToken);
+
+    let emailOk = false;
+    if (s.patientEmail) {
+      try {
+        const tpl = templateReminder({
+          patientName: s.patientName || "Paciente",
+          therapistName: s.therapistDisplayName || "seu profissional",
+          scheduledAt: at,
+          joinUrl, cancelUrl, confirmUrl
+        });
+        const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
+        emailOk = result.ok || result.skipped;
+        if (!emailOk) errors++;
+      } catch (e) {
+        logError("reminder_1h_email_failed", e, { sessionId: s.sessionId });
+      }
+    } else {
+      emailOk = true;
+    }
+
+    if (s.patientPhone) {
+      try {
+        const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
+        const therapist = tsnap.exists ? tsnap.data() : null;
+        if (therapist?.whatsappConfig?.enabled) {
+          const session = {
+            patientName: s.patientName, patientPhone: s.patientPhone,
+            scheduledAt: at
+          };
+          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
+          if (r.ok) waSent++;
+        }
+      } catch (e) {
+        logError("reminder_1h_wa_failed", e, { sessionId: s.sessionId });
+      }
+    }
+
+    if (!emailOk && s.patientEmail) {
+      await doc.ref.set({ reminder1hSentAt: null }, { merge: true });
+      continue;
+    }
+    sent++;
+  }
+
+  if (candidates > 0 || errors > 0) {
+    logInfo("reminder_1h_tick", { candidates, sent, waSent, errors });
+  }
+}
+
 async function runFullTick() {
   await runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
+  await runReminder1hTick().catch(e => logError("reminder_1h_tick_unhandled", e));
   // #B1: processa fila de retries de afiliado todo tick (1×/h é suficiente —
   // backoff mínimo é 1min mas pra batch isso fica adequado).
   await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
@@ -386,4 +502,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runStudentDocCleanup, runBirthdayTick, runNpsTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick };

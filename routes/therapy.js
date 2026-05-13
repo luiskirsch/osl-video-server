@@ -2082,6 +2082,57 @@ router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) =>
   return res.json({ ok: true });
 }));
 
+// POST /therapy/sessao/confirmar-publico — paciente confirma presença via
+// token assinado (vem do link do e-mail de lembrete). Idempotente: confirmar
+// 2× é no-op. Mesmo TTL do cancel token (60 dias). Reduz no-show porque
+// terapeuta vê quem deu sinal de vida pré-consulta.
+router.post("/therapy/sessao/confirmar-publico", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.body?.confirmToken || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "session_confirm") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const sessRef = db.collection("therapy_sessions").doc(payload.sessionId);
+  const sessSnap = await sessRef.get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sessData = sessSnap.data();
+  if (sessData.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+  if (sessData.status === "canceled")  return sendError(res, 409, "SESSAO_CANCELADA");
+
+  if (sessData.confirmedAt) {
+    return res.json({
+      ok: true,
+      alreadyConfirmed: true,
+      scheduledAt: sessData.scheduledAt || null,
+      therapistName: sessData.therapistDisplayName || ""
+    });
+  }
+
+  await sessRef.set({
+    confirmedAt: admin.firestore.FieldValue.serverTimestamp(),
+    confirmedBy: "patient",
+    updatedAt:   admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "session_confirmed",
+    sessionId: payload.sessionId,
+    therapistUid: sessData.therapistUid,
+    confirmedBy: "patient"
+  });
+
+  return res.json({
+    ok: true,
+    scheduledAt: sessData.scheduledAt || null,
+    therapistName: sessData.therapistDisplayName || ""
+  });
+}));
+
 // ─────────────────────────────────────────────────────────────────────────
 // BLOQUEIOS DE HORÁRIO (blackouts)
 // O terapeuta marca períodos de indisponibilidade (férias, licença, almoço

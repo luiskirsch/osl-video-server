@@ -193,7 +193,7 @@ function templateDispensacaoNotice({
   return { subject, html, text };
 }
 
-function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl }) {
+function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl, confirmUrl }) {
   const relativeWhen = describeWhenPtBR(scheduledAt);
   const subject = `Lembrete: sua consulta ${relativeWhen}`;
   const headingByWhen = {
@@ -204,18 +204,23 @@ function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, ca
   };
   const heading = headingByWhen[relativeWhen] || `Sua consulta ${relativeWhen}`;
   const when = fmtDateTimePtBR(scheduledAt);
+  // CTA hierarchy:
+  //   - Em "agora"/"em breve": prioriza Entrar.
+  //   - Em "hoje"/"amanhã": mostra Entrar + Confirmar presença lado a lado.
+  const isImmediate = relativeWhen === "agora" || relativeWhen === "em breve";
   const html = renderShell({
     heading,
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(patientName)},</p>
       <p style="margin:0 0 16px;">Lembrete: você tem consulta com <strong>${escHtml(therapistName)}</strong> em:</p>
       <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-weight:500;">${escHtml(when)}</p>
-      <p style="margin:0 0 24px;"><a href="${escHtml(joinUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Entrar na consulta</a></p>
+      <p style="margin:0 0 16px;"><a href="${escHtml(joinUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Entrar na consulta</a></p>
+      ${(confirmUrl && !isImmediate) ? `<p style="margin:0 0 24px;"><a href="${escHtml(confirmUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:10px 18px; border-radius:6px; text-decoration:none; font-weight:500; font-size:14px;">Confirmar presença</a> <span style="font-size:13px; color:rgba(28,31,29,0.55); margin-left:8px;">Avisa o profissional que você vem.</span></p>` : ""}
       ${cancelUrl ? `<p style="margin:0 0 0; font-size:13px; color:rgba(28,31,29,0.65);">Não vai conseguir? Use este <a href="${escHtml(cancelUrl)}" style="color:rgba(28,31,29,0.65);">link de cancelamento</a> ou avise diretamente o profissional.</p>` : ""}
     `,
     footer: "Lembrete enviado automaticamente pelo Espaço Prelúdio."
   });
-  const text = `Lembrete: você tem consulta com ${therapistName} em ${when}.\n\nLink para entrar: ${joinUrl}\n${cancelUrl ? `Cancelar: ${cancelUrl}\n` : ""}\nEspaço Prelúdio`;
+  const text = `Lembrete: você tem consulta com ${therapistName} em ${when}.\n\nLink para entrar: ${joinUrl}\n${confirmUrl && !isImmediate ? `Confirmar presença: ${confirmUrl}\n` : ""}${cancelUrl ? `Cancelar: ${cancelUrl}\n` : ""}\nEspaço Prelúdio`;
   return { subject, html, text };
 }
 
@@ -302,6 +307,9 @@ function buildJoinUrl(joinToken) {
 }
 function buildCancelUrl(cancelToken) {
   return `${THERAPY_FRONTEND_BASE}/cancelar.html?t=${encodeURIComponent(cancelToken)}`;
+}
+function buildConfirmUrl(confirmToken) {
+  return `${THERAPY_FRONTEND_BASE}/confirmar.html?t=${encodeURIComponent(confirmToken)}`;
 }
 function buildNpsUrl(npsToken) {
   return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
@@ -418,6 +426,7 @@ module.exports = {
   templateFormacaoRejected,
   buildJoinUrl,
   buildCancelUrl,
+  buildConfirmUrl,
   buildNpsUrl,
   buildPainelUrl,
   buildPlanosUrl,
