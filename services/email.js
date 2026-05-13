@@ -116,6 +116,34 @@ function renderShell({ heading, bodyHtml, footer }) {
 </html>`;
 }
 
+// Recibo enviado pro paciente após o pagamento. Link público pra visualizar
+// (com download PDF). Texto formato carta curta + valor destacado.
+function templateReciboEnviado({ patientName, therapistName, amountCents, paymentMethodLabel, paidDateMs, reciboUrl, sequentialNumber }) {
+  const subject = `Recibo de ${therapistName} ${sequentialNumber ? `(nº ${sequentialNumber})` : ""}`.trim();
+  const valor = "R$ " + (amountCents / 100).toFixed(2).replace(".", ",");
+  const dataFmt = paidDateMs
+    ? new Date(paidDateMs).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric", timeZone: "America/Sao_Paulo" })
+    : "";
+  const html = renderShell({
+    heading: "Seu recibo",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(patientName)},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(therapistName)}</strong> emitiu um recibo pra você:</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Valor</td><td style="padding:3px 0; text-align:right;"><strong style="font-size:18px;">${escHtml(valor)}</strong></td></tr>
+        ${dataFmt ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Pagamento em</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(dataFmt)}</strong></td></tr>` : ""}
+        ${paymentMethodLabel ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Forma</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(paymentMethodLabel)}</strong></td></tr>` : ""}
+        ${sequentialNumber ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Nº do recibo</td><td style="padding:3px 0; text-align:right;"><strong>${sequentialNumber}</strong></td></tr>` : ""}
+      </table>
+      <p style="margin:0 0 24px;"><a href="${escHtml(reciboUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Ver e baixar recibo</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Você pode baixar o PDF na página acima. Guarde-o pro IR, reembolso de plano de saúde ou referência futura.</p>
+    `,
+    footer: "Recibo emitido eletronicamente pelo Espaço Prelúdio."
+  });
+  const text = `Olá ${patientName},\n\n${therapistName} emitiu um recibo pra você:\n\nValor: ${valor}${dataFmt ? `\nPagamento em: ${dataFmt}` : ""}${paymentMethodLabel ? `\nForma: ${paymentMethodLabel}` : ""}${sequentialNumber ? `\nNº do recibo: ${sequentialNumber}` : ""}\n\nVer e baixar PDF: ${reciboUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 // Notifica o terapeuta de uma solicitação pública de agendamento. CTA leva
 // pro painel (onde aprova/rejeita). reply_to do paciente fica como pista
 // alternativa caso queira responder direto antes de aprovar.
@@ -311,6 +339,9 @@ function buildCancelUrl(cancelToken) {
 function buildConfirmUrl(confirmToken) {
   return `${THERAPY_FRONTEND_BASE}/confirmar.html?t=${encodeURIComponent(confirmToken)}`;
 }
+function buildReciboPublicoUrl(reciboToken) {
+  return `${THERAPY_FRONTEND_BASE}/recibo-publico.html?t=${encodeURIComponent(reciboToken)}`;
+}
 function buildNpsUrl(npsToken) {
   return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
 }
@@ -414,6 +445,7 @@ module.exports = {
   sendEmail,
   templateConfirmation,
   templateSchedulingRequest,
+  templateReciboEnviado,
   templateReminder,
   templateBirthday,
   templateNps,
@@ -427,6 +459,7 @@ module.exports = {
   buildJoinUrl,
   buildCancelUrl,
   buildConfirmUrl,
+  buildReciboPublicoUrl,
   buildNpsUrl,
   buildPainelUrl,
   buildPlanosUrl,

@@ -101,11 +101,12 @@ const {
   getPrescriptionTypesForTherapist
 } = require("../services/professional-councils");
 const {
-  sendEmail, templateConfirmation, templateSchedulingRequest, templateDispensacaoNotice,
+  sendEmail, templateConfirmation, templateSchedulingRequest, templateReciboEnviado, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
+  buildReciboPublicoUrl,
   buildPainelUrl, buildPlanosUrl,
   buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl,
   buildComprovanteFormacaoUrl
@@ -8315,6 +8316,251 @@ router.post("/webhooks/asaas/financeiro", asyncHandler(async (req, res) => {
 
   // Sempre 200 — Asaas retenta se receber não-200, e não queremos loop.
   return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// RECIBO A PARTIR DE SESSÃO — terapeuta clica "Enviar recibo" no card de
+// sessão (agendada ou encerrada), preenche valor + método, e o recibo é
+// criado + enviado pro paciente via e-mail e WhatsApp.
+//
+// Fluxo:
+//  1. Cria therapy_transactions (status=pago) tied to session — vai pro
+//     financeiro automaticamente.
+//  2. Cria therapy_receipts (sequential number) — mesmo schema do POST /recibos.
+//  3. Gera token "recibo_view" (TTL 1 ano — IR exige guardar 5 anos mas
+//     1 ano cobre o uso prático; pra retomar depois o terapeuta acessa o
+//     PDF via financeiro/recibos).
+//  4. Envia e-mail (template) + WhatsApp (texto) em paralelo, fire-and-forget.
+//     Sucesso parcial é OK — frontend mostra quais canais funcionaram.
+// ═════════════════════════════════════════════════════════════════════════
+const RECIBO_PUBLIC_TOKEN_VALIDITY_MS = 365 * 24 * 60 * 60 * 1000; // 1 ano
+
+router.post("/therapy/sessao/:sessionId/recibo/enviar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const sessRef = db.collection("therapy_sessions").doc(sessionId);
+  const sessSnap = await sessRef.get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const sess = sessSnap.data();
+  if (sess.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const amount = Number(req.body?.amount);
+  if (!isValidFinAmount(amount)) return sendError(res, 400, "VALOR_INVALIDO", { hint: "amount em centavos (integer)" });
+
+  const paymentMethod = String(req.body?.paymentMethod || "pix").trim().toLowerCase();
+  if (!isValidFinPaymentMethod(paymentMethod)) return sendError(res, 400, "METODO_PAGAMENTO_INVALIDO");
+
+  const paidDate = Number(req.body?.paidDate) || Date.now();
+
+  const patientEmailRaw = String(req.body?.patientEmail || sess.patientEmail || "").trim().toLowerCase();
+  const patientEmail = patientEmailRaw && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw) ? patientEmailRaw : null;
+  const patientPhoneRaw = String(req.body?.patientPhone || sess.patientPhone || "").trim();
+  const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
+
+  const sendEmailFlag = req.body?.sendEmail !== false;
+  const sendWaFlag    = req.body?.sendWhatsapp !== false;
+
+  const description = String(req.body?.description || `Consulta - ${sess.patientName || ""}`).trim().slice(0, DESCRIPTION_MAX);
+
+  // 1) Cria transação (status=pago, category=consulta-particular default)
+  const txId = newId("tx");
+  await db.collection("therapy_transactions").doc(txId).set({
+    txId,
+    therapistUid: uid,
+    performedByUid: null,
+    type: "receita",
+    category: "consulta-particular",
+    amount,
+    description,
+    paymentMethod,
+    status: "pago",
+    patientId: sess.patientId || null,
+    patientNameSnapshot: sess.patientName || null,
+    sessionId,
+    issueDate: paidDate,
+    dueDate: null,
+    paidDate,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // 2) Cria recibo (snapshot do terapeuta + número sequencial)
+  const c = therapist.consultorio || {};
+  const idsEmitente = [];
+  if (therapist.crm) idsEmitente.push("CRM " + therapist.crm);
+  if (therapist.crp) idsEmitente.push("CRP " + therapist.crp);
+  const isLegacy = therapist.crm || therapist.crp;
+  if (!isLegacy && therapist.tipoConselho && therapist.numeroConselho) {
+    const sub = therapist.subtipoConselho ? ` (${therapist.subtipoConselho === "to" ? "TO" : "fisio"})` : "";
+    idsEmitente.push(`${therapist.tipoConselho} ${therapist.numeroConselho}${sub}`);
+  }
+  if (therapist.rqe) idsEmitente.push("RQE " + String(therapist.rqe).replace(/^RQE\s*/i, ""));
+  const emitterSnapshot = {
+    displayName:  therapist.displayName || "",
+    ids:          idsEmitente.join("  ·  "),
+    especialidade: therapist.especialidade || "",
+    cnpj:         therapist.cnpj || null,
+    cpf:          therapist.cpf || null,
+    address: c.endereco ? [
+      c.endereco + (c.numero ? `, ${c.numero}` : "") + (c.complemento ? ` — ${c.complemento}` : ""),
+      [c.bairro, c.cidade, c.uf, c.cep].filter(Boolean).join(" · ")
+    ].filter(Boolean).join(" / ") : "",
+    phone: c.telefone || "",
+    logoBase64: therapist.logoBase64 || null,
+    logoMime:   therapist.logoMime   || null
+  };
+  const counterRef = db.collection("therapy_receipt_counters").doc(uid);
+  const receiptId = newId("rcp");
+  const receiptRef = db.collection("therapy_receipts").doc(receiptId);
+  const valorExtensoTxt = valorPorExtenso(amount);
+  const patientNameTrunc = (sess.patientName || "").slice(0, RECEIPT_PATIENT_NAME_MAX);
+  const sequentialNumber = await db.runTransaction(async (txx) => {
+    const counterSnap = await txx.get(counterRef);
+    const current = counterSnap.exists ? (counterSnap.data().seq || 0) : 0;
+    const next = current + 1;
+    txx.set(counterRef, {
+      seq: next,
+      therapistUid: uid,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    txx.set(receiptRef, {
+      receiptId,
+      therapistUid: uid,
+      txId,
+      sessionId,
+      sequentialNumber: next,
+      patientName: patientNameTrunc || null,
+      patientCpf: null,
+      amount,
+      amountExtenso: valorExtensoTxt,
+      description: description.slice(0, RECEIPT_DESCRIPTION_MAX),
+      issueDate: paidDate,
+      paidDate,
+      paymentMethod,
+      paymentMethodLabel: RECEIPT_PAYMENT_LABELS[paymentMethod] || "Outro",
+      emitterSnapshot,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return next;
+  });
+
+  // 3) Token público pra visualização
+  const reciboToken = signPayload({
+    token_type: "recibo_view",
+    receiptId,
+    therapistUid: uid,
+    iat: Date.now(),
+    exp: Date.now() + RECIBO_PUBLIC_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+  const reciboUrl = buildReciboPublicoUrl(reciboToken);
+
+  // 4) Envio: e-mail + WhatsApp em paralelo, fire-and-forget pra sintática
+  // de await — capturamos sucesso/falha pra responder ao frontend.
+  const channels = { email: { attempted: false, ok: false }, whatsapp: { attempted: false, ok: false } };
+
+  const therapistName = therapist.displayName || "Profissional";
+  if (sendEmailFlag && patientEmail) {
+    channels.email.attempted = true;
+    try {
+      const tpl = templateReciboEnviado({
+        patientName: patientNameTrunc || "Paciente",
+        therapistName,
+        amountCents: amount,
+        paymentMethodLabel: RECEIPT_PAYMENT_LABELS[paymentMethod] || "Outro",
+        paidDateMs: paidDate,
+        reciboUrl,
+        sequentialNumber
+      });
+      const therapistEmail = await resolveTherapistEmail(uid, therapist);
+      const r = await sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl });
+      channels.email.ok = !!(r.ok || r.skipped);
+    } catch (e) {
+      logError("recibo_email_failed", e, { receiptId });
+    }
+  }
+
+  if (sendWaFlag && patientPhone) {
+    channels.whatsapp.attempted = true;
+    if (therapist?.whatsappConfig?.enabled) {
+      try {
+        const valorFmt = "R$ " + (amount / 100).toFixed(2).replace(".", ",");
+        const msg = `Olá ${patientNameTrunc || "paciente"}, ${therapistName} emitiu seu recibo de *${valorFmt}* (nº ${sequentialNumber}).\n\nVer e baixar PDF:\n${reciboUrl}`;
+        const r = await sendWaText({ to: patientPhone, message: msg });
+        channels.whatsapp.ok = !!r.ok;
+      } catch (e) {
+        logError("recibo_whatsapp_failed", e, { receiptId });
+      }
+    } else {
+      channels.whatsapp.ok = false;
+      channels.whatsapp.reason = "WHATSAPP_NAO_HABILITADO";
+    }
+  }
+
+  await logAudit({
+    type: "recibo_enviado_via_sessao",
+    receiptId,
+    therapistUid: uid,
+    sessionId,
+    txId,
+    sequentialNumber,
+    emailSent: channels.email.ok,
+    whatsappSent: channels.whatsapp.ok
+  });
+
+  return res.json({
+    ok: true,
+    receiptId,
+    sequentialNumber,
+    txId,
+    reciboUrl,
+    channels
+  });
+}));
+
+// GET /therapy/recibo/publico?t=<token> — endpoint público (paciente abre o link).
+// Token validade 1 ano. Devolve dados pro recibo-publico.html renderizar.
+router.get("/therapy/recibo/publico", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.t || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "recibo_view") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const rSnap = await db.collection("therapy_receipts").doc(payload.receiptId).get();
+  if (!rSnap.exists) return sendError(res, 404, "RECIBO_NAO_ENCONTRADO");
+  const r = rSnap.data();
+  if (r.therapistUid !== payload.therapistUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  return res.json({
+    ok: true,
+    receipt: {
+      receiptId:           r.receiptId,
+      sequentialNumber:    r.sequentialNumber,
+      patientName:         r.patientName,
+      amount:              r.amount,
+      amountExtenso:       r.amountExtenso,
+      description:         r.description,
+      issueDate:           r.issueDate,
+      paidDate:            r.paidDate,
+      paymentMethod:       r.paymentMethod,
+      paymentMethodLabel:  r.paymentMethodLabel,
+      emitterSnapshot:     r.emitterSnapshot
+    }
+  });
 }));
 
 module.exports = router;
