@@ -116,6 +116,44 @@ function renderShell({ heading, bodyHtml, footer }) {
 </html>`;
 }
 
+// Convite pra paciente preencher anamnese pré-consulta. Foco: tom cuidadoso
+// (vamos pedir histórico clínico, queixa principal — coisas íntimas), aviso
+// claro sobre tempo (~10min) e LGPD.
+function templateAnamneseEnviada({ patientName, therapistName, anamneseUrl }) {
+  const subject = `${therapistName} pediu para você preencher uma anamnese`;
+  const html = renderShell({
+    heading: "Antes da primeira sessão",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(patientName || "")},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(therapistName)}</strong> quer entender melhor seu contexto antes da primeira sessão. Pra isso preparou uma anamnese — algumas perguntas sobre você, seu momento atual e o motivo da busca por terapia.</p>
+      <p style="margin:0 0 16px; padding:12px 14px; background:#f7f4ef; border-radius:6px;">
+        ⏱ <strong>Leva uns 10 minutos.</strong> Você pode responder com calma, no seu tempo, e suas respostas vão direto pro profissional — só ele vê.
+      </p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(anamneseUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Começar anamnese</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Suas respostas são tratadas conforme a LGPD. O link é único pra você e fica disponível por 30 dias.</p>
+    `,
+    footer: "Você recebeu este e-mail porque um profissional do Espaço Prelúdio pediu uma anamnese pra você."
+  });
+  const text = `Olá ${patientName || ""},\n\n${therapistName} pediu pra você preencher uma anamnese antes da primeira sessão. Leva uns 10 minutos.\n\nLink: ${anamneseUrl}\n\nSuas respostas vão direto pro profissional. O link é único e válido por 30 dias.\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
+// Notifica o terapeuta quando o paciente termina a anamnese.
+function templateAnamneseRespondida({ therapistName, patientName, painelUrl }) {
+  const subject = `Anamnese de ${patientName || "paciente"} foi preenchida`;
+  const html = renderShell({
+    heading: "Anamnese preenchida",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(patientName || "Seu paciente")}</strong> acabou de preencher a anamnese. Você já pode revisar as respostas no painel.</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Abrir painel</a></p>
+    `,
+    footer: "Notificação automática do Espaço Prelúdio."
+  });
+  const text = `Olá ${therapistName},\n\n${patientName || "Seu paciente"} acabou de preencher a anamnese. Veja no painel:\n${painelUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 // Recibo enviado pro paciente após o pagamento. Link público pra visualizar
 // (com download PDF). Texto formato carta curta + valor destacado.
 function templateReciboEnviado({ patientName, therapistName, amountCents, paymentMethodLabel, paidDateMs, reciboUrl, sequentialNumber }) {
@@ -342,6 +380,9 @@ function buildConfirmUrl(confirmToken) {
 function buildReciboPublicoUrl(reciboToken) {
   return `${THERAPY_FRONTEND_BASE}/recibo-publico.html?t=${encodeURIComponent(reciboToken)}`;
 }
+function buildAnamneseUrl(anamneseToken) {
+  return `${THERAPY_FRONTEND_BASE}/anamnese.html?t=${encodeURIComponent(anamneseToken)}`;
+}
 function buildNpsUrl(npsToken) {
   return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
 }
@@ -446,6 +487,8 @@ module.exports = {
   templateConfirmation,
   templateSchedulingRequest,
   templateReciboEnviado,
+  templateAnamneseEnviada,
+  templateAnamneseRespondida,
   templateReminder,
   templateBirthday,
   templateNps,
@@ -460,6 +503,7 @@ module.exports = {
   buildCancelUrl,
   buildConfirmUrl,
   buildReciboPublicoUrl,
+  buildAnamneseUrl,
   buildNpsUrl,
   buildPainelUrl,
   buildPlanosUrl,

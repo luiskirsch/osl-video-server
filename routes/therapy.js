@@ -37,6 +37,7 @@ const {
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
 const asaas = require("../services/asaas");
+const anamnese = require("../services/anamnese");
 const {
   CATEGORY_LABELS,
   DESCRIPTION_MAX,
@@ -101,12 +102,14 @@ const {
   getPrescriptionTypesForTherapist
 } = require("../services/professional-councils");
 const {
-  sendEmail, templateConfirmation, templateSchedulingRequest, templateReciboEnviado, templateDispensacaoNotice,
+  sendEmail, templateConfirmation, templateSchedulingRequest, templateReciboEnviado,
+  templateAnamneseEnviada, templateAnamneseRespondida, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
   buildReciboPublicoUrl,
+  buildAnamneseUrl,
   buildPainelUrl, buildPlanosUrl,
   buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl,
   buildComprovanteFormacaoUrl
@@ -8560,6 +8563,312 @@ router.get("/therapy/recibo/publico", asyncHandler(async (req, res) => {
       paymentMethodLabel:  r.paymentMethodLabel,
       emitterSnapshot:     r.emitterSnapshot
     }
+  });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// ANAMNESE PRÉ-CONSULTA — terapeuta envia link público pro paciente
+// preencher antes da 1ª sessão. Coleção `therapy_anamneses/{anamneseId}`.
+//
+// Modelo de privacidade: plaintext server-side (paciente preenche sem
+// login E2E). Auto-delete via cleanup loop 90d após status=answered.
+// Trade-off documentado — paciente não tem DEK do terapeuta no browser.
+// ═════════════════════════════════════════════════════════════════════════
+const ANAMNESE_TOKEN_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
+const ANAMNESE_PATIENT_NAME_MAX  = 80;
+const ANAMNESE_EMAIL_MAX         = 120;
+
+router.post("/therapy/anamnese/enviar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const patientId   = String(req.body?.patientId || "").trim() || null;
+  const patientNameRaw = String(req.body?.patientNameSnapshot || "").trim().slice(0, ANAMNESE_PATIENT_NAME_MAX);
+  const patientEmailRaw = String(req.body?.patientEmail || "").trim().toLowerCase().slice(0, ANAMNESE_EMAIL_MAX);
+  const patientEmail = patientEmailRaw && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw) ? patientEmailRaw : null;
+  const patientPhoneRaw = String(req.body?.patientPhone || "").trim();
+  const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
+  const sendEmailFlag = req.body?.sendEmail !== false;
+  const sendWaFlag    = req.body?.sendWhatsapp !== false;
+
+  if (!patientNameRaw && !patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  // Se patientId, valida ownership. Pra nome livre, aceita direto.
+  let patientNameSnapshot = patientNameRaw;
+  if (patientId) {
+    const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+    // patient name vem cifrado; cliente passa o snapshot decifrado em patientNameSnapshot.
+    if (!patientNameSnapshot) patientNameSnapshot = "Paciente";
+  }
+
+  // Idempotência leve: se já existe anamnese pending pra esse paciente,
+  // reutiliza (regenera token e reenvia). Evita lixo se terapeuta clicar 2x.
+  const db = getDb();
+  let anamneseId, anamneseDoc;
+  if (patientId) {
+    const existSnap = await db.collection("therapy_anamneses")
+      .where("therapistUid", "==", uid)
+      .where("patientId", "==", patientId)
+      .where("status", "==", "pending")
+      .limit(1).get();
+    if (!existSnap.empty) {
+      anamneseDoc = existSnap.docs[0];
+      anamneseId = anamneseDoc.id;
+    }
+  }
+
+  if (!anamneseId) {
+    anamneseId = newId("anam");
+    await db.collection("therapy_anamneses").doc(anamneseId).set({
+      anamneseId,
+      therapistUid: uid,
+      patientId,
+      patientNameSnapshot,
+      patientEmail,
+      patientPhone,
+      templateVersion: anamnese.ANAMNESE_TEMPLATE_VERSION,
+      responses: {},
+      status: "pending",
+      sentCount: 1,
+      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } else {
+    // Reusing — atualiza contato (paciente pode ter trocado email) + bump send count.
+    await db.collection("therapy_anamneses").doc(anamneseId).set({
+      patientEmail: patientEmail || anamneseDoc.data().patientEmail || null,
+      patientPhone: patientPhone || anamneseDoc.data().patientPhone || null,
+      sentCount: (anamneseDoc.data().sentCount || 1) + 1,
+      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+
+  const token = signPayload({
+    token_type: "anamnese_fill",
+    anamneseId,
+    therapistUid: uid,
+    iat: Date.now(),
+    exp: Date.now() + ANAMNESE_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+  const anamneseUrl = buildAnamneseUrl(token);
+
+  const channels = { email: { attempted: false, ok: false }, whatsapp: { attempted: false, ok: false } };
+  const therapistName = therapist.displayName || "seu profissional";
+  const therapistEmail = await resolveTherapistEmail(uid, therapist);
+
+  if (sendEmailFlag && patientEmail) {
+    channels.email.attempted = true;
+    try {
+      const tpl = templateAnamneseEnviada({
+        patientName: patientNameSnapshot,
+        therapistName,
+        anamneseUrl
+      });
+      const r = await sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl });
+      channels.email.ok = !!(r.ok || r.skipped);
+    } catch (e) {
+      logError("anamnese_email_failed", e, { anamneseId });
+    }
+  }
+
+  if (sendWaFlag && patientPhone) {
+    channels.whatsapp.attempted = true;
+    if (therapist?.whatsappConfig?.enabled) {
+      try {
+        const msg = `Olá ${patientNameSnapshot || ""}, ${therapistName} preparou uma anamnese pra você preencher antes da nossa primeira sessão. Leva uns 10 minutos.\n\n${anamneseUrl}`;
+        const r = await sendWaText({ to: patientPhone, message: msg });
+        channels.whatsapp.ok = !!r.ok;
+      } catch (e) {
+        logError("anamnese_whatsapp_failed", e, { anamneseId });
+      }
+    } else {
+      channels.whatsapp.reason = "WHATSAPP_NAO_HABILITADO";
+    }
+  }
+
+  await logAudit({
+    type: "anamnese_enviada",
+    anamneseId, therapistUid: uid, patientId,
+    emailSent: channels.email.ok, whatsappSent: channels.whatsapp.ok
+  });
+
+  return res.json({ ok: true, anamneseId, anamneseUrl, channels });
+}));
+
+// GET público — busca template + responses (se já preenchida, permite revisão).
+router.get("/therapy/anamnese/publica", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.t || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "anamnese_fill") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const aSnap = await db.collection("therapy_anamneses").doc(payload.anamneseId).get();
+  if (!aSnap.exists) return sendError(res, 404, "ANAMNESE_NAO_ENCONTRADA");
+  const a = aSnap.data();
+  if (a.therapistUid !== payload.therapistUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  // Carrega dados públicos do terapeuta pra exibir contexto na página
+  const therapist = await loadTherapist(a.therapistUid);
+  const therapistPublic = therapist ? {
+    displayName: therapist.displayName || "",
+    photoBase64: therapist.photoBase64 || "",
+    photoMime:   therapist.photoMime || ""
+  } : null;
+
+  const template = anamnese.getTemplate(a.templateVersion);
+
+  return res.json({
+    ok: true,
+    anamnese: {
+      anamneseId: a.anamneseId,
+      status: a.status,
+      patientNameSnapshot: a.patientNameSnapshot || "",
+      responses: a.responses || {},
+      respondedAt: a.respondedAt?.toMillis ? a.respondedAt.toMillis() : null
+    },
+    template,
+    therapist: therapistPublic
+  });
+}));
+
+// POST público — paciente envia respostas.
+router.post("/therapy/anamnese/publica/responder", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.body?.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "anamnese_fill") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_anamneses").doc(payload.anamneseId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ANAMNESE_NAO_ENCONTRADA");
+  const a = snap.data();
+  if (a.therapistUid !== payload.therapistUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const template = anamnese.getTemplate(a.templateVersion);
+  const { ok, errors, clean } = anamnese.validateResponses(req.body?.responses || {}, template);
+  if (!ok) return sendError(res, 400, "RESPOSTAS_INVALIDAS", { detalhes: errors });
+
+  const wasAlreadyAnswered = a.status === "answered";
+
+  await ref.set({
+    responses: clean,
+    status: "answered",
+    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  // Notifica o terapeuta — só na 1ª submissão. Re-submissões silenciosas
+  // (paciente revisou e ajustou alguma resposta antes da sessão).
+  if (!wasAlreadyAnswered) {
+    try {
+      const therapist = await loadTherapist(a.therapistUid);
+      const therapistEmail = await resolveTherapistEmail(a.therapistUid, therapist);
+      if (therapistEmail) {
+        const tpl = templateAnamneseRespondida({
+          therapistName: therapist?.displayName || "Profissional",
+          patientName: a.patientNameSnapshot || "Paciente",
+          painelUrl: buildPainelUrl()
+        });
+        sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
+          logError("anamnese_notify_email_failed", e, { anamneseId: a.anamneseId })
+        );
+      }
+    } catch (e) {
+      logError("anamnese_notify_failed", e, { anamneseId: a.anamneseId });
+    }
+  }
+
+  await logAudit({
+    type: "anamnese_respondida",
+    anamneseId: a.anamneseId,
+    therapistUid: a.therapistUid,
+    patientId: a.patientId || null,
+    resubmission: wasAlreadyAnswered
+  });
+
+  return res.json({ ok: true, resubmission: wasAlreadyAnswered });
+}));
+
+// Lista anamneses do terapeuta (filtra por patientId opcional).
+router.get("/therapy/anamneses", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.query?.patientId || "").trim() || null;
+  const db = getDb();
+  let q = db.collection("therapy_anamneses").where("therapistUid", "==", uid);
+  if (patientId) q = q.where("patientId", "==", patientId);
+  const snap = await q.limit(200).get();
+  const items = snap.docs.map(d => {
+    const a = d.data();
+    return {
+      anamneseId: a.anamneseId,
+      patientId: a.patientId || null,
+      patientNameSnapshot: a.patientNameSnapshot || "",
+      patientEmail: a.patientEmail || null,
+      patientPhone: a.patientPhone || null,
+      status: a.status,
+      sentCount: a.sentCount || 1,
+      createdAt: a.createdAt?.toMillis ? a.createdAt.toMillis() : null,
+      lastSentAt: a.lastSentAt?.toMillis ? a.lastSentAt.toMillis() : null,
+      respondedAt: a.respondedAt?.toMillis ? a.respondedAt.toMillis() : null
+    };
+  }).sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0));
+  return res.json({ ok: true, anamneses: items });
+}));
+
+// GET de UMA anamnese (auth) — devolve respostas completas pro terapeuta ver.
+router.get("/therapy/anamneses/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const anamneseId = String(req.params.id || "").trim();
+  if (!anamneseId) return sendError(res, 400, "ANAMNESE_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const aSnap = await db.collection("therapy_anamneses").doc(anamneseId).get();
+  if (!aSnap.exists) return sendError(res, 404, "ANAMNESE_NAO_ENCONTRADA");
+  const a = aSnap.data();
+  if (a.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const template = anamnese.getTemplate(a.templateVersion);
+  const formatted = anamnese.formatForDisplay(a.responses || {}, template);
+
+  return res.json({
+    ok: true,
+    anamnese: {
+      anamneseId: a.anamneseId,
+      patientId: a.patientId || null,
+      patientNameSnapshot: a.patientNameSnapshot || "",
+      patientEmail: a.patientEmail || null,
+      status: a.status,
+      responses: a.responses || {},
+      formatted,
+      respondedAt: a.respondedAt?.toMillis ? a.respondedAt.toMillis() : null,
+      createdAt: a.createdAt?.toMillis ? a.createdAt.toMillis() : null
+    },
+    template
   });
 }));
 
