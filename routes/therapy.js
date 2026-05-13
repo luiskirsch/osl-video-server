@@ -6561,6 +6561,9 @@ router.post("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   if (!isValidFinAmount(amount)) return sendError(res, 400, "VALOR_INVALIDO", { hint: "amount em centavos (integer)" });
 
   const description = String(req.body?.description || "").trim().slice(0, DESCRIPTION_MAX);
+  // Convênio: free-text opcional. Cabe "Particular", "Unimed", "Bradesco Saúde",
+  // ou qualquer string. Útil pra agrupar receitas por origem nos relatórios.
+  const convenio = String(req.body?.convenio || "").trim().slice(0, 50) || null;
 
   const issueDateRaw = Number(req.body?.issueDate);
   if (!Number.isFinite(issueDateRaw) || issueDateRaw <= 0) return sendError(res, 400, "DATA_EMISSAO_INVALIDA");
@@ -6625,6 +6628,7 @@ router.post("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
     performedByUid,           // null se foi o próprio dono; uid de membro caso contrário
     type, category, amount,
     description: description || null,
+    convenio,
     paymentMethod,
     status,
     patientId, patientNameSnapshot,
@@ -7051,6 +7055,9 @@ router.patch("/therapy/financeiro/transacoes/:id", asyncHandler(async (req, res)
   }
   if (req.body?.description !== undefined) {
     updates.description = String(req.body.description || "").trim().slice(0, DESCRIPTION_MAX) || null;
+  }
+  if (req.body?.convenio !== undefined) {
+    updates.convenio = String(req.body.convenio || "").trim().slice(0, 50) || null;
   }
   if (req.body?.paymentMethod !== undefined) {
     const m = String(req.body.paymentMethod).trim().toLowerCase();
