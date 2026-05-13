@@ -32,9 +32,11 @@ const {
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
   THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
-  MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET
+  MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
+  ASAAS_WEBHOOK_TOKEN
 } = require("../config");
 const { mercadoPagoFetch } = require("../services/payments");
+const asaas = require("../services/asaas");
 const {
   CATEGORY_LABELS,
   DESCRIPTION_MAX,
@@ -1308,6 +1310,36 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     }
   }
 
+  // Configuração de cobranças Asaas. apiKey é secret — nunca sai do servidor
+  // depois de salva (filtrada no /me). Env aceita "sandbox" | "production".
+  // Se apiKey é fornecida não-vazia, validamos contra /myAccount antes de
+  // gravar (rejeita key inválida no 1º contato).
+  if (req.body?.asaasEnv !== undefined) {
+    const envIn = String(req.body.asaasEnv || "sandbox").toLowerCase();
+    updates.asaasEnv = (envIn === "production") ? "production" : "sandbox";
+  }
+  if (req.body?.asaasApiKey !== undefined) {
+    const keyRaw = String(req.body.asaasApiKey || "").trim();
+    if (keyRaw === "") {
+      updates.asaasApiKey = admin.firestore.FieldValue.delete();
+      updates.asaasEnabled = false;
+      updates.asaasAccount = admin.firestore.FieldValue.delete();
+    } else {
+      const env = updates.asaasEnv || therapist.asaasEnv || "sandbox";
+      const validation = await asaas.validateApiKey({ apiKey: keyRaw, env });
+      if (!validation.ok) {
+        return sendError(res, 400, "ASAAS_KEY_INVALIDA", {
+          hint: "Verifique a chave de API copiada do painel Asaas. Sandbox e produção têm chaves distintas."
+        });
+      }
+      updates.asaasApiKey = keyRaw;
+      updates.asaasAccount = validation.account || null;
+    }
+  }
+  if (req.body?.asaasEnabled !== undefined) {
+    updates.asaasEnabled = Boolean(req.body.asaasEnabled);
+  }
+
   // Foto de perfil (avatar). Mesmo padrão da logo — cliente redimensiona
   // pra 256x256 antes de enviar, mantendo o doc pequeno (~50 KB).
   if (req.body?.photoBase64 !== undefined) {
@@ -1351,10 +1383,11 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   const capabilities = conselho?.capabilities || [];
   const prescriptionTypes = getPrescriptionTypesForTherapist(therapist);
 
-  // Remove secrets do payload — twoFactorSecret/twoFactorPendingSecret nunca
-  // saem do servidor. Mantém só flags públicas (enabled).
-  const { twoFactorSecret, twoFactorPendingSecret, ...therapistPublic } = therapist;
+  // Remove secrets do payload — twoFactorSecret/twoFactorPendingSecret e
+  // asaasApiKey nunca saem do servidor. Mantém só flags públicas (enabled).
+  const { twoFactorSecret, twoFactorPendingSecret, asaasApiKey, ...therapistPublic } = therapist;
   therapistPublic.twoFactorEnabled = !!therapist.twoFactorEnabled;
+  therapistPublic.asaasConfigured  = !!asaasApiKey;
 
   return res.json({
     ok: true,
@@ -8025,6 +8058,263 @@ router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
 
   // Sempre 200 — Z-API retry se receber não-200, e não queremos loop.
   return res.json({ ok: true, ignored: type === "unknown" });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// COBRANÇAS ASAAS — terapeuta gera Pix pra uma transação. Asaas tem conta
+// PJ ou PF do próprio terapeuta (apiKey no perfil). Espaço Prelúdio só
+// orquestra: cria customer + payment, devolve QR Pix. Dinheiro cai direto
+// no Asaas do terapeuta. Webhook do Asaas → atualiza status do tx.
+// ═════════════════════════════════════════════════════════════════════════
+
+function buildCustomerExternalReference({ therapistUid, patientId, patientNameSnapshot }) {
+  // Um customer Asaas por (terapeuta, paciente). Pacientes sem patientId
+  // (avulso) usam hash do nome — same patient, same hash, idempotente.
+  if (patientId) return `tu:${therapistUid}:pid:${patientId}`;
+  const nameHash = crypto.createHash("sha256")
+    .update(`${therapistUid}::${(patientNameSnapshot || "").toLowerCase().trim()}`)
+    .digest("hex").slice(0, 16);
+  return `tu:${therapistUid}:nm:${nameHash}`;
+}
+
+// POST /therapy/financeiro/transacoes/:txId/cobranca/criar — gera Pix.
+// Body: { patientEmail?, patientPhone?, patientCpfCnpj?, dueDate? (ms), description? }
+// dueDate default = 7d à frente. description default = patientNameSnapshot ou "Consulta".
+router.post("/therapy/financeiro/transacoes/:txId/cobranca/criar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  if (!therapist.asaasApiKey) {
+    return sendError(res, 412, "ASAAS_NAO_CONFIGURADO", {
+      hint: "Configure sua chave Asaas em Perfil → Cobranças online antes de gerar Pix."
+    });
+  }
+  if (therapist.asaasEnabled === false) {
+    return sendError(res, 412, "ASAAS_DESABILITADO", { hint: "Habilite cobranças no Perfil." });
+  }
+
+  const txId = String(req.params.txId || "").trim();
+  if (!txId) return sendError(res, 400, "TX_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const txRef = db.collection("therapy_transactions").doc(txId);
+  const txSnap = await txRef.get();
+  if (!txSnap.exists) return sendError(res, 404, "TRANSACAO_NAO_ENCONTRADA");
+  const tx = txSnap.data();
+  if (tx.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (tx.type !== "receita") return sendError(res, 400, "COBRANCA_SO_PARA_RECEITAS");
+  if (tx.status === "pago")  return sendError(res, 409, "TRANSACAO_JA_PAGA");
+  // Idempotência forte: se já tem paymentId vigente (não cancelado), só
+  // devolve o existente. Pra trocar, terapeuta cancela e cria nova.
+  if (tx.asaasPaymentId && tx.asaasStatus !== "cancelado" && tx.asaasStatus !== "DELETED") {
+    return res.json({
+      ok: true,
+      reused: true,
+      cobranca: pickCobrancaPublica(tx)
+    });
+  }
+
+  const patientEmail   = String(req.body?.patientEmail   || "").trim().toLowerCase() || null;
+  const patientPhone   = String(req.body?.patientPhone   || "").trim() || null;
+  const patientCpfCnpj = String(req.body?.patientCpfCnpj || "").replace(/\D/g, "").slice(0, 14) || null;
+  const dueDateMs      = Number(req.body?.dueDate) || 0;
+  const description    = String(req.body?.description || tx.description || `Consulta - ${tx.patientNameSnapshot || ""}`).trim().slice(0, 500);
+
+  const env = therapist.asaasEnv === "production" ? "production" : "sandbox";
+
+  // 1) ensure customer
+  const custExtRef = buildCustomerExternalReference({
+    therapistUid: uid,
+    patientId: tx.patientId,
+    patientNameSnapshot: tx.patientNameSnapshot
+  });
+  const cust = await asaas.ensureCustomer({
+    apiKey: therapist.asaasApiKey, env,
+    externalReference: custExtRef,
+    name: tx.patientNameSnapshot || "Cliente",
+    email: patientEmail,
+    phone: patientPhone,
+    cpfCnpj: patientCpfCnpj
+  });
+  if (!cust.ok) return sendError(res, 502, "ASAAS_CUSTOMER_FAILED", { hint: cust.error });
+
+  // 2) create payment
+  const dueDateIso = (() => {
+    if (dueDateMs > 0) return new Date(dueDateMs).toISOString().slice(0, 10);
+    return new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  })();
+  const pay = await asaas.createPaymentPix({
+    apiKey: therapist.asaasApiKey, env,
+    customerId: cust.customerId,
+    valueCents: tx.amount,
+    description,
+    dueDate: dueDateIso,
+    externalReference: txId
+  });
+  if (!pay.ok) return sendError(res, 502, "ASAAS_PAYMENT_FAILED", { hint: pay.error });
+
+  // 3) get QR
+  const qr = await asaas.getPixQrCode({ apiKey: therapist.asaasApiKey, env, paymentId: pay.data.id });
+  // Se QR falhar não cancelamos — terapeuta ainda tem o invoiceUrl como fallback.
+
+  const asaasData = {
+    asaasCustomerId:    cust.customerId,
+    asaasPaymentId:     pay.data.id,
+    asaasInvoiceUrl:    pay.data.invoiceUrl || null,
+    asaasBankSlipUrl:   pay.data.bankSlipUrl || null,
+    asaasPixCopyPaste:  qr.ok ? (qr.data?.payload || null) : null,
+    asaasPixQrCodeBase64: qr.ok ? (qr.data?.encodedImage || null) : null,
+    asaasPixExpiresAt:   qr.ok ? (qr.data?.expirationDate || null) : null,
+    asaasStatus:         pay.data.status || "PENDING",
+    asaasEnv:            env,
+    asaasCreatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:           admin.firestore.FieldValue.serverTimestamp()
+  };
+  await txRef.set(asaasData, { merge: true });
+
+  await logAudit({ type: "cobranca_asaas_criada", therapistUid: uid, txId, asaasPaymentId: pay.data.id, env });
+
+  // Recarrega pra retornar payload limpo.
+  const fresh = (await txRef.get()).data();
+  return res.json({ ok: true, cobranca: pickCobrancaPublica(fresh) });
+}));
+
+function pickCobrancaPublica(tx) {
+  return {
+    asaasPaymentId:     tx.asaasPaymentId      || null,
+    asaasStatus:        tx.asaasStatus         || null,
+    asaasInvoiceUrl:    tx.asaasInvoiceUrl     || null,
+    asaasBankSlipUrl:   tx.asaasBankSlipUrl    || null,
+    asaasPixCopyPaste:  tx.asaasPixCopyPaste   || null,
+    asaasPixQrCodeBase64: tx.asaasPixQrCodeBase64 || null,
+    asaasPixExpiresAt:  tx.asaasPixExpiresAt   || null,
+    asaasEnv:           tx.asaasEnv            || null
+  };
+}
+
+// GET /therapy/financeiro/transacoes/:txId/cobranca — devolve estado atual
+// (com refresh opcional via ?refresh=1 que consulta Asaas síncronamente).
+router.get("/therapy/financeiro/transacoes/:txId/cobranca", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const txId = String(req.params.txId || "").trim();
+  if (!txId) return sendError(res, 400, "TX_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const txRef = db.collection("therapy_transactions").doc(txId);
+  const txSnap = await txRef.get();
+  if (!txSnap.exists) return sendError(res, 404, "TRANSACAO_NAO_ENCONTRADA");
+  const tx = txSnap.data();
+  if (tx.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  if (!tx.asaasPaymentId) {
+    return res.json({ ok: true, cobranca: null });
+  }
+
+  // Refresh opcional — quando o terapeuta abre a cobrança no painel pode
+  // valer pinger o Asaas pra ver se já caiu o Pix.
+  if (req.query?.refresh === "1" && therapist.asaasApiKey) {
+    const env = tx.asaasEnv || (therapist.asaasEnv === "production" ? "production" : "sandbox");
+    const fresh = await asaas.getPayment({ apiKey: therapist.asaasApiKey, env, paymentId: tx.asaasPaymentId });
+    if (fresh.ok && fresh.data?.status && fresh.data.status !== tx.asaasStatus) {
+      const newTxStatus = asaas.mapAsaasStatusToTx(fresh.data.status);
+      const updates = {
+        asaasStatus: fresh.data.status,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      if (newTxStatus === "pago" && tx.status !== "pago") {
+        updates.status = "pago";
+        updates.paidDate = Date.now();
+      }
+      await txRef.set(updates, { merge: true });
+      tx.asaasStatus = fresh.data.status;
+      tx.status = updates.status || tx.status;
+    }
+  }
+
+  return res.json({ ok: true, cobranca: pickCobrancaPublica(tx), txStatus: tx.status });
+}));
+
+// POST /webhooks/asaas/financeiro?token=X — recebe eventos do Asaas e
+// atualiza o tx via externalReference. Lookup do terapeuta vem do próprio
+// tx — webhook do Asaas é compartilhado entre todos os terapeutas que
+// configurarem essa URL no painel deles.
+router.post("/webhooks/asaas/financeiro", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  // Validação por token compartilhado (env var). Asaas configura no painel
+  // como query string da URL do webhook. Sem token = ignora silenciosamente
+  // (não dá info pra atacantes).
+  const tokenIn = String(req.query?.token || "").trim();
+  if (!ASAAS_WEBHOOK_TOKEN || tokenIn !== ASAAS_WEBHOOK_TOKEN) {
+    logWarn("asaas_webhook_token_invalido", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress });
+    return res.status(401).json({ ok: false });
+  }
+
+  const event   = String(req.body?.event   || "").trim();
+  const payment = req.body?.payment || {};
+  const txId    = String(payment.externalReference || "").trim();
+  if (!event || !txId) {
+    logInfo("asaas_webhook_ignored", { reason: "sem_externalReference_ou_event", event });
+    return res.json({ ok: true, ignored: true });
+  }
+
+  const db = getDb();
+  const txRef = db.collection("therapy_transactions").doc(txId);
+  const txSnap = await txRef.get();
+  if (!txSnap.exists) {
+    logInfo("asaas_webhook_tx_nao_encontrada", { txId, event });
+    return res.json({ ok: true, ignored: true });
+  }
+  const tx = txSnap.data();
+  // Sanity: só aceita evento se paymentId bater (defende contra cross-tx replay).
+  if (tx.asaasPaymentId && payment.id && tx.asaasPaymentId !== payment.id) {
+    logWarn("asaas_webhook_payment_id_divergente", { txId, esperado: tx.asaasPaymentId, recebido: payment.id });
+    return res.json({ ok: true, ignored: true });
+  }
+
+  const newTxStatus = asaas.mapAsaasStatusToTx(payment.status);
+  const updates = {
+    asaasStatus: payment.status || tx.asaasStatus || null,
+    asaasLastEventAt: admin.firestore.FieldValue.serverTimestamp(),
+    asaasLastEvent: event,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  // Eventos que viram "pago" no nosso modelo:
+  if (newTxStatus === "pago" && tx.status !== "pago") {
+    updates.status = "pago";
+    updates.paidDate = Date.now();
+  }
+  // Eventos de cancelamento/refund: rebaixa pra pendente ou marca canceled
+  // (não revertimos automaticamente um pago confirmado anterior).
+  if ((newTxStatus === "cancelado" || newTxStatus === "reembolsado") && tx.status === "pago") {
+    updates.status = newTxStatus === "reembolsado" ? "reembolsado" : "pendente";
+    updates.paidDate = null;
+  }
+
+  await txRef.set(updates, { merge: true });
+
+  await logAudit({
+    type: "cobranca_asaas_webhook",
+    txId,
+    therapistUid: tx.therapistUid,
+    event,
+    asaasStatus: payment.status || null,
+    newTxStatus: updates.status || tx.status
+  });
+
+  // Sempre 200 — Asaas retenta se receber não-200, e não queremos loop.
+  return res.json({ ok: true });
 }));
 
 module.exports = router;

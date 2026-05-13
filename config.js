@@ -22,6 +22,11 @@ const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://prelud
 const MP_ACCESS_TOKEN    = process.env.MP_ACCESS_TOKEN    || "";
 const MP_WEBHOOK_SECRET  = process.env.MP_WEBHOOK_SECRET  || ""; // Security #1: pra validar x-signature
 
+// Webhook do Asaas (cobranças do financeiro do terapeuta). Token compartilhado
+// — cada terapeuta configura no painel Asaas a URL `.../webhooks/asaas/financeiro?token=<x>`.
+// Falhar em validar = 401, sem leak de info sobre transação.
+const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_TOKEN || "";
+
 const LICENSE_SECRET      = process.env.LICENSE_SECRET      || "TROQUE_POR_UM_SEGREDO_FORTE_DA_LICENCA";
 const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DE_ACESSO";
 
@@ -230,6 +235,7 @@ module.exports = {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL, MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
+  ASAAS_WEBHOOK_TOKEN,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
   ANTHROPIC_API_KEY,
   BACKEND_BASE_URL, FRONTEND_BASE_URL,
