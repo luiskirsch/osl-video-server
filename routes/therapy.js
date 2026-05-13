@@ -40,6 +40,7 @@ const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const pushService = require("../services/push");
 const cid10 = require("../services/cid10");
+const scales = require("../services/scales");
 const {
   CATEGORY_LABELS,
   DESCRIPTION_MAX,
@@ -105,13 +106,16 @@ const {
 } = require("../services/professional-councils");
 const {
   sendEmail, templateConfirmation, templateSchedulingRequest, templateReciboEnviado,
-  templateAnamneseEnviada, templateAnamneseRespondida, templateDispensacaoNotice,
+  templateAnamneseEnviada, templateAnamneseRespondida,
+  templateEscalaEnviada, templateEscalaRespondida,
+  templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
   buildReciboPublicoUrl,
   buildAnamneseUrl,
+  buildEscalaUrl,
   buildPainelUrl, buildPlanosUrl,
   buildComprovanteEstudanteUrl, buildComprovanteRecemFormadoUrl,
   buildComprovanteFormacaoUrl
@@ -9175,6 +9179,279 @@ router.get("/therapy/note-templates", asyncHandler(async (req, res) => {
       source: "default"
     }))
   });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// ESCALAS CLÍNICAS — PHQ-9 (depressão) e GAD-7 (ansiedade). Mesma estrutura
+// da anamnese: token público, paciente responde sem login, score computado
+// server-side, gráfico de evolução montado client-side. Coleção
+// therapy_scale_responses/{responseId}.
+//
+// Alerta de suicide flag: se q9 do PHQ-9 > 0, e-mail pro terapeuta tem
+// destaque visual + subject "⚠ ALERTA".
+// ═════════════════════════════════════════════════════════════════════════
+const ESCALA_TOKEN_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000; // 30 dias
+
+router.post("/therapy/escalas/enviar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const scaleType = String(req.body?.scaleType || "").trim().toLowerCase();
+  const scale = scales.getScale(scaleType);
+  if (!scale) return sendError(res, 400, "ESCALA_INVALIDA", { hint: "Use phq9 ou gad7." });
+
+  const patientId = String(req.body?.patientId || "").trim() || null;
+  const patientNameSnapshot = String(req.body?.patientNameSnapshot || "").trim().slice(0, 80);
+  const patientEmailRaw = String(req.body?.patientEmail || "").trim().toLowerCase().slice(0, 120);
+  const patientEmail = patientEmailRaw && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw) ? patientEmailRaw : null;
+  const patientPhoneRaw = String(req.body?.patientPhone || "").trim();
+  const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
+  const sendEmailFlag = req.body?.sendEmail !== false;
+  const sendWaFlag    = req.body?.sendWhatsapp !== false;
+
+  if (!patientNameSnapshot && !patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  if (patientId) {
+    const psnap = await getDb().collection("therapy_patients").doc(patientId).get();
+    if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+    if (psnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
+
+  const db = getDb();
+  const responseId = newId("scale");
+  await db.collection("therapy_scale_responses").doc(responseId).set({
+    responseId,
+    therapistUid: uid,
+    patientId,
+    patientNameSnapshot,
+    patientEmail,
+    patientPhone,
+    scaleType,
+    scaleName: scale.name,
+    responses: {},
+    score: null,
+    band: null,
+    suicideFlag: false,
+    status: "pending",
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  const token = signPayload({
+    token_type: "scale_fill",
+    responseId,
+    therapistUid: uid,
+    iat: Date.now(),
+    exp: Date.now() + ESCALA_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
+  const escalaUrl = buildEscalaUrl(token);
+
+  const channels = { email: { attempted: false, ok: false }, whatsapp: { attempted: false, ok: false } };
+  const therapistName = therapist.displayName || "seu profissional";
+  const therapistEmail = await resolveTherapistEmail(uid, therapist);
+
+  if (sendEmailFlag && patientEmail) {
+    channels.email.attempted = true;
+    try {
+      const tpl = templateEscalaEnviada({
+        patientName: patientNameSnapshot,
+        therapistName,
+        scaleName: scale.name,
+        escalaUrl
+      });
+      const r = await sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl });
+      channels.email.ok = !!(r.ok || r.skipped);
+    } catch (e) {
+      logError("escala_email_failed", e, { responseId });
+    }
+  }
+
+  if (sendWaFlag && patientPhone) {
+    channels.whatsapp.attempted = true;
+    if (therapist?.whatsappConfig?.enabled) {
+      try {
+        const msg = `Olá ${patientNameSnapshot || ""}, ${therapistName} pediu pra você responder uma escala curta (${scale.name}). Leva menos de 3 minutos.\n\n${escalaUrl}`;
+        const r = await sendWaText({ to: patientPhone, message: msg });
+        channels.whatsapp.ok = !!r.ok;
+      } catch (e) {
+        logError("escala_whatsapp_failed", e, { responseId });
+      }
+    } else {
+      channels.whatsapp.reason = "WHATSAPP_NAO_HABILITADO";
+    }
+  }
+
+  await logAudit({
+    type: "escala_enviada",
+    responseId, therapistUid: uid, patientId, scaleType,
+    emailSent: channels.email.ok, whatsappSent: channels.whatsapp.ok
+  });
+
+  return res.json({ ok: true, responseId, escalaUrl, channels });
+}));
+
+router.get("/therapy/escala/publica", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.query?.t || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "scale_fill") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const rSnap = await db.collection("therapy_scale_responses").doc(payload.responseId).get();
+  if (!rSnap.exists) return sendError(res, 404, "ESCALA_NAO_ENCONTRADA");
+  const r = rSnap.data();
+  if (r.therapistUid !== payload.therapistUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const scale = scales.getScale(r.scaleType);
+  if (!scale) return sendError(res, 400, "ESCALA_INVALIDA");
+
+  const therapist = await loadTherapist(r.therapistUid);
+  const therapistPublic = therapist ? {
+    displayName: therapist.displayName || "",
+    photoBase64: therapist.photoBase64 || "",
+    photoMime:   therapist.photoMime || ""
+  } : null;
+
+  return res.json({
+    ok: true,
+    escala: {
+      responseId: r.responseId,
+      status: r.status,
+      patientNameSnapshot: r.patientNameSnapshot || "",
+      responses: r.responses || {},
+      score: r.score,
+      band: r.band,
+      respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null
+    },
+    scale,
+    therapist: therapistPublic
+  });
+}));
+
+router.post("/therapy/escala/publica/responder", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.body?.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "scale_fill") return sendError(res, 401, "TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_scale_responses").doc(payload.responseId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ESCALA_NAO_ENCONTRADA");
+  const r = snap.data();
+  if (r.therapistUid !== payload.therapistUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const scale = scales.getScale(r.scaleType);
+  const scored = scales.validateAndScore(req.body?.responses || {}, scale);
+  if (!scored.ok) return sendError(res, 400, "RESPOSTAS_INVALIDAS", { detalhes: scored.errors });
+
+  const wasAlreadyAnswered = r.status === "answered";
+
+  await ref.set({
+    responses: scored.clean,
+    score: scored.score,
+    band: scored.band,
+    suicideFlag: scored.suicideFlag,
+    status: "answered",
+    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  if (!wasAlreadyAnswered) {
+    try {
+      const therapist = await loadTherapist(r.therapistUid);
+      const therapistEmail = await resolveTherapistEmail(r.therapistUid, therapist);
+      if (therapistEmail) {
+        const tpl = templateEscalaRespondida({
+          therapistName: therapist?.displayName || "Profissional",
+          patientName: r.patientNameSnapshot || "Paciente",
+          scaleName: scale.name,
+          score: scored.score,
+          bandLabel: scored.band?.label || "—",
+          suicideAlert: scored.suicideFlag,
+          painelUrl: buildPainelUrl()
+        });
+        sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
+          logError("escala_notify_email_failed", e, { responseId: r.responseId })
+        );
+      }
+
+      // Push pro terapeuta (idem anamnese — fire-and-forget)
+      pushToTherapist(r.therapistUid, {
+        title: scored.suicideFlag ? "⚠ Alerta clínico" : "Escala respondida",
+        body: `${r.patientNameSnapshot || "Paciente"} respondeu ${scale.name} — score ${scored.score} (${scored.band?.label || "—"})`,
+        url: r.patientId ? `/pacientes.html` : "/painel.html",
+        tag: scored.suicideFlag ? "escala-alerta" : "escala-respondida"
+      }).catch(e => logError("push_escala_failed", e, { responseId: r.responseId }));
+    } catch (e) {
+      logError("escala_notify_failed", e, { responseId: r.responseId });
+    }
+  }
+
+  await logAudit({
+    type: "escala_respondida",
+    responseId: r.responseId,
+    therapistUid: r.therapistUid,
+    patientId: r.patientId || null,
+    scaleType: r.scaleType,
+    score: scored.score,
+    suicideFlag: scored.suicideFlag,
+    resubmission: wasAlreadyAnswered
+  });
+
+  return res.json({ ok: true, score: scored.score, band: scored.band });
+}));
+
+router.get("/therapy/escalas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId  = String(req.query?.patientId || "").trim() || null;
+  const scaleType  = String(req.query?.scaleType || "").trim().toLowerCase() || null;
+
+  const db = getDb();
+  let q = db.collection("therapy_scale_responses").where("therapistUid", "==", uid);
+  if (patientId) q = q.where("patientId", "==", patientId);
+  if (scaleType) q = q.where("scaleType", "==", scaleType);
+  const snap = await q.limit(500).get();
+  const items = snap.docs.map(d => {
+    const r = d.data();
+    return {
+      responseId: r.responseId,
+      patientId: r.patientId || null,
+      patientNameSnapshot: r.patientNameSnapshot || "",
+      scaleType: r.scaleType,
+      scaleName: r.scaleName,
+      status: r.status,
+      score: r.score,
+      band: r.band,
+      suicideFlag: !!r.suicideFlag,
+      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null,
+      respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null
+    };
+  }).sort((a, b) => (a.respondedAt || a.createdAt || 0) - (b.respondedAt || b.createdAt || 0));
+  return res.json({ ok: true, escalas: items });
+}));
+
+// Lista os tipos de escala disponíveis (pra UI montar dropdown).
+router.get("/therapy/escalas/tipos", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  return res.json({ ok: true, scales: scales.listScales() });
 }));
 
 module.exports = router;

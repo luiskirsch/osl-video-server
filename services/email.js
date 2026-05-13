@@ -116,6 +116,49 @@ function renderShell({ heading, bodyHtml, footer }) {
 </html>`;
 }
 
+// Convite pra paciente responder escala clínica (PHQ-9 ou GAD-7).
+// Tom: leve, sem alarmismo. Foca no acompanhamento, não no diagnóstico.
+function templateEscalaEnviada({ patientName, therapistName, scaleName, escalaUrl }) {
+  const subject = `${therapistName} pediu para você responder: ${scaleName}`;
+  const html = renderShell({
+    heading: "Acompanhamento do seu bem-estar",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(patientName || "")},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(therapistName)}</strong> preparou um questionário curto pra acompanhar como você tem se sentido: <strong>${escHtml(scaleName)}</strong>.</p>
+      <p style="margin:0 0 16px; padding:12px 14px; background:#f7f4ef; border-radius:6px;">
+        ⏱ <strong>Leva menos de 3 minutos.</strong> Responda no seu ritmo. Suas respostas vão direto pro profissional.
+      </p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(escalaUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Responder agora</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O link é único pra você e fica disponível por 30 dias.</p>
+    `,
+    footer: "Você recebeu este e-mail porque seu profissional pediu uma escala de acompanhamento pelo Espaço Prelúdio."
+  });
+  const text = `Olá ${patientName || ""},\n\n${therapistName} preparou um questionário (${scaleName}) pra acompanhar seu bem-estar. Leva menos de 3 minutos.\n\nLink: ${escalaUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
+function templateEscalaRespondida({ therapistName, patientName, scaleName, score, bandLabel, suicideAlert, painelUrl }) {
+  const subject = suicideAlert
+    ? `⚠ ALERTA: ${patientName || "paciente"} sinalizou risco na ${scaleName}`
+    : `${scaleName} de ${patientName || "paciente"} foi respondida (score ${score})`;
+  const html = renderShell({
+    heading: suicideAlert ? "Alerta clínico" : "Escala respondida",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      ${suicideAlert ? `<p style="margin:0 0 16px; padding:14px 16px; background:#fef2f2; border:1px solid #fecaca; border-radius:6px; color:#7f1d1d;"><strong>⚠ Sinalização de risco:</strong> ${escHtml(patientName || "o paciente")} marcou pontuação maior que zero na pergunta sobre pensamentos de morte/autolesão. Recomenda-se avaliar diretamente na próxima oportunidade.</p>` : ""}
+      <p style="margin:0 0 16px;"><strong>${escHtml(patientName || "Paciente")}</strong> acabou de responder a escala <strong>${escHtml(scaleName)}</strong>.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Score</td><td style="padding:3px 0; text-align:right;"><strong style="font-size:18px;">${score}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Faixa</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(bandLabel || "—")}</strong></td></tr>
+      </table>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Ver no painel</a></p>
+    `,
+    footer: "Notificação automática do Espaço Prelúdio."
+  });
+  const text = `${suicideAlert ? "ALERTA: " : ""}${patientName || "Paciente"} respondeu ${scaleName}.\n\nScore: ${score}\nFaixa: ${bandLabel || "—"}\n${suicideAlert ? "\nSINALIZAÇÃO DE RISCO na pergunta sobre pensamentos de morte/autolesão. Avalie diretamente.\n" : ""}\nVer no painel: ${painelUrl}`;
+  return { subject, html, text };
+}
+
 // Convite pra paciente preencher anamnese pré-consulta. Foco: tom cuidadoso
 // (vamos pedir histórico clínico, queixa principal — coisas íntimas), aviso
 // claro sobre tempo (~10min) e LGPD.
@@ -383,6 +426,9 @@ function buildReciboPublicoUrl(reciboToken) {
 function buildAnamneseUrl(anamneseToken) {
   return `${THERAPY_FRONTEND_BASE}/anamnese.html?t=${encodeURIComponent(anamneseToken)}`;
 }
+function buildEscalaUrl(escalaToken) {
+  return `${THERAPY_FRONTEND_BASE}/escala.html?t=${encodeURIComponent(escalaToken)}`;
+}
 function buildNpsUrl(npsToken) {
   return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
 }
@@ -489,6 +535,8 @@ module.exports = {
   templateReciboEnviado,
   templateAnamneseEnviada,
   templateAnamneseRespondida,
+  templateEscalaEnviada,
+  templateEscalaRespondida,
   templateReminder,
   templateBirthday,
   templateNps,
@@ -504,6 +552,7 @@ module.exports = {
   buildConfirmUrl,
   buildReciboPublicoUrl,
   buildAnamneseUrl,
+  buildEscalaUrl,
   buildNpsUrl,
   buildPainelUrl,
   buildPlanosUrl,
