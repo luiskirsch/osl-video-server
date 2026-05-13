@@ -362,13 +362,13 @@ function templateRecemFormadoApproved({ therapistName, painelUrl }) {
     heading: "Tier Recém-formado habilitado",
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
-      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você está habilitado para contratar a assinatura do Espaço Prelúdio com o desconto do tier <strong>Recém-formado: R$ 49,90/mês</strong> (em vez de R$ 120/mês do plano Profissional).</p>
+      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você está habilitado para contratar a assinatura do Espaço Prelúdio com o desconto do tier <strong>Recém-formado: R$ 99,50/mês</strong> (em vez de R$ 199/mês do plano Profissional).</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Contratar agora</a></p>
       <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O desconto é válido enquanto sua inscrição estiver dentro dos primeiros 12 meses. Após esse período, a renovação migra automaticamente para o tier Profissional.</p>
     `,
     footer: "Notificação do Espaço Prelúdio sobre seu plano."
   });
-  const text = `Olá ${therapistName},\n\nSua inscrição no conselho foi confirmada. Você pode contratar a R$ 49,90/mês (tier Recém-formado).\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
+  const text = `Olá ${therapistName},\n\nSua inscrição no conselho foi confirmada. Você pode contratar a R$ 99,50/mês (tier Recém-formado).\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
   return { subject, html, text };
 }
 
@@ -380,7 +380,7 @@ function templateRecemFormadoRejected({ therapistName, reason, retryUrl }) {
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
       <p style="margin:0 0 16px;">Revisamos seu comprovante de inscrição no conselho e ele não atende aos critérios do tier Recém-formado. Motivo:</p>
       <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-style: italic;">${escHtml(reason)}</p>
-      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 120/mês).</p>
+      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 199/mês).</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar outro comprovante</a></p>
       <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Em caso de dúvida, responda este e-mail.</p>
     `,

@@ -177,12 +177,12 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Existem 2 tiers que diferem só no preço:
-//   - "recem-formado" (R$ 49,90)  — válido só pra quem tem CRP/CRM <12 meses
-//   - "profissional"  (R$ 120,00) — qualquer profissional habilitado
+//   - "recem-formado" (R$ 99,50)  — válido só pra quem tem CRP/CRM <12 meses
+//   - "profissional"  (R$ 199,00) — qualquer profissional habilitado
 // THERAPY_PLAN_AMOUNT é mantido por compat (default tier sem flag explícita).
-const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 49.90);
-const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 49.90);
-const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 120.00);
+const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 99.50);
+const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 99.50);
+const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 199.00);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 
 // Trial diferenciado por plano intencionado no cadastro:

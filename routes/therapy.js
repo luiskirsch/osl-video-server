@@ -855,12 +855,12 @@ router.get("/therapy/profissional/comprovante-estudante/status", asyncHandler(as
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/profissional/comprovante-recem-formado
 // Upload de carteira CRP/CRM ou print do e-Psi para validação do tier
-// "recém-formado" (R$ 49,90/mês — disponível se inscrição no conselho
+// "recém-formado" (R$ 99,50/mês — disponível se inscrição no conselho
 // foi nos últimos 12 meses).
 // Reusa hash dedup, rate limit, fluxo do tier estudante.
 // Estados em therapists/{uid}.plano:
 //   "recem-formado-pending-review"  — confiança média, fila admin
-//   "recem-formado-eligible"        — aprovado, pode iniciar assinatura R$ 49,90
+//   "recem-formado-eligible"        — aprovado, pode iniciar assinatura R$ 99,50
 //   se rejeitado: plano não muda (continua trial), reasons no response
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -5369,7 +5369,7 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
 // PLANO RECORRENTE (MercadoPago Preapproval)
 //
 // Setup necessário:
-//   1) THERAPY_PLAN_AMOUNT (env, default 49.90)
+//   1) THERAPY_PLAN_AMOUNT (env, default 99.50)
 //   2) MP_ACCESS_TOKEN (já configurado pro jogo)
 //   3) MP_WEBHOOK_SECRET (recomendado pra produção)
 //   4) No dashboard MP: criar webhook → URL: BACKEND/therapy/webhook/mp
@@ -5386,9 +5386,9 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
 // Cria preapproval no MP, salva mpPreapprovalId, retorna init_point pra redirect.
 //
 // Body opcional: { tier: "recem-formado" | "profissional" }
-//   - "recem-formado" → cobra R$ 49,90 (exige plano === "recem-formado-eligible")
-//   - "profissional"  → cobra R$ 120
-//   - sem tier (compat) → cobra THERAPY_PLAN_AMOUNT (default 49,90)
+//   - "recem-formado" → cobra R$ 99,50 (exige plano === "recem-formado-eligible")
+//   - "profissional"  → cobra R$ 199
+//   - sem tier (compat) → cobra THERAPY_PLAN_AMOUNT (default 99,50)
 router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
