@@ -1638,6 +1638,8 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         canceledAt: data.canceledAt?.toMillis ? data.canceledAt.toMillis() : null,
         canceledBy: data.canceledBy || null,
         cancelReason: data.cancelReason || null,
+        confirmedAt: data.confirmedAt?.toMillis ? data.confirmedAt.toMillis() : null,
+        confirmedBy: data.confirmedBy || null,
         joinTokenExp: data.joinTokenExp || null,
         recurrenceGroupId: data.recurrenceGroupId || null,
         recurrenceIndex: typeof data.recurrenceIndex === "number" ? data.recurrenceIndex : null,
