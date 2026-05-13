@@ -38,6 +38,7 @@ const {
 const { mercadoPagoFetch } = require("../services/payments");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
+const pushService = require("../services/push");
 const {
   CATEGORY_LABELS,
   DESCRIPTION_MAX,
@@ -6262,6 +6263,14 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     requestedSlot
   });
 
+  // Push (fire-and-forget) — terapeuta vê notificação imediata mesmo offline.
+  pushToTherapist(therapistUid, {
+    title: "Novo pedido de consulta",
+    body: `${patientName} pediu horário pra ${new Date(requestedSlot).toLocaleString("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" })}`,
+    url: "/painel.html",
+    tag: "scheduling-request"
+  }).catch(e => logError("push_scheduling_failed", e, { requestId }));
+
   return res.json({ ok: true, requestId });
 }));
 
@@ -8797,6 +8806,16 @@ router.post("/therapy/anamnese/publica/responder", asyncHandler(async (req, res)
     }
   }
 
+  // Push (1ª submissão) — terapeuta vê na hora.
+  if (!wasAlreadyAnswered) {
+    pushToTherapist(a.therapistUid, {
+      title: "Anamnese preenchida",
+      body: `${a.patientNameSnapshot || "Paciente"} acabou de responder a anamnese.`,
+      url: "/pacientes.html",
+      tag: "anamnese-respondida"
+    }).catch(e => logError("push_anamnese_failed", e, { anamneseId: a.anamneseId }));
+  }
+
   await logAudit({
     type: "anamnese_respondida",
     anamneseId: a.anamneseId,
@@ -9025,6 +9044,104 @@ Disponibilidade pra contato:
 `
   }
 ];
+
+// ═════════════════════════════════════════════════════════════════════════
+// WEB PUSH NOTIFICATIONS — terapeuta recebe push do navegador pra eventos
+// críticos (nova solicitação de agendamento, anamnese respondida).
+// Subscriptions ficam em therapists.pushSubscriptions[]. Cleanup automático
+// quando o navegador retorna 410 Gone.
+// ═════════════════════════════════════════════════════════════════════════
+
+// GET /therapy/push/config — devolve chave pública pra subscribe().
+router.get("/therapy/push/config", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  if (!pushService.isConfigured()) {
+    return sendError(res, 503, "PUSH_NAO_CONFIGURADO", { hint: "Servidor sem VAPID keys configuradas." });
+  }
+  return res.json({ ok: true, publicKey: pushService.getPublicKey() });
+}));
+
+// POST /therapy/push/subscribe — salva subscription do navegador.
+router.post("/therapy/push/subscribe", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  if (!pushService.isConfigured()) return sendError(res, 503, "PUSH_NAO_CONFIGURADO");
+
+  const sub = req.body?.subscription;
+  if (!sub || !sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) {
+    return sendError(res, 400, "SUBSCRIPTION_INVALIDA");
+  }
+  const cleanSub = {
+    endpoint: String(sub.endpoint).slice(0, 1000),
+    keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) },
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 200),
+    addedAt: Date.now()
+  };
+
+  const db = getDb();
+  // Dedup por endpoint + append. Limita a 10 subs por user (defensivo).
+  await db.runTransaction(async (txx) => {
+    const ref = db.collection("therapists").doc(uid);
+    const snap = await txx.get(ref);
+    if (!snap.exists) throw new Error("PROFISSIONAL_NAO_REGISTRADO");
+    const t = snap.data();
+    const subs = Array.isArray(t.pushSubscriptions) ? t.pushSubscriptions : [];
+    const filtered = subs.filter(s => s.endpoint !== cleanSub.endpoint);
+    const next = [cleanSub, ...filtered].slice(0, 10);
+    txx.set(ref, { pushSubscriptions: next, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+
+  await logAudit({ type: "push_subscribed", therapistUid: uid, endpointPreview: cleanSub.endpoint.slice(0, 60) });
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/push/subscribe — remove subscription. Body: { endpoint }.
+router.delete("/therapy/push/subscribe", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const endpoint = String(req.body?.endpoint || "").trim();
+  if (!endpoint) return sendError(res, 400, "ENDPOINT_OBRIGATORIO");
+
+  const db = getDb();
+  await db.runTransaction(async (txx) => {
+    const ref = db.collection("therapists").doc(uid);
+    const snap = await txx.get(ref);
+    if (!snap.exists) return;
+    const t = snap.data();
+    const subs = Array.isArray(t.pushSubscriptions) ? t.pushSubscriptions : [];
+    const next = subs.filter(s => s.endpoint !== endpoint);
+    if (next.length !== subs.length) {
+      txx.set(ref, { pushSubscriptions: next, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    }
+  });
+
+  return res.json({ ok: true });
+}));
+
+// Helper interno: envia push pro terapeuta + remove subs gone.
+async function pushToTherapist(therapistUid, payload) {
+  if (!pushService.isConfigured()) return { skipped: true };
+  try {
+    const db = getDb();
+    const snap = await db.collection("therapists").doc(therapistUid).get();
+    if (!snap.exists) return { skipped: true };
+    const subs = Array.isArray(snap.data().pushSubscriptions) ? snap.data().pushSubscriptions : [];
+    if (!subs.length) return { skipped: true };
+    const r = await pushService.sendPushToAll(subs, payload);
+    if (r.expired.length) {
+      const keep = subs.filter(s => !r.expired.includes(s.endpoint));
+      await db.collection("therapists").doc(therapistUid).set({ pushSubscriptions: keep }, { merge: true });
+    }
+    return { sent: r.sent, expired: r.expired.length };
+  } catch (e) {
+    logError("push_to_therapist_failed", e, { therapistUid });
+    return { error: e.message };
+  }
+}
 
 router.get("/therapy/note-templates", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;

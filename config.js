@@ -27,6 +27,13 @@ const MP_WEBHOOK_SECRET  = process.env.MP_WEBHOOK_SECRET  || ""; // Security #1:
 // Falhar em validar = 401, sem leak de info sobre transação.
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_TOKEN || "";
 
+// Web Push (VAPID). Gerar uma vez com `npx web-push generate-vapid-keys`
+// e salvar nas env vars do Railway. Subject pode ser mailto:contato@.
+// Se vazio, /therapy/push/* respondem 503 sem quebrar app.
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || "mailto:contato@espacopreludio.com.br";
+
 const LICENSE_SECRET      = process.env.LICENSE_SECRET      || "TROQUE_POR_UM_SEGREDO_FORTE_DA_LICENCA";
 const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DE_ACESSO";
 
@@ -236,6 +243,7 @@ module.exports = {
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL, MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
   ASAAS_WEBHOOK_TOKEN,
+  VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
   ANTHROPIC_API_KEY,
   BACKEND_BASE_URL, FRONTEND_BASE_URL,
