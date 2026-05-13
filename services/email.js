@@ -116,6 +116,33 @@ function renderShell({ heading, bodyHtml, footer }) {
 </html>`;
 }
 
+// Notifica o terapeuta de uma solicitação pública de agendamento. CTA leva
+// pro painel (onde aprova/rejeita). reply_to do paciente fica como pista
+// alternativa caso queira responder direto antes de aprovar.
+function templateSchedulingRequest({ therapistName, patientName, patientEmail, patientPhone, notes, requestedSlot, painelUrl }) {
+  const subject = `Novo pedido de consulta de ${patientName}`;
+  const when = fmtDateTimePtBR(requestedSlot);
+  const html = renderShell({
+    heading: "Pedido de agendamento",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(patientName)}</strong> solicitou um horário com você pelo seu link público.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Horário pedido</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(when)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">E-mail</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(patientEmail)}</strong></td></tr>
+        ${patientPhone ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Telefone</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(patientPhone)}</strong></td></tr>` : ""}
+      </table>
+      ${notes ? `<p style="margin:0 0 8px; font-size:13px; color:rgba(28,31,29,0.65);">Observações do paciente:</p><blockquote style="margin:0 0 20px; padding:10px 14px; background:#f7f4ef; border-left:3px solid #c89b4a; border-radius:4px; font-size:14px; color:rgba(28,31,29,0.85);">${escHtml(notes)}</blockquote>` : ""}
+      <p style="margin:0 0 8px;">Entre no painel pra aprovar ou recusar:</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Abrir painel</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O paciente recebe a confirmação por e-mail assim que você aprovar.</p>
+    `,
+    footer: "Você recebeu este e-mail porque ativou o agendamento público no Espaço Prelúdio."
+  });
+  const text = `Olá ${therapistName},\n\n${patientName} solicitou um horário com você pelo seu link público.\n\nHorário: ${when}\nE-mail: ${patientEmail}${patientPhone ? `\nTelefone: ${patientPhone}` : ""}${notes ? `\n\nObservações: ${notes}` : ""}\n\nAprove ou recuse no painel: ${painelUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl }) {
   const subject = `Sua consulta com ${therapistName} foi agendada`;
   const when = fmtDateTimePtBR(scheduledAt);
@@ -378,6 +405,7 @@ function templateBirthday({ patientName, therapistName, clinicName }) {
 module.exports = {
   sendEmail,
   templateConfirmation,
+  templateSchedulingRequest,
   templateReminder,
   templateBirthday,
   templateNps,

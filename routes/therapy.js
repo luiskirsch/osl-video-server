@@ -14,6 +14,7 @@
 //   therapy_audit/{eventId}       — quem acessou o quê, quando, IP
 
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const admin   = require("firebase-admin");
 const crypto  = require("crypto");
 const { AccessToken } = require("livekit-server-sdk");
@@ -98,7 +99,7 @@ const {
   getPrescriptionTypesForTherapist
 } = require("../services/professional-councils");
 const {
-  sendEmail, templateConfirmation, templateDispensacaoNotice,
+  sendEmail, templateConfirmation, templateSchedulingRequest, templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
@@ -117,6 +118,42 @@ const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
+}
+
+// ─── Slug público de agendamento ────────────────────────────────────────
+// Slug = identificador URL-friendly do terapeuta (ex.: "dr-roberto-fernandes").
+// Aceita 3-40 chars, lowercase a-z, dígitos, hífens. Sem hífens duplos ou nas pontas.
+// Palavras reservadas (rotas/áreas internas) ficam bloqueadas pra evitar colisão.
+const PUBLIC_SLUG_RX = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$/;
+const PUBLIC_SLUG_RESERVED = new Set([
+  "admin", "api", "staging", "login", "logout", "cadastro", "entrar",
+  "perfil", "painel", "agenda", "agendar", "pacientes", "consulta",
+  "consultas", "receita", "receitas", "documento", "documentos",
+  "financeiro", "relatorios", "clinica", "estoque", "calculadora",
+  "atestado", "whatsapp", "suporte", "verificacao", "verificado",
+  "termos", "politica", "cancelar", "planos", "nps", "como-dispensar",
+  "lista-espera", "aniversarios", "audit", "consultorio", "2fa-verify",
+  "paciente", "comprovante", "recuperar", "documento-publico",
+  "receita-publica", "paciente-painel", "paciente-login",
+  "paciente-cadastro", "paciente-audit", "paciente-recuperar",
+  "comprovante-estudante", "comprovante-formacao", "comprovante-recem-formado"
+]);
+function isValidPublicSlug(s) {
+  if (typeof s !== "string") return false;
+  const v = s.trim().toLowerCase();
+  if (!PUBLIC_SLUG_RX.test(v)) return false;
+  if (v.includes("--")) return false;
+  if (PUBLIC_SLUG_RESERVED.has(v)) return false;
+  return true;
+}
+async function findTherapistBySlug(slug) {
+  const db = getDb();
+  const snap = await db.collection("therapists")
+    .where("publicSchedulingSlug", "==", slug)
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  return snap.docs[0].data();
 }
 
 async function logAudit(event) {
@@ -1230,6 +1267,45 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       return sendError(res, 400, "AGENDA_CONFIG_INVALIDO", { hint: "endHour deve ser > startHour" });
     }
     if (Object.keys(cfg).length) updates.agendaConfig = cfg;
+  }
+
+  // Configuração de agendamento público (auto-scheduling via link público).
+  // Slug é único entre todos os terapeutas. Mudar slug é OK; URLs antigas
+  // simplesmente deixam de funcionar. Toggle enabled controla se o link
+  // público aceita novas solicitações (slug pode estar setado mas desabilitado).
+  if (req.body?.publicSchedulingSlug !== undefined) {
+    const slugRaw = String(req.body.publicSchedulingSlug || "").trim().toLowerCase();
+    if (slugRaw === "") {
+      updates.publicSchedulingSlug = admin.firestore.FieldValue.delete();
+    } else {
+      if (!isValidPublicSlug(slugRaw)) {
+        return sendError(res, 400, "SLUG_INVALIDO", {
+          hint: "Use 3-40 caracteres: letras minúsculas, números e hífens. Não pode começar/terminar com hífen ou ter hífen duplo."
+        });
+      }
+      if (slugRaw !== therapist.publicSchedulingSlug) {
+        const existing = await findTherapistBySlug(slugRaw);
+        if (existing && existing.uid !== uid) {
+          return sendError(res, 409, "SLUG_EM_USO", { hint: "Esse identificador já está em uso. Escolha outro." });
+        }
+      }
+      updates.publicSchedulingSlug = slugRaw;
+    }
+  }
+  if (req.body?.publicSchedulingEnabled !== undefined) {
+    updates.publicSchedulingEnabled = Boolean(req.body.publicSchedulingEnabled);
+  }
+  if (req.body?.publicSchedulingMinNoticeHours !== undefined) {
+    const n = Number(req.body.publicSchedulingMinNoticeHours);
+    if (Number.isFinite(n) && n >= 0 && n <= 720) {
+      updates.publicSchedulingMinNoticeHours = n;
+    }
+  }
+  if (req.body?.publicSchedulingMaxAdvanceDays !== undefined) {
+    const n = Number(req.body.publicSchedulingMaxAdvanceDays);
+    if (Number.isFinite(n) && n >= 1 && n <= 180) {
+      updates.publicSchedulingMaxAdvanceDays = n;
+    }
   }
 
   // Foto de perfil (avatar). Mesmo padrão da logo — cliente redimensiona
@@ -5780,6 +5856,484 @@ router.post("/therapy/admin/comprovantes-formacao/:uid/rejeitar", asyncHandler(a
   }
 
   return res.json({ ok: true, verificationStatus: "pending-review", reason });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// AUTO-AGENDAMENTO PÚBLICO — paciente solicita horário via link público
+// (https://espacopreludio.com.br/agendar.html?p=<slug>) sem ter conta.
+//
+// Fluxo:
+//  1. Paciente abre /agendar?p=<slug> → GET /public/agendar/:slug retorna
+//     perfil + agendaConfig.
+//  2. Frontend chama GET /public/agendar/:slug/slots?from=...&to=... e
+//     renderiza calendário com slots livres.
+//  3. Paciente escolhe slot + preenche nome/email/telefone/observações →
+//     POST /public/agendar/:slug/solicitar cria therapy_scheduling_requests
+//     e envia e-mail pro terapeuta.
+//  4. Terapeuta vê em /painel pendências → POST .../aprovar cria sessão
+//     real (therapy_sessions) ou .../rejeitar declina.
+//
+// Modelo de privacidade: dados do paciente ficam plaintext em
+// therapy_scheduling_requests até aprovação. Pós-aprovação, criamos a
+// sessão normalmente (sem cifrar, igual /sessao/criar). O paciente real
+// (com cifra E2E) só é criado pelo terapeuta depois.
+// ═════════════════════════════════════════════════════════════════════════
+
+const SCHEDULING_REQUEST_NAME_MAX  = 80;
+const SCHEDULING_REQUEST_EMAIL_MAX = 120;
+const SCHEDULING_REQUEST_NOTES_MAX = 1000;
+const SCHEDULING_REQUEST_DEFAULT_MIN_NOTICE_HOURS = 24;
+const SCHEDULING_REQUEST_DEFAULT_MAX_ADVANCE_DAYS = 60;
+const SCHEDULING_REQUEST_TTL_DAYS = 14;
+
+const publicSchedulingLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1h
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
+});
+
+function summarizeTherapistForPublicScheduling(therapist) {
+  const c = therapist.consultorio || {};
+  const conselhoSigla = resolveSiglaFromTherapist(therapist);
+  const conselhoMeta  = getConselho(conselhoSigla);
+  return {
+    displayName:    therapist.displayName || "",
+    especialidade:  therapist.especialidade || "",
+    bio:            therapist.bio || "",
+    photoBase64:    therapist.photoBase64 || "",
+    photoMime:      therapist.photoMime || "",
+    conselhoLabel:  conselhoMeta?.label || "",
+    numeroConselho: therapist.numeroConselho || therapist.crp || therapist.crm || "",
+    cidade:         c.cidade || "",
+    uf:             c.uf || ""
+  };
+}
+
+// Computa slots livres entre [fromMs, toMs] aplicando agendaConfig + sessões
+// existentes + blackouts + solicitações pendentes (que ainda não viraram
+// sessões mas já bloqueiam o slot pra evitar overbooking).
+async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) {
+  const cfg = therapist.agendaConfig || {};
+  const startHour   = Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8;
+  const endHour     = Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21;
+  const slotMinutes = Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50;
+  const slotMs = slotMinutes * 60 * 1000;
+
+  const minNoticeHours = Number.isFinite(therapist.publicSchedulingMinNoticeHours)
+    ? therapist.publicSchedulingMinNoticeHours
+    : SCHEDULING_REQUEST_DEFAULT_MIN_NOTICE_HOURS;
+  const maxAdvanceDays = Number.isFinite(therapist.publicSchedulingMaxAdvanceDays)
+    ? therapist.publicSchedulingMaxAdvanceDays
+    : SCHEDULING_REQUEST_DEFAULT_MAX_ADVANCE_DAYS;
+  const earliestStart = Date.now() + minNoticeHours * 60 * 60 * 1000;
+  const latestStart   = Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000;
+  const effectiveFrom = Math.max(fromMs, earliestStart);
+  const effectiveTo   = Math.min(toMs,   latestStart);
+
+  const db = getDb();
+
+  // Carrega ocupações: sessões + blackouts + solicitações pendentes.
+  // Query simples por therapistUid; filtro de janela aplicado em memória.
+  const [sessionsSnap, blackoutsSnap, pendingSnap] = await Promise.all([
+    db.collection("therapy_sessions").where("therapistUid", "==", therapistUid).get(),
+    db.collection("therapy_agenda_blackouts").where("therapistUid", "==", therapistUid).get(),
+    db.collection("therapy_scheduling_requests")
+      .where("therapistUid", "==", therapistUid)
+      .where("status", "==", "pending").get()
+  ]);
+
+  const busyRanges = [];
+  sessionsSnap.forEach(d => {
+    const s = d.data();
+    if (s.status === "canceled") return;
+    if (!s.scheduledAt) return;
+    busyRanges.push({ start: s.scheduledAt, end: s.scheduledAt + slotMs });
+  });
+  blackoutsSnap.forEach(d => {
+    const b = d.data();
+    if (!b.startAt || !b.endAt) return;
+    busyRanges.push({ start: b.startAt, end: b.endAt });
+  });
+  pendingSnap.forEach(d => {
+    const r = d.data();
+    if (!r.requestedSlot) return;
+    busyRanges.push({ start: r.requestedSlot, end: (r.requestedSlotEnd || r.requestedSlot + slotMs) });
+  });
+
+  function isBusy(slotStart, slotEnd) {
+    for (const r of busyRanges) {
+      if (slotStart < r.end && slotEnd > r.start) return true;
+    }
+    return false;
+  }
+
+  // Itera dia a dia no fuso America/Sao_Paulo (UTC-3 fixo). Sem DST no BR
+  // desde 2019, então offset constante é aceitável pra MVP. Domingo (0) e
+  // sábado (6) são ignorados — terapeuta pode adicionar blackout em horário
+  // específico, mas a janela diária some no fim de semana por padrão.
+  const TZ_OFFSET_MS = 3 * 60 * 60 * 1000; // UTC-3
+  const slots = [];
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startDayUtc = Math.floor((effectiveFrom + TZ_OFFSET_MS) / dayMs) * dayMs - TZ_OFFSET_MS;
+  for (let dayStart = startDayUtc; dayStart <= effectiveTo; dayStart += dayMs) {
+    const localDate = new Date(dayStart + TZ_OFFSET_MS);
+    const dow = localDate.getUTCDay();
+    if (dow === 0 || dow === 6) continue;
+    for (let h = startHour * 60; h + slotMinutes <= endHour * 60; h += slotMinutes) {
+      const slotStart = dayStart + h * 60 * 1000;
+      const slotEnd   = slotStart + slotMs;
+      if (slotStart < effectiveFrom) continue;
+      if (slotStart > effectiveTo)   break;
+      const busy = isBusy(slotStart, slotEnd);
+      slots.push({ start: slotStart, end: slotEnd, available: !busy });
+    }
+  }
+  return { slots, slotMinutes };
+}
+
+// GET /public/agendar/:slug — perfil público pra renderizar a página
+router.get("/public/agendar/:slug", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!isValidPublicSlug(slug)) return sendError(res, 400, "SLUG_INVALIDO");
+
+  const therapist = await findTherapistBySlug(slug);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (therapist.verificationStatus !== "verified") {
+    return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
+  }
+  if (!therapist.publicSchedulingEnabled) {
+    return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
+  }
+  const access = evaluatePlanAccess(therapist);
+  if (!access.ok) {
+    return sendError(res, 404, "AGENDAMENTO_PUBLICO_INDISPONIVEL");
+  }
+
+  const cfg = therapist.agendaConfig || {};
+  return res.json({
+    ok: true,
+    profissional: summarizeTherapistForPublicScheduling(therapist),
+    agendaConfig: {
+      startHour:   Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8,
+      endHour:     Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21,
+      slotMinutes: Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50
+    },
+    schedulingRules: {
+      minNoticeHours: Number.isFinite(therapist.publicSchedulingMinNoticeHours)
+        ? therapist.publicSchedulingMinNoticeHours
+        : SCHEDULING_REQUEST_DEFAULT_MIN_NOTICE_HOURS,
+      maxAdvanceDays: Number.isFinite(therapist.publicSchedulingMaxAdvanceDays)
+        ? therapist.publicSchedulingMaxAdvanceDays
+        : SCHEDULING_REQUEST_DEFAULT_MAX_ADVANCE_DAYS
+    }
+  });
+}));
+
+// GET /public/agendar/:slug/slots?from=ms&to=ms — slots disponíveis na janela
+router.get("/public/agendar/:slug/slots", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!isValidPublicSlug(slug)) return sendError(res, 400, "SLUG_INVALIDO");
+
+  const fromMs = Number(req.query.from);
+  const toMs   = Number(req.query.to);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
+    return sendError(res, 400, "JANELA_INVALIDA", { hint: "Use ?from=<ms>&to=<ms> com to > from." });
+  }
+  if ((toMs - fromMs) > 60 * 24 * 60 * 60 * 1000) {
+    return sendError(res, 400, "JANELA_GRANDE_DEMAIS", { hint: "Máximo 60 dias por consulta." });
+  }
+
+  const therapist = await findTherapistBySlug(slug);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (therapist.verificationStatus !== "verified") {
+    return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
+  }
+  if (!therapist.publicSchedulingEnabled) {
+    return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
+  }
+  const access = evaluatePlanAccess(therapist);
+  if (!access.ok) {
+    return sendError(res, 404, "AGENDAMENTO_PUBLICO_INDISPONIVEL");
+  }
+
+  const therapistUid = (await getDb().collection("therapists")
+    .where("publicSchedulingSlug", "==", slug).limit(1).get()).docs[0].id;
+  const { slots, slotMinutes } = await computeAvailableSlots({
+    therapist, therapistUid, fromMs, toMs
+  });
+
+  return res.json({ ok: true, slots, slotMinutes });
+}));
+
+// POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
+router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!isValidPublicSlug(slug)) return sendError(res, 400, "SLUG_INVALIDO");
+
+  const patientName = String(req.body?.patientName || "").trim().slice(0, SCHEDULING_REQUEST_NAME_MAX);
+  if (!patientName) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const patientEmailRaw = String(req.body?.patientEmail || "").trim().toLowerCase().slice(0, SCHEDULING_REQUEST_EMAIL_MAX);
+  if (!patientEmailRaw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(patientEmailRaw)) {
+    return sendError(res, 400, "EMAIL_INVALIDO");
+  }
+  const patientEmail = patientEmailRaw;
+
+  const patientPhoneRaw = String(req.body?.patientPhone || "").trim();
+  const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
+
+  const notes = String(req.body?.notes || "").trim().slice(0, SCHEDULING_REQUEST_NOTES_MAX);
+
+  const requestedSlot = Number(req.body?.requestedSlot || 0);
+  if (!Number.isFinite(requestedSlot) || requestedSlot <= Date.now()) {
+    return sendError(res, 400, "HORARIO_INVALIDO");
+  }
+
+  const therapistDocSnap = await getDb().collection("therapists")
+    .where("publicSchedulingSlug", "==", slug).limit(1).get();
+  if (therapistDocSnap.empty) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const therapistDoc = therapistDocSnap.docs[0];
+  const therapist = therapistDoc.data();
+  const therapistUid = therapistDoc.id;
+  if (therapist.verificationStatus !== "verified") {
+    return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
+  }
+  if (!therapist.publicSchedulingEnabled) {
+    return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
+  }
+  const access = evaluatePlanAccess(therapist);
+  if (!access.ok) return sendError(res, 404, "AGENDAMENTO_PUBLICO_INDISPONIVEL");
+
+  // Valida que o slot ainda está livre (race: outro paciente pediu o mesmo
+  // horário entre o GET /slots e este POST). Janela de checagem = slot inteiro.
+  const cfg = therapist.agendaConfig || {};
+  const slotMinutes = Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50;
+  const slotEndMs = requestedSlot + slotMinutes * 60 * 1000;
+  const { slots } = await computeAvailableSlots({
+    therapist, therapistUid,
+    fromMs: requestedSlot - 60 * 1000,
+    toMs:   slotEndMs   + 60 * 1000
+  });
+  const matchingSlot = slots.find(s => s.start === requestedSlot);
+  if (!matchingSlot || !matchingSlot.available) {
+    return sendError(res, 409, "HORARIO_INDISPONIVEL", { hint: "Esse horário ficou indisponível. Escolha outro." });
+  }
+
+  // Cria a solicitação.
+  const requestId = newId("scrq");
+  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
+  const expiresAt = Date.now() + SCHEDULING_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+  await getDb().collection("therapy_scheduling_requests").doc(requestId).set({
+    requestId,
+    therapistUid,
+    therapistSlug: slug,
+    patientName,
+    patientEmail,
+    patientPhone,
+    notes,
+    requestedSlot,
+    requestedSlotEnd: slotEndMs,
+    status: "pending",
+    ipHash,
+    expiresAt,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // E-mail pro terapeuta (fire-and-forget — não bloqueia resposta ao paciente).
+  const therapistEmail = await resolveTherapistEmail(therapistUid, therapist);
+  if (therapistEmail) {
+    const tpl = templateSchedulingRequest({
+      therapistName: therapist.displayName || "Profissional",
+      patientName,
+      patientEmail,
+      patientPhone,
+      notes,
+      requestedSlot,
+      painelUrl: buildPainelUrl()
+    });
+    sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
+      logError("scheduling_request_email_failed", e, { requestId })
+    );
+  }
+
+  await logAudit({
+    type: "scheduling_request_created",
+    requestId,
+    therapistUid,
+    requestedSlot
+  });
+
+  return res.json({ ok: true, requestId });
+}));
+
+// GET /therapy/agendamentos/solicitacoes — terapeuta lista solicitações
+// pendentes (e opcionalmente histórico recente).
+router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const includeAll = req.query?.all === "1" || req.query?.all === "true";
+  const db = getDb();
+  const snap = await db.collection("therapy_scheduling_requests")
+    .where("therapistUid", "==", uid)
+    .get();
+  const items = [];
+  snap.forEach(d => {
+    const r = d.data();
+    if (!includeAll && r.status !== "pending") return;
+    items.push({
+      requestId: r.requestId,
+      patientName: r.patientName,
+      patientEmail: r.patientEmail,
+      patientPhone: r.patientPhone || null,
+      notes: r.notes || "",
+      requestedSlot: r.requestedSlot,
+      requestedSlotEnd: r.requestedSlotEnd,
+      status: r.status,
+      sessionId: r.sessionId || null,
+      respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null,
+      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
+    });
+  });
+  items.sort((a, b) => (a.requestedSlot || 0) - (b.requestedSlot || 0));
+  return res.json({ ok: true, requests: items });
+}));
+
+// POST /therapy/agendamentos/solicitacoes/:id/aprovar — converte em sessão
+router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await requirePaidPlan(req, res, uid);
+  if (!therapist) return;
+
+  const requestId = String(req.params.id || "").trim();
+  if (!requestId) return sendError(res, 400, "REQUEST_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const reqDocRef = db.collection("therapy_scheduling_requests").doc(requestId);
+  const reqSnap = await reqDocRef.get();
+  if (!reqSnap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
+  const reqData = reqSnap.data();
+  if (reqData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (reqData.status !== "pending")  return sendError(res, 409, "SOLICITACAO_JA_RESPONDIDA");
+
+  // Cria sessão real (mesmo padrão de /sessao/criar mas sem recorrência).
+  const sId = newId("sess");
+  const room = `therapy_${sId}`;
+  const e2eeKey = crypto.randomBytes(32).toString("base64");
+  const therapistEmail = await resolveTherapistEmail(uid, therapist);
+
+  const joinPayload = {
+    token_type: "therapy_join",
+    sessionId: sId,
+    therapistUid: uid,
+    livekitRoom: room,
+    patientNameHint: reqData.patientName,
+    iat: Date.now(),
+    exp: Date.now() + JOIN_TOKEN_VALIDITY_MS
+  };
+  const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
+
+  const batch = db.batch();
+  batch.set(db.collection("therapy_sessions").doc(sId), {
+    sessionId: sId,
+    therapistUid: uid,
+    therapistDisplayName: therapist.displayName || "",
+    therapistEmail,
+    patientName: reqData.patientName,
+    patientId: null,
+    patientEmail: reqData.patientEmail || null,
+    patientPhone: reqData.patientPhone || null,
+    livekitRoom: room,
+    e2eeKey,
+    scheduledAt: reqData.requestedSlot,
+    status: "scheduled",
+    joinTokenExp: joinPayload.exp,
+    recurrenceGroupId: null,
+    recurrenceIndex: null,
+    recurrenceCount: null,
+    schedulingRequestId: requestId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  batch.update(reqDocRef, {
+    status: "approved",
+    sessionId: sId,
+    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await batch.commit();
+
+  // E-mail de confirmação pro paciente.
+  if (reqData.patientEmail) {
+    const cancelTokenInfo = buildCancelToken(sId);
+    const tpl = templateConfirmation({
+      patientName: reqData.patientName,
+      therapistName: therapist.displayName || "seu profissional",
+      scheduledAt: reqData.requestedSlot,
+      joinUrl: buildPatientJoinUrl(joinToken),
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+    });
+    sendEmail({ to: reqData.patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(e =>
+      logError("scheduling_request_approval_email_failed", e, { requestId, sessionId: sId })
+    );
+  }
+
+  await logAudit({
+    type: "scheduling_request_approved",
+    requestId,
+    therapistUid: uid,
+    sessionId: sId
+  });
+
+  return res.json({ ok: true, sessionId: sId, joinToken, joinTokenExp: joinPayload.exp });
+}));
+
+// POST /therapy/agendamentos/solicitacoes/:id/rejeitar — declina
+router.post("/therapy/agendamentos/solicitacoes/:id/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const requestId = String(req.params.id || "").trim();
+  if (!requestId) return sendError(res, 400, "REQUEST_ID_OBRIGATORIO");
+  const reason = String(req.body?.reason || "").trim().slice(0, 300);
+
+  const db = getDb();
+  const reqDocRef = db.collection("therapy_scheduling_requests").doc(requestId);
+  const reqSnap = await reqDocRef.get();
+  if (!reqSnap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
+  const reqData = reqSnap.data();
+  if (reqData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (reqData.status !== "pending")  return sendError(res, 409, "SOLICITACAO_JA_RESPONDIDA");
+
+  await reqDocRef.update({
+    status: "rejected",
+    rejectReason: reason || null,
+    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({
+    type: "scheduling_request_rejected",
+    requestId,
+    therapistUid: uid,
+    reason: reason || null
+  });
+
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/health — diagnóstico isolado
