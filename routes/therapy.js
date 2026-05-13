@@ -8872,4 +8872,176 @@ router.get("/therapy/anamneses/:id", asyncHandler(async (req, res) => {
   });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// TEMPLATES DE PRONTUÁRIO — defaults hardcoded (V1). V2 permite custom
+// por terapeuta via CRUD em therapy_note_templates/{templateId}.
+//
+// Templates são "esqueletos" que o terapeuta insere no composer de notas
+// durante/pós sessão. Reduzem fricção: anamnese inicial, evolução SOAP,
+// alta. Inserção é client-side — backend só serve a lista.
+// ═════════════════════════════════════════════════════════════════════════
+const NOTE_TEMPLATES_DEFAULT = [
+  {
+    id: "anamnese-inicial",
+    name: "Anamnese inicial",
+    description: "Estrutura completa pra primeira sessão (queixa, histórico, hábitos, suicidalidade, plano).",
+    content: `== ANAMNESE INICIAL ==
+
+Identificação:
+- Nome:
+- Idade:
+- Profissão:
+- Estado civil:
+- Com quem mora:
+
+Queixa principal:
+
+
+História da queixa atual:
+
+
+Histórico psiquiátrico:
+- Tratamentos anteriores:
+- Medicações em uso:
+- Internações:
+
+Histórico médico relevante:
+
+
+Histórico familiar (sintomas/transtornos na família):
+
+
+Hábitos:
+- Sono:
+- Alimentação:
+- Álcool / substâncias:
+- Exercícios:
+
+Suicidalidade / autolesão:
+
+
+Suporte social (família, amigos, religião):
+
+
+Avaliação inicial:
+
+
+Plano terapêutico:
+`
+  },
+  {
+    id: "evolucao-soap",
+    name: "Evolução SOAP",
+    description: "Padrão clínico: Subjetivo · Objetivo · Avaliação · Plano. Use a cada sessão.",
+    content: `== EVOLUÇÃO SOAP ==
+
+S (Subjetivo) — o que o paciente relata, sentimentos, queixas, eventos:
+
+
+O (Objetivo) — o que você observa (afeto, fala, comportamento, aparência):
+
+
+A (Avaliação) — sua análise clínica (hipóteses, evolução do tratamento):
+
+
+P (Plano) — próximos passos, tarefas, ajustes, próxima sessão:
+`
+  },
+  {
+    id: "alta-terapeutica",
+    name: "Alta terapêutica",
+    description: "Síntese de fim de tratamento — motivo, evolução, recomendações.",
+    content: `== ALTA TERAPÊUTICA ==
+
+Período do tratamento:
+Nº de sessões realizadas:
+
+Motivo da alta:
+( ) Objetivos terapêuticos alcançados
+( ) Decisão do paciente
+( ) Encaminhamento (especificar)
+( ) Outro:
+
+Síntese do processo terapêutico:
+
+
+Evolução dos sintomas / queixa inicial:
+
+
+Recursos e estratégias desenvolvidos:
+
+
+Recomendações pós-alta:
+
+
+Possibilidade de retorno:
+`
+  },
+  {
+    id: "retorno-pos-pausa",
+    name: "Retorno após pausa",
+    description: "Quando paciente volta depois de meses/anos sem terapia.",
+    content: `== RETORNO APÓS PAUSA ==
+
+Tempo desde última sessão:
+
+O que aconteceu nesse período (eventos relevantes, mudanças, evolução dos sintomas):
+
+
+Motivo do retorno (queixa atual):
+
+
+Re-avaliação do quadro:
+
+
+Objetivos pra esta nova fase:
+
+
+Plano inicial:
+`
+  },
+  {
+    id: "encaminhamento",
+    name: "Encaminhamento (parecer)",
+    description: "Síntese pra outro profissional (psiquiatra, médico, escola).",
+    content: `== PARECER PARA ENCAMINHAMENTO ==
+
+Destinatário:
+Motivo do encaminhamento:
+
+Síntese do caso:
+
+
+Hipóteses diagnósticas / impressão clínica:
+
+
+Recursos terapêuticos já utilizados:
+
+
+Solicitação específica (avaliação medicamentosa, exame, parecer, etc.):
+
+
+Disponibilidade pra contato:
+`
+  }
+];
+
+router.get("/therapy/note-templates", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  // V1: só defaults. V2 fará merge com therapy_note_templates do user.
+  return res.json({
+    ok: true,
+    templates: NOTE_TEMPLATES_DEFAULT.map(t => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      content: t.content,
+      source: "default"
+    }))
+  });
+}));
+
 module.exports = router;
