@@ -6693,6 +6693,102 @@ router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, transactions, categories: CATEGORY_LABELS });
 }));
 
+// GET /therapy/painel/hoje — agregação leve pra hero do painel:
+//   - nextSession: próxima sessão (scheduledAt > now, não cancelada/encerrada)
+//   - todayCount: nº de sessões agendadas hoje (BRT)
+//   - thisMonth: { sessoesRealizadas, sessoesAgendadas, faturamentoPagoCents, faturamentoPendenteCents, taxaConfirmacao }
+//
+// 1 query em therapy_sessions + 1 em therapy_transactions. Custo pequeno
+// pq o cap é o therapistUid + limit defensivo. Resultado cabe em <2KB.
+router.get("/therapy/painel/hoje", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const now = Date.now();
+  const db = getDb();
+
+  // Janela do mês corrente em America/Sao_Paulo (UTC-3, sem DST desde 2019).
+  const TZ_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const nowBRT = new Date(now - TZ_OFFSET_MS);
+  const monthStartBRT = Date.UTC(nowBRT.getUTCFullYear(), nowBRT.getUTCMonth(), 1) + TZ_OFFSET_MS;
+  const dayStartBRT   = Date.UTC(nowBRT.getUTCFullYear(), nowBRT.getUTCMonth(), nowBRT.getUTCDate()) + TZ_OFFSET_MS;
+  const dayEndBRT     = dayStartBRT + 24 * 60 * 60 * 1000;
+
+  const [sessionsSnap, txSnap] = await Promise.all([
+    db.collection("therapy_sessions").where("therapistUid", "==", uid).limit(500).get(),
+    db.collection("therapy_transactions").where("therapistUid", "==", uid).limit(500).get()
+  ]);
+
+  const sessions = sessionsSnap.docs.map(d => d.data());
+
+  // Próxima sessão: scheduled OR in_progress + scheduledAt no futuro próximo
+  // (ou já em andamento). Ordena por scheduledAt asc.
+  const nextCandidates = sessions
+    .filter(s => (s.status === "scheduled" || s.status === "in_progress"))
+    .filter(s => s.scheduledAt && s.scheduledAt >= now - 30 * 60 * 1000) // tolerância 30min atrás
+    .sort((a, b) => (a.scheduledAt || 0) - (b.scheduledAt || 0));
+
+  const nextSession = nextCandidates[0] ? {
+    sessionId: nextCandidates[0].sessionId,
+    patientName: nextCandidates[0].patientName,
+    patientId: nextCandidates[0].patientId || null,
+    scheduledAt: nextCandidates[0].scheduledAt,
+    status: nextCandidates[0].status,
+    confirmedAt: nextCandidates[0].confirmedAt?.toMillis ? nextCandidates[0].confirmedAt.toMillis() : null
+  } : null;
+
+  // Sessões agendadas no dia.
+  const todaySessions = sessions
+    .filter(s => s.scheduledAt && s.scheduledAt >= dayStartBRT && s.scheduledAt < dayEndBRT)
+    .filter(s => s.status !== "canceled");
+  const todayCount = todaySessions.length;
+  const todayConfirmedCount = todaySessions.filter(s => s.confirmedAt).length;
+
+  // KPIs do mês: usa scheduledAt + status. Sessões com scheduledAt no mês
+  // contam pra agendadas; status=completed → realizadas.
+  const monthSessions = sessions.filter(s => {
+    const t = Number(s.scheduledAt) || 0;
+    return t >= monthStartBRT && t < now + 31 * 86_400_000;
+  });
+  const realizadas    = monthSessions.filter(s => s.status === "completed").length;
+  const agendadas     = monthSessions.filter(s => s.status === "scheduled" && s.scheduledAt > now).length;
+  const noShow        = monthSessions.filter(s => s.status === "canceled" && s.canceledBy === "patient").length;
+  // Taxa de confirmação: das sessões scheduled futuras, quantas o paciente
+  // confirmou. Métrica orientativa — quanto maior, menor o no-show.
+  const futurasNoMes = monthSessions.filter(s => s.scheduledAt > now && s.status === "scheduled");
+  const confirmadasFuturas = futurasNoMes.filter(s => s.confirmedAt).length;
+  const taxaConfirmacao = futurasNoMes.length > 0
+    ? Math.round((confirmadasFuturas / futurasNoMes.length) * 100)
+    : null;
+
+  // Faturamento do mês.
+  let faturamentoPagoCents = 0, faturamentoPendenteCents = 0;
+  txSnap.forEach(d => {
+    const t = d.data();
+    if (t.type !== "receita") return;
+    const refDate = Number(t.paidDate) || Number(t.issueDate) || 0;
+    if (refDate < monthStartBRT) return;
+    if (t.status === "pago") faturamentoPagoCents += Number(t.amount) || 0;
+    else if (t.status === "pendente") faturamentoPendenteCents += Number(t.amount) || 0;
+  });
+
+  return res.json({
+    ok: true,
+    nextSession,
+    todayCount,
+    todayConfirmedCount,
+    thisMonth: {
+      sessoesRealizadas: realizadas,
+      sessoesAgendadasFuturas: agendadas,
+      sessoesCanceladasPaciente: noShow,
+      faturamentoPagoCents,
+      faturamentoPendenteCents,
+      taxaConfirmacao
+    }
+  });
+}));
+
 // GET /therapy/relatorios/analytics?range=30d|90d|year|all
 // Analytics não-financeiro: volume, no-show rate, frequência por dia/hora,
 // novos vs retorno. Lê de therapy_sessions.
