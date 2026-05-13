@@ -1319,6 +1319,11 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       updates.publicSchedulingMaxAdvanceDays = n;
     }
   }
+  // Opt-in: aparecer no diretório público de profissionais.
+  // Exige verificationStatus=verified + publicSchedulingEnabled true pra ter efeito.
+  if (req.body?.listPublicly !== undefined) {
+    updates.listPublicly = Boolean(req.body.listPublicly);
+  }
 
   // Configuração de cobranças Asaas. apiKey é secret — nunca sai do servidor
   // depois de salva (filtrada no /me). Env aceita "sandbox" | "production".
@@ -6088,6 +6093,66 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   }
   return { slots, slotMinutes };
 }
+
+// GET /public/profissionais — diretório público de terapeutas. Lista todos
+// que: (a) verificationStatus=verified, (b) publicSchedulingEnabled=true,
+// (c) listPublicly=true (opt-in), (d) plano ativo. Filtros opcionais:
+// especialidade, cidade, uf.
+router.get("/public/profissionais", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const filterEspecialidade = String(req.query?.especialidade || "").trim().toLowerCase();
+  const filterCidade        = String(req.query?.cidade || "").trim().toLowerCase();
+  const filterUf            = String(req.query?.uf || "").trim().toUpperCase();
+  const limit               = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
+
+  const db = getDb();
+  // Query Firestore com flags. Filtros por cidade/especialidade aplicados client-side
+  // pra evitar exigência de composite index.
+  const snap = await db.collection("therapists")
+    .where("verificationStatus", "==", "verified")
+    .where("listPublicly", "==", true)
+    .limit(500)
+    .get();
+
+  const items = [];
+  snap.forEach(d => {
+    const t = d.data();
+    if (!t.publicSchedulingSlug || !t.publicSchedulingEnabled) return;
+    if (!evaluatePlanAccess(t).ok) return;
+
+    const c = t.consultorio || {};
+    const esp = String(t.especialidade || "").toLowerCase();
+    if (filterEspecialidade && !esp.includes(filterEspecialidade)) return;
+    if (filterCidade && !String(c.cidade || "").toLowerCase().includes(filterCidade)) return;
+    if (filterUf && String(c.uf || "").toUpperCase() !== filterUf) return;
+
+    const conselhoSigla = resolveSiglaFromTherapist(t);
+    const conselhoMeta  = getConselho(conselhoSigla);
+
+    items.push({
+      slug:           t.publicSchedulingSlug,
+      displayName:    t.displayName || "",
+      especialidade:  t.especialidade || "",
+      photoBase64:    t.photoBase64 || "",
+      photoMime:      t.photoMime || "",
+      conselhoLabel:  conselhoMeta?.label || "",
+      numeroConselho: t.numeroConselho || t.crp || t.crm || "",
+      cidade:         c.cidade || "",
+      uf:             c.uf || "",
+      bio:            (t.bio || "").slice(0, 180) // resumo
+    });
+  });
+
+  // Ordena alfabético (nome). Limit aplicado por último.
+  items.sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
+
+  return res.json({
+    ok: true,
+    total: items.length,
+    items: items.slice(0, limit)
+  });
+}));
 
 // GET /public/agendar/:slug — perfil público pra renderizar a página
 router.get("/public/agendar/:slug", asyncHandler(async (req, res) => {
