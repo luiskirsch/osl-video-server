@@ -39,6 +39,7 @@ const { mercadoPagoFetch } = require("../services/payments");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const pushService = require("../services/push");
+const cid10 = require("../services/cid10");
 const {
   CATEGORY_LABELS,
   DESCRIPTION_MAX,
@@ -9142,6 +9143,21 @@ async function pushToTherapist(therapistUid, payload) {
     return { error: e.message };
   }
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// CID-10 — busca autocompletar (psicologia/psiquiatria + Z-codes).
+// Dataset hardcoded em services/cid10.js. ~150 entradas, sem paginação.
+// ═════════════════════════════════════════════════════════════════════════
+router.get("/therapy/cid10", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const q = String(req.query?.q || "").trim();
+  const limit = Math.min(50, Math.max(1, Number(req.query?.limit) || 20));
+  if (q.length < 2) return res.json({ ok: true, results: [] });
+  const results = cid10.search(q, limit);
+  return res.json({ ok: true, results });
+}));
 
 router.get("/therapy/note-templates", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
