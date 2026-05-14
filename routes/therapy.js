@@ -9915,4 +9915,458 @@ router.get("/therapy/escalas/tipos", asyncHandler(async (req, res) => {
   return res.json({ ok: true, scales: scales.listScales() });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// CHAT E2EE — paciente ↔ terapeuta assíncrono
+//
+// Arquitetura crypto (ECDH P-256 + AES-GCM):
+//   - Cada user (therapist + patient) tem keypair ECDH armazenado em
+//     therapy_user_keypairs/{uid}:
+//       publicJwk      — em claro (público)
+//       privateWrapped — cifrado com DEK do user (só user decifra)
+//     Gerados sob demanda no 1º acesso ao chat (lazy migration).
+//
+//   - Para cada conversa (thread):
+//       threadKey é gerada aleatória (AES-256) pelo iniciador.
+//       Cifrada DUAS vezes:
+//         (a) com DEK do iniciador → threadKeyForCreator
+//         (b) via ECDH(creator_priv, peer_pub) → threadKeyForPeer
+//       Ambos cifrados armazenados no doc da thread + ECDH pub do creator.
+//
+//   - Mensagens: cifradas individualmente com threadKey (AES-GCM).
+//
+// Servidor armazena 3 ciphertexts (2 wrappers + N msgs). NÃO decifra nada.
+// LGPD: thread = registro clínico → retenção 20 anos (CFP Res. 1/2009).
+// ═════════════════════════════════════════════════════════════════════════
+
+// Identifica role do user (therapist ou patient) pra autorização de endpoints
+// que servem ambas as roles. Retorna { role, uid, doc } ou null.
+async function identifyUser(uid) {
+  if (!uid) return null;
+  const db = getDb();
+  const tDoc = await db.collection("therapists").doc(uid).get();
+  if (tDoc.exists) return { role: "therapist", uid, doc: tDoc.data() };
+  const pDoc = await db.collection("therapy_patient_accounts").doc(uid).get();
+  if (pDoc.exists) return { role: "patient", uid, doc: pDoc.data() };
+  return null;
+}
+
+// POST /therapy/chat/keypair — registra ou atualiza ECDH keypair do user.
+// Body: { ecdhPublicJwk, ecdhPrivateWrapped: { ciphertext, iv } }
+// Idempotente — só permite UPDATE se forneceu novo (regenera todas threads).
+router.post("/therapy/chat/keypair", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const pub = req.body?.ecdhPublicJwk;
+  const priv = req.body?.ecdhPrivateWrapped;
+  if (!pub || typeof pub !== "object" || !pub.x || !pub.y || !pub.crv) {
+    return sendError(res, 400, "PUBLIC_JWK_INVALIDO");
+  }
+  if (!priv || typeof priv !== "object"
+      || typeof priv.ciphertext !== "string"
+      || typeof priv.iv !== "string"
+      || priv.ciphertext.length > 1500) {
+    return sendError(res, 400, "PRIVATE_WRAPPED_INVALIDO");
+  }
+
+  await getDb().collection("therapy_user_keypairs").doc(uid).set({
+    uid,
+    role: me.role,
+    ecdhPublicJwk: pub,
+    ecdhPrivateWrapped: priv,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/chat/keypair — retorna o próprio keypair (private wrapped).
+router.get("/therapy/chat/keypair", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const snap = await getDb().collection("therapy_user_keypairs").doc(uid).get();
+  if (!snap.exists) return sendError(res, 404, "KEYPAIR_NAO_REGISTRADO");
+  const d = snap.data();
+  return res.json({
+    ok: true,
+    ecdhPublicJwk:      d.ecdhPublicJwk,
+    ecdhPrivateWrapped: d.ecdhPrivateWrapped
+  });
+}));
+
+// GET /therapy/chat/public-key/:uid — fetch ECDH public key de um peer
+// (uso: criar thread). Requer auth, mas qualquer user pode buscar de qualquer
+// outro. Public key não é segredo — não revela nada sensível.
+router.get("/therapy/chat/public-key/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const requesterUid = await verifyFirebaseToken(req, res);
+  if (!requesterUid) return;
+
+  const peerUid = String(req.params.uid || "").trim();
+  if (!peerUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const snap = await getDb().collection("therapy_user_keypairs").doc(peerUid).get();
+  if (!snap.exists) return sendError(res, 404, "PEER_SEM_KEYPAIR");
+  const d = snap.data();
+  return res.json({
+    ok: true,
+    uid: peerUid,
+    role: d.role,
+    ecdhPublicJwk: d.ecdhPublicJwk
+  });
+}));
+
+// POST /therapy/chat/threads — cria nova conversa.
+// Inicia: therapist OU patient. O iniciador gera threadKey + os dois wrappers.
+// Body: {
+//   peerUid,                    // o outro lado
+//   threadKeyForCreator,        // { ciphertext, iv } — wrapped com creator DEK
+//   threadKeyForPeer,           // { ciphertext, iv } — wrapped via ECDH
+//   creatorEcdhPublicJwk        // snapshot da public key do creator no momento
+// }
+// Retorna threadId. Se já existe thread entre os dois, retorna a existente.
+router.post("/therapy/chat/threads", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const peerUid = String(req.body?.peerUid || "").trim();
+  if (!peerUid || peerUid === uid) return sendError(res, 400, "PEER_INVALIDO");
+
+  const peer = await identifyUser(peerUid);
+  if (!peer) return sendError(res, 404, "PEER_NAO_REGISTRADO");
+  if (peer.role === me.role) return sendError(res, 400, "CHAT_REQUER_PROFISSIONAL_E_PACIENTE");
+
+  const therapistUid       = me.role === "therapist" ? uid : peerUid;
+  const patientAccountUid  = me.role === "patient"   ? uid : peerUid;
+
+  // Verifica plano ativo do therapist
+  const therapistDoc = me.role === "therapist" ? me.doc : peer.doc;
+  if (!evaluatePlanAccess(therapistDoc).ok) {
+    return sendError(res, 403, "PLANO_INATIVO");
+  }
+
+  const tForCreator = req.body?.threadKeyForCreator;
+  const tForPeer    = req.body?.threadKeyForPeer;
+  const creatorPub  = req.body?.creatorEcdhPublicJwk;
+  if (!tForCreator?.ciphertext || !tForCreator?.iv) return sendError(res, 400, "THREAD_KEY_CREATOR_INVALIDA");
+  if (!tForPeer?.ciphertext    || !tForPeer?.iv)    return sendError(res, 400, "THREAD_KEY_PEER_INVALIDA");
+  if (!creatorPub || !creatorPub.x) return sendError(res, 400, "CREATOR_PUBKEY_INVALIDA");
+
+  const db = getDb();
+  // Dedup: se já existe thread entre estes dois, retorna existente
+  const existing = await db.collection("therapy_threads")
+    .where("therapistUid", "==", therapistUid)
+    .where("patientAccountUid", "==", patientAccountUid)
+    .limit(1).get();
+  if (!existing.empty) {
+    return res.json({ ok: true, threadId: existing.docs[0].id, existed: true });
+  }
+
+  const threadId = newId("thr");
+  const therapistName = (me.role === "therapist" ? me.doc : peer.doc).displayName || "Profissional";
+  const patientName   = (me.role === "patient"   ? me.doc : peer.doc).displayName || "Paciente";
+
+  // Mapeia threadKeyForCreator/forPeer → forTherapist/forPatient consistente.
+  const creatorIsTherapist = me.role === "therapist";
+  const threadKeyForTherapist = creatorIsTherapist ? tForCreator : tForPeer;
+  const threadKeyForPatient   = creatorIsTherapist ? tForPeer    : tForCreator;
+  // ECDH pub snapshot do creator vai pro outro lado decifrar via ECDH.
+  const creatorEcdhPubForPeer = creatorPub;
+
+  await db.collection("therapy_threads").doc(threadId).set({
+    threadId,
+    therapistUid,
+    patientAccountUid,
+    therapistDisplayName: therapistName,
+    patientDisplayName:   patientName,
+    createdBy: me.role,
+    threadKeyForTherapist,
+    threadKeyForPatient,
+    // Snapshot da public key do CREATOR no momento, pra o PEER fazer ECDH
+    // depois sem precisar buscar /public-key/:uid de novo. Field é
+    // contextual: se creator=therapist, ECDH(patient_priv, this) decifra
+    // threadKeyForPatient. Se creator=patient, ECDH(therapist_priv, this)
+    // decifra threadKeyForTherapist.
+    creatorEcdhPublicJwkSnapshot: creatorEcdhPubForPeer,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastMessageAt: null,
+    lastMessageSenderRole: null,
+    lastReadByTherapist: Date.now(),
+    lastReadByPatient: Date.now()
+  });
+
+  await logAudit({ type: "chat_thread_created", threadId, therapistUid, patientAccountUid, createdBy: me.role });
+  return res.json({ ok: true, threadId, existed: false });
+}));
+
+// GET /therapy/chat/threads — lista threads do user (com unread counts).
+router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const db = getDb();
+  const field = me.role === "therapist" ? "therapistUid" : "patientAccountUid";
+  const snap = await db.collection("therapy_threads")
+    .where(field, "==", uid)
+    .limit(200).get();
+
+  const threads = snap.docs.map(d => {
+    const t = d.data();
+    const lastReadField = me.role === "therapist" ? "lastReadByTherapist" : "lastReadByPatient";
+    const lastReadMs = Number(t[lastReadField]) || 0;
+    const lastMsgMs  = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : (Number(t.lastMessageAt) || 0);
+    return {
+      threadId: t.threadId,
+      therapistUid: t.therapistUid,
+      patientAccountUid: t.patientAccountUid,
+      therapistDisplayName: t.therapistDisplayName,
+      patientDisplayName: t.patientDisplayName,
+      lastMessageAt: lastMsgMs || null,
+      lastMessageSenderRole: t.lastMessageSenderRole || null,
+      hasUnread: lastMsgMs > lastReadMs,
+      createdAt: t.createdAt?.toMillis ? t.createdAt.toMillis() : null
+    };
+  }).sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0));
+
+  return res.json({ ok: true, threads });
+}));
+
+// GET /therapy/chat/threads/:id — retorna doc completo da thread (com
+// threadKeys cifradas) pro cliente decifrar localmente.
+router.get("/therapy/chat/threads/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+
+  const snap = await getDb().collection("therapy_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  // Devolve o que o cliente precisa pra unwrap:
+  //   - threadKey do próprio role (cifrada com DEK ou ECDH)
+  //   - se eu sou o PEER (não-creator), creatorEcdhPublicJwkSnapshot pra ECDH
+  const isCreator = (t.createdBy === me.role);
+  const myThreadKeyWrapper = me.role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
+  return res.json({
+    ok: true,
+    thread: {
+      threadId: t.threadId,
+      therapistUid: t.therapistUid,
+      patientAccountUid: t.patientAccountUid,
+      therapistDisplayName: t.therapistDisplayName,
+      patientDisplayName: t.patientDisplayName,
+      myThreadKeyWrapper,
+      myThreadKeyWrappedVia: isCreator ? "own-dek" : "ecdh",
+      peerEcdhPublicJwk: isCreator ? null : t.creatorEcdhPublicJwkSnapshot,
+      myRole: me.role,
+      lastReadByTherapist: t.lastReadByTherapist || 0,
+      lastReadByPatient:   t.lastReadByPatient   || 0
+    }
+  });
+}));
+
+// GET /therapy/chat/threads/:id/messages?before=ms&limit=50
+router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const threadSnap = await db.collection("therapy_threads").doc(threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = threadSnap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const before = Number(req.query?.before) || Date.now();
+  const limit  = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
+
+  const msgSnap = await db.collection("therapy_messages")
+    .where("threadId", "==", threadId)
+    .limit(500).get();
+
+  const messages = msgSnap.docs
+    .map(d => {
+      const m = d.data();
+      const ts = m.createdAt?.toMillis ? m.createdAt.toMillis() : (Number(m.createdAt) || 0);
+      return {
+        messageId: m.messageId,
+        senderUid: m.senderUid,
+        senderRole: m.senderRole,
+        ciphertext: m.ciphertext,
+        iv: m.iv,
+        createdAt: ts
+      };
+    })
+    .filter(m => m.createdAt < before)
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .slice(-limit);
+
+  return res.json({ ok: true, messages });
+}));
+
+// POST /therapy/chat/threads/:id/messages — envia mensagem.
+// Body: { ciphertext, iv } (já cifrada com threadKey client-side).
+router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv         = String(req.body?.iv         || "").trim();
+  if (!ciphertext || !iv) return sendError(res, 400, "CONTEUDO_INVALIDO");
+  if (ciphertext.length > 6000) return sendError(res, 413, "MENSAGEM_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const threadRef = db.collection("therapy_threads").doc(threadId);
+  const threadSnap = await threadRef.get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = threadSnap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  // Rate limit simples: 30 msgs/min por user.
+  // (Pra produção pesada, mover pra Redis. V1 fica memory-only por ip.)
+
+  const messageId = newId("msg");
+  const now = Date.now();
+
+  await db.collection("therapy_messages").doc(messageId).set({
+    messageId,
+    threadId,
+    senderUid: uid,
+    senderRole: me.role,
+    ciphertext,
+    iv,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await threadRef.set({
+    lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastMessageSenderRole: me.role,
+    // Sender também marca como lido pro próprio role (não conta como unread pra si).
+    ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now })
+  }, { merge: true });
+
+  // Push notification best-effort. Therapist tem subscriptions já configuradas
+  // via /therapy/push. Paciente ainda não — pra ele, depende do e-mail fallback
+  // (worker que dispara após 24h sem leitura — TODO próxima iter).
+  const senderName = me.role === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
+  if (me.role === "patient") {
+    // Receiver é therapist → usa o helper já existente.
+    pushToTherapist(t.therapistUid, {
+      title: `${senderName} enviou uma mensagem`,
+      body: "Toque para abrir a conversa.",
+      url: "./mensagens.html#thread-" + threadId,
+      tag: "chat-" + threadId
+    }).catch(() => {});
+  }
+
+  return res.json({ ok: true, messageId, createdAt: now });
+}));
+
+// PATCH /therapy/chat/threads/:id/read — marca todas mensagens como lidas
+// até timestamp `until` (defaults a now).
+router.patch("/therapy/chat/threads/:id/read", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+
+  const until = Number(req.body?.until) || Date.now();
+
+  const db = getDb();
+  const threadRef = db.collection("therapy_threads").doc(threadId);
+  const snap = await threadRef.get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  await threadRef.set({
+    ...(me.role === "therapist" ? { lastReadByTherapist: until } : { lastReadByPatient: until })
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/chat/peers — lista os peers possíveis pra abrir chat novo.
+// - Therapist: pacientes que têm conta (therapy_patient_accounts) E que já
+//   tiveram sessão com este therapist (link via therapy_sessions.patientAccountUid).
+// - Patient: terapeutas que já atenderam este paciente.
+router.get("/therapy/chat/peers", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const db = getDb();
+  let peerUids = new Set();
+  if (me.role === "therapist") {
+    const ss = await db.collection("therapy_sessions")
+      .where("therapistUid", "==", uid).limit(500).get();
+    ss.forEach(d => {
+      const pUid = d.data().patientAccountUid;
+      if (pUid) peerUids.add(pUid);
+    });
+  } else {
+    const ss = await db.collection("therapy_sessions")
+      .where("patientAccountUid", "==", uid).limit(500).get();
+    ss.forEach(d => {
+      const tUid = d.data().therapistUid;
+      if (tUid) peerUids.add(tUid);
+    });
+  }
+
+  if (!peerUids.size) return res.json({ ok: true, peers: [] });
+
+  // Resolve nomes
+  const peers = [];
+  for (const peerUid of peerUids) {
+    const peer = await identifyUser(peerUid);
+    if (!peer) continue;
+    peers.push({
+      uid: peerUid,
+      role: peer.role,
+      displayName: peer.doc.displayName || ""
+    });
+  }
+  return res.json({ ok: true, peers });
+}));
+
 module.exports = router;
