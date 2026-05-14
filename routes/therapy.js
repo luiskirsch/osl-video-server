@@ -9588,6 +9588,88 @@ router.delete("/therapy/push/subscribe", asyncHandler(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+// POST /therapy/paciente/push/subscribe — registra push subscription do paciente.
+router.post("/therapy/paciente/push/subscribe", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sub = req.body?.subscription;
+  if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+    return sendError(res, 400, "SUBSCRIPTION_INVALIDA");
+  }
+  const cleanSub = {
+    endpoint: String(sub.endpoint).slice(0, 1000),
+    keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) },
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 200),
+    addedAt: Date.now()
+  };
+
+  const db = getDb();
+  await db.runTransaction(async (txx) => {
+    const ref = db.collection("therapy_patient_accounts").doc(uid);
+    const snap = await txx.get(ref);
+    if (!snap.exists) throw new Error("PACIENTE_NAO_REGISTRADO");
+    const t = snap.data();
+    const subs = Array.isArray(t.pushSubscriptions) ? t.pushSubscriptions : [];
+    const filtered = subs.filter(s => s.endpoint !== cleanSub.endpoint);
+    const next = [cleanSub, ...filtered].slice(0, 10);
+    txx.set(ref, { pushSubscriptions: next, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+
+  await logAudit({ type: "patient_push_subscribed", patientAccountUid: uid, endpointPreview: cleanSub.endpoint.slice(0, 60) });
+  return res.json({ ok: true });
+}));
+
+router.delete("/therapy/paciente/push/subscribe", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const endpoint = String(req.body?.endpoint || "").trim();
+  if (!endpoint) return sendError(res, 400, "ENDPOINT_OBRIGATORIO");
+
+  const db = getDb();
+  await db.runTransaction(async (txx) => {
+    const ref = db.collection("therapy_patient_accounts").doc(uid);
+    const snap = await txx.get(ref);
+    if (!snap.exists) return;
+    const t = snap.data();
+    const subs = Array.isArray(t.pushSubscriptions) ? t.pushSubscriptions : [];
+    const next = subs.filter(s => s.endpoint !== endpoint);
+    if (next.length !== subs.length) {
+      txx.set(ref, { pushSubscriptions: next, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    }
+  });
+  return res.json({ ok: true });
+}));
+
+// Helper genérico — manda push pra qualquer user (therapist OU patient).
+async function pushToUser(targetUid, payload) {
+  if (!pushService.isConfigured()) return { skipped: true };
+  try {
+    const db = getDb();
+    // Tenta therapist primeiro, depois patient. Um dos dois bate.
+    let ref = db.collection("therapists").doc(targetUid);
+    let snap = await ref.get();
+    if (!snap.exists) {
+      ref = db.collection("therapy_patient_accounts").doc(targetUid);
+      snap = await ref.get();
+    }
+    if (!snap.exists) return { skipped: true };
+    const subs = Array.isArray(snap.data().pushSubscriptions) ? snap.data().pushSubscriptions : [];
+    if (!subs.length) return { skipped: true };
+    const r = await pushService.sendPushToAll(subs, payload);
+    if (r.expired.length) {
+      const keep = subs.filter(s => !r.expired.includes(s.endpoint));
+      await ref.set({ pushSubscriptions: keep }, { merge: true });
+    }
+    return { sent: r.sent, expired: r.expired.length };
+  } catch (e) {
+    logError("push_to_user_failed", e, { targetUid });
+    return { error: e.message };
+  }
+}
+
 // Helper interno: envia push pro terapeuta + remove subs gone.
 async function pushToTherapist(therapistUid, payload) {
   if (!pushService.isConfigured()) return { skipped: true };
@@ -10277,19 +10359,16 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
     ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now })
   }, { merge: true });
 
-  // Push notification best-effort. Therapist tem subscriptions já configuradas
-  // via /therapy/push. Paciente ainda não — pra ele, depende do e-mail fallback
-  // (worker que dispara após 24h sem leitura — TODO próxima iter).
+  // Push notification best-effort. pushToUser cobre therapist E paciente.
   const senderName = me.role === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
-  if (me.role === "patient") {
-    // Receiver é therapist → usa o helper já existente.
-    pushToTherapist(t.therapistUid, {
-      title: `${senderName} enviou uma mensagem`,
-      body: "Toque para abrir a conversa.",
-      url: "./mensagens.html#thread-" + threadId,
-      tag: "chat-" + threadId
-    }).catch(() => {});
-  }
+  const receiverUid = me.role === "therapist" ? t.patientAccountUid : t.therapistUid;
+  const receiverUrl = me.role === "therapist" ? "./paciente-mensagens.html" : "./mensagens.html#thread-" + threadId;
+  pushToUser(receiverUid, {
+    title: `${senderName} enviou uma mensagem`,
+    body: "Toque para abrir a conversa.",
+    url: receiverUrl,
+    tag: "chat-" + threadId
+  }).catch(() => {});
 
   return res.json({ ok: true, messageId, createdAt: now });
 }));

@@ -263,17 +263,99 @@ async function runReminder1hTick() {
 async function runFullTick() {
   await runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
   await runReminder1hTick().catch(e => logError("reminder_1h_tick_unhandled", e));
-  // #B1: processa fila de retries de afiliado todo tick (1×/h é suficiente —
-  // backoff mínimo é 1min mas pra batch isso fica adequado).
   await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
-  // LGPD: apaga fileBase64 de comprovantes-estudante com mais de 90 dias.
-  // Mantém metadados (decision, reasons) pra audit.
   await runStudentDocCleanup().catch(e => logError("student_doc_cleanup_unhandled", e));
-  // Aniversariantes: dispara 1×/dia às 9h BRT (=12h UTC). Idempotência via
-  // lastSentAt comparado com a data de hoje (YYYY-MM-DD).
   await runBirthdayTick().catch(e => logError("birthday_tick_unhandled", e));
-  // NPS: 24h após sessão completada, dispara pesquisa por e-mail.
   await runNpsTick().catch(e => logError("nps_tick_unhandled", e));
+  // Chat: dispara e-mail fallback pra threads com mensagem unread > 24h
+  // (best-effort caso push notification tenha falhado ou user esteja off).
+  await runChatUnreadEmailTick().catch(e => logError("chat_unread_tick_unhandled", e));
+}
+
+// ─── Chat: e-mail fallback pra unread > 24h ──────────────────────────
+// Busca threads com lastMessageAt > 24h e lastRead{receiver} < lastMessageAt
+// + nenhum e-mail fallback enviado pra esse "ciclo" (idempotência via
+// lastChatEmailFallbackAt). Envia "você tem mensagem não lida".
+
+const CHAT_UNREAD_THRESHOLD_MS = 24 * 60 * 60 * 1000;     // 24h
+const CHAT_EMAIL_COOLDOWN_MS   = 7 * 24 * 60 * 60 * 1000; // 7d entre fallbacks
+
+async function runChatUnreadEmailTick() {
+  const db = getDb();
+  if (!db) return;
+
+  const now = Date.now();
+  const threshold = now - CHAT_UNREAD_THRESHOLD_MS;
+
+  // Lê threads recentes (last message nos últimos 30d). Filtra in-memory.
+  const ageLimit = now - (30 * 24 * 60 * 60 * 1000);
+  const snap = await db.collection("therapy_threads")
+    .where("lastMessageAt", ">=", new Date(ageLimit))
+    .limit(500).get();
+
+  let sent = 0, skipped = 0;
+  for (const doc of snap.docs) {
+    const t = doc.data();
+    const lastMsgMs = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : Number(t.lastMessageAt) || 0;
+    if (!lastMsgMs || lastMsgMs > threshold) { skipped++; continue; }
+    // Quem é o receiver (não-sender da última mensagem) e a leitura dele?
+    const senderRole = t.lastMessageSenderRole;
+    if (!senderRole) { skipped++; continue; }
+    const receiverRole = senderRole === "therapist" ? "patient" : "therapist";
+    const receiverLastRead = receiverRole === "therapist"
+      ? (Number(t.lastReadByTherapist) || 0)
+      : (Number(t.lastReadByPatient)   || 0);
+    if (receiverLastRead >= lastMsgMs) { skipped++; continue; } // já leu
+
+    // Cooldown: enviou e-mail fallback pra esse receiver nos últimos 7d? pula.
+    const fallbackKey = receiverRole === "therapist" ? "chatFallbackTherapistAt" : "chatFallbackPatientAt";
+    const lastFallback = Number(t[fallbackKey]) || 0;
+    if (lastFallback && (now - lastFallback) < CHAT_EMAIL_COOLDOWN_MS) { skipped++; continue; }
+
+    const receiverUid = receiverRole === "therapist" ? t.therapistUid : t.patientAccountUid;
+    const receiverName = receiverRole === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
+    const senderName   = senderRole   === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
+    if (!receiverUid) { skipped++; continue; }
+
+    // Resolve e-mail do receiver
+    let receiverEmail = null;
+    try {
+      const userRec = await admin.auth().getUser(receiverUid);
+      receiverEmail = userRec.email || null;
+    } catch { /* ignore */ }
+    if (!receiverEmail) { skipped++; continue; }
+
+    const url = receiverRole === "therapist"
+      ? "https://espacopreludio.com.br/mensagens.html"
+      : "https://espacopreludio.com.br/paciente-mensagens.html";
+
+    try {
+      await sendEmail({
+        to: receiverEmail,
+        subject: `Você tem uma mensagem não lida no Espaço Prelúdio`,
+        bodyHtml: `
+          <p>Olá ${escHtml(receiverName || "")},</p>
+          <p><strong>${escHtml(senderName || "Sua conversa")}</strong> te enviou uma mensagem há mais de 24h e ela ainda não foi lida.</p>
+          <p style="margin: 22px 0;">
+            <a href="${url}" style="display:inline-block;background:#2d4a3e;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:500;">Abrir conversa</a>
+          </p>
+          <p style="font-size:13px;color:rgba(28,31,29,0.65);">As mensagens são cifradas ponta-a-ponta — só você consegue lê-las após fazer login.</p>
+        `,
+        text: `Você tem uma mensagem não lida de ${senderName || "—"} no Espaço Prelúdio.\n\nAbra: ${url}`
+      });
+      // Marca o cooldown
+      await doc.ref.set({ [fallbackKey]: now }, { merge: true });
+      sent++;
+    } catch (e) {
+      logWarn("chat_unread_email_send_failed", { threadId: t.threadId, error: e.message });
+    }
+  }
+  if (sent || skipped) logInfo("chat_unread_email_tick", { sent, skipped, totalChecked: snap.size });
+}
+
+function escHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
 }
 
 // ─── NPS pós-consulta ────────────────────────────────────────────────
