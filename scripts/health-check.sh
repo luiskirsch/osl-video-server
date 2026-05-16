@@ -25,8 +25,8 @@ echo
 # --- 2. Rotas novas (deploy de 2026-05-13+) ------------------------------
 echo "${DIM}# 2. Rotas novas (commits posteriores a 2026-05-05)${RESET}"
 check_route() {
-  local path="$1" label="$2"
-  local code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE$path")
+  local method="$1" path="$2" label="$3"
+  local code=$(curl -s -X "$method" -o /dev/null -w "%{http_code}" "$BASE$path")
   case "$code" in
     404) echo "  ${RED}✗${RESET} $label — HTTP 404 (rota ausente, deploy stale)" ;;
     401|403) echo "  ${GREEN}✓${RESET} $label — HTTP $code (rota OK, exige auth)" ;;
@@ -35,14 +35,14 @@ check_route() {
     *) echo "  ${YELLOW}?${RESET} $label — HTTP $code" ;;
   esac
 }
-check_route "/therapy/cid10?q=F32"           "/therapy/cid10                (CID-10)"
-check_route "/therapy/chat/keypair"          "/therapy/chat/keypair         (Chat E2EE)"
-check_route "/therapy/painel/hoje"           "/therapy/painel/hoje          (Dashboard Hoje)"
-check_route "/public/profissionais?limit=1"  "/public/profissionais         (Diretório público)"
-check_route "/therapy/scales/templates"      "/therapy/scales/templates     (PHQ-9 + GAD-7)"
-check_route "/therapy/nfse/test"             "/therapy/nfse/test            (NFS-e)"
-check_route "/therapy/paciente/notas"        "/therapy/paciente/notas       (Notas paciente)"
-check_route "/therapy/profissional/me"       "/therapy/profissional/me      (Perfil — feature antiga)"
+check_route GET  "/therapy/cid10?q=F32"           "GET  /therapy/cid10               (CID-10)"
+check_route GET  "/therapy/chat/keypair"          "GET  /therapy/chat/keypair        (Chat E2EE)"
+check_route GET  "/therapy/painel/hoje"           "GET  /therapy/painel/hoje         (Dashboard Hoje)"
+check_route GET  "/public/profissionais?limit=1"  "GET  /public/profissionais        (Diretório público)"
+check_route GET  "/therapy/escalas/tipos"         "GET  /therapy/escalas/tipos       (PHQ-9 + GAD-7)"
+check_route POST "/therapy/nfse/test"             "POST /therapy/nfse/test           (NFS-e)"
+check_route GET  "/therapy/paciente/notas"        "GET  /therapy/paciente/notas      (Notas paciente)"
+check_route GET  "/therapy/profissional/me"       "GET  /therapy/profissional/me     (Perfil — feature antiga)"
 echo
 
 # --- 3. Env vars (via /admin/env-check, requer ADMIN_SECRET) --------------
