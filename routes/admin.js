@@ -88,4 +88,36 @@ router.post("/admin/licenca/desvincular", adminLimiter, requireAdmin, asyncHandl
   return res.json({ ok: true, licenseCode });
 }));
 
+// GET /admin/env-check — lista quais env vars estão setadas (sem leak de valor).
+// Usado pelo health-check.sh do frontend / debug pós-deploy. Requer ADMIN_SECRET.
+router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  const VARS = [
+    "FIREBASE_SERVICE_ACCOUNT_JSON",
+    "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "LIVEKIT_URL",
+    "ACCESS_TOKEN_SECRET", "LICENSE_SECRET", "ADMIN_SECRET",
+    "THERAPY_ADMIN_EMAILS", "FRONTEND_BASE_URL", "THERAPY_FRONTEND_BASE",
+    "RESEND_API_KEY", "EMAIL_FROM",
+    "MP_ACCESS_TOKEN", "MP_WEBHOOK_SECRET", "MP_WEBHOOK_REQUIRE_SIG",
+    "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT",
+    "ANTHROPIC_API_KEY",
+    "S3_ACCESS_KEY", "S3_SECRET_KEY", "S3_BUCKET", "S3_REGION", "S3_ENDPOINT", "S3_PUBLIC_URL",
+    "ZAPI_INSTANCE_ID", "ZAPI_CLIENT_TOKEN", "ZAPI_SECURITY_TOKEN", "ZAPI_BASE_URL",
+    "CFP_VALIDATOR_PROVIDER", "IDWALL_API_KEY", "CONFIRADOC_API_KEY",
+    "ASAAS_WEBHOOK_TOKEN",
+    "REMINDER_LOOKAHEAD_HOURS",
+    "THERAPY_TRIAL_DAYS", "THERAPY_TRIAL_DAYS_PROFISSIONAL", "THERAPY_TRIAL_DAYS_RECEM_FORMADO",
+    "THERAPY_PLAN_AMOUNT", "THERAPY_PLAN_PROFISSIONAL_AMOUNT", "THERAPY_PLAN_RECEM_FORMADO_AMOUNT",
+    "RECORDING_LAYOUT_URL"
+  ];
+  const status = {};
+  for (const v of VARS) {
+    const value = process.env[v];
+    status[v] = {
+      set: !!value && value.length > 0,
+      length: value ? value.length : 0
+    };
+  }
+  return res.json({ ok: true, env: status, nodeEnv: process.env.NODE_ENV, appEnv: process.env.APP_ENV });
+}));
+
 module.exports = router;
