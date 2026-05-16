@@ -88,6 +88,70 @@ router.post("/admin/licenca/desvincular", adminLimiter, requireAdmin, asyncHandl
   return res.json({ ok: true, licenseCode });
 }));
 
+// POST /admin/delete-user — apaga conta totalmente (Firebase Auth + Firestore).
+// Limpa: therapists/{uid}, therapy_patient_accounts/{uid}, e quaisquer subcolecoes
+// referenciando o uid. Operacao IRREVERSIVEL — usar so pra reset/desenvolvimento.
+//
+// Body: { email: string }
+// Headers: x-admin-secret: <ADMIN_SECRET>
+router.post("/admin/delete-user", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+
+  const db = getDb();
+  const summary = { email, deletedFrom: [], errors: [] };
+
+  // 1. Buscar UID pelo email no Firebase Auth
+  let uid = null;
+  try {
+    const userRecord = await admin.auth().getUserByEmail(email);
+    uid = userRecord.uid;
+    summary.uid = uid;
+  } catch (e) {
+    summary.errors.push({ step: "getUserByEmail", error: e.message });
+    return res.json({ ok: true, summary, note: "User nao existe no Firebase Auth — nada a deletar" });
+  }
+
+  // 2. Deletar doc de therapist (se existir)
+  try {
+    const tDoc = await db.collection("therapists").doc(uid).get();
+    if (tDoc.exists) {
+      await db.collection("therapists").doc(uid).delete();
+      summary.deletedFrom.push("therapists/" + uid);
+    }
+  } catch (e) { summary.errors.push({ step: "deleteTherapistDoc", error: e.message }); }
+
+  // 3. Deletar doc de patient account (se existir)
+  try {
+    const pDoc = await db.collection("therapy_patient_accounts").doc(uid).get();
+    if (pDoc.exists) {
+      await db.collection("therapy_patient_accounts").doc(uid).delete();
+      summary.deletedFrom.push("therapy_patient_accounts/" + uid);
+    }
+  } catch (e) { summary.errors.push({ step: "deletePatientAccountDoc", error: e.message }); }
+
+  // 4. Deletar notas do paciente (subcolecao independente)
+  try {
+    const notesSnap = await db.collection("therapy_patient_notes").where("patientAccountUid", "==", uid).limit(500).get();
+    if (!notesSnap.empty) {
+      const batch = db.batch();
+      notesSnap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+      summary.deletedFrom.push(`therapy_patient_notes (${notesSnap.size} docs)`);
+    }
+  } catch (e) { summary.errors.push({ step: "deletePatientNotes", error: e.message }); }
+
+  // 5. Deletar do Firebase Auth (irrev)
+  try {
+    await admin.auth().deleteUser(uid);
+    summary.deletedFrom.push("firebase-auth");
+  } catch (e) { summary.errors.push({ step: "deleteAuthUser", error: e.message }); }
+
+  logInfo("admin_delete_user", { email, uid, deletedFrom: summary.deletedFrom });
+  return res.json({ ok: true, summary });
+}));
+
 // GET /admin/env-check — lista quais env vars estão setadas (sem leak de valor).
 // Usado pelo health-check.sh do frontend / debug pós-deploy. Requer ADMIN_SECRET.
 router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
