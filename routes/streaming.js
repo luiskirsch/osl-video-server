@@ -1,5 +1,5 @@
 const express = require("express");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const admin = require("firebase-admin");
 const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizePathEmail } = require("../utils");
@@ -18,9 +18,12 @@ const startLimiter = rateLimit({
   max: 6,                     // 6 starts/min/IP
   standardHeaders: true, legacyHeaders: false,
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Tente de novo em 1 min" },
+  // express-rate-limit v8 exige ipKeyGenerator() helper pra normalizar IPv6
+  // (IPv6/64 prefix em vez de IP completo), senão usuario com IPv6 pode
+  // bypassar limite trocando o sufixo. Helper aceita req e retorna chave.
   keyGenerator: (req) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
-    return email || (req.ip || "anon");
+    return email || ipKeyGenerator(req) || "anon";
   }
 });
 

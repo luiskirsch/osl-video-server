@@ -1,5 +1,5 @@
 const express = require("express");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const crypto = require("crypto");
 const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
@@ -65,9 +65,10 @@ const paymentLimiter = rateLimit({
   max: 5,                     // 5 pedidos/min/IP+email
   standardHeaders: true, legacyHeaders: false,
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Aguarde 1 min antes de criar outro pagamento" },
+  // express-rate-limit v8 exige ipKeyGenerator() helper pra normalizar IPv6.
   keyGenerator: (req) => {
     const email = String(req.body?.email || "").trim().toLowerCase();
-    return email || (req.ip || "anon");
+    return email || ipKeyGenerator(req) || "anon";
   }
 });
 
