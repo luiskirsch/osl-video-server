@@ -32,10 +32,10 @@ const {
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
   THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
-  MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
+  MP_ACCESS_TOKEN_THERAPY, MP_WEBHOOK_SECRET_THERAPY,
   ASAAS_WEBHOOK_TOKEN
 } = require("../config");
-const { mercadoPagoFetch } = require("../services/payments");
+const { mercadoPagoFetchTherapy } = require("../services/payments");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const pushService = require("../services/push");
@@ -5370,8 +5370,9 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
 //
 // Setup necessário:
 //   1) THERAPY_PLAN_AMOUNT (env, default 99.50)
-//   2) MP_ACCESS_TOKEN (já configurado pro jogo)
-//   3) MP_WEBHOOK_SECRET (recomendado pra produção)
+//   2) MP_ACCESS_TOKEN_THERAPY (aplicação MP dedicada ao Espaço Prelúdio —
+//      separada do MP_ACCESS_TOKEN_JOGO usada pelo Prelúdio Jogos)
+//   3) MP_WEBHOOK_SECRET_THERAPY (recomendado pra produção)
 //   4) No dashboard MP: criar webhook → URL: BACKEND/therapy/webhook/mp
 //      Eventos: preapproval, subscription_preapproval
 //
@@ -5446,7 +5447,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
 
   let response, data;
   try {
-    ({ response, data } = await mercadoPagoFetch("https://api.mercadopago.com/preapproval", {
+    ({ response, data } = await mercadoPagoFetchTherapy("https://api.mercadopago.com/preapproval", {
       method: "POST",
       body: JSON.stringify(body)
     }));
@@ -5499,7 +5500,7 @@ router.post("/therapy/profissional/plano/cancelar", asyncHandler(async (req, res
 
   let response, data;
   try {
-    ({ response, data } = await mercadoPagoFetch(
+    ({ response, data } = await mercadoPagoFetchTherapy(
       `https://api.mercadopago.com/preapproval/${encodeURIComponent(therapist.mpPreapprovalId)}`,
       { method: "PUT", body: JSON.stringify({ status: "cancelled" }) }
     ));
@@ -5537,8 +5538,8 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     req.query?.["data.id"] || req.body?.data?.id || req.query?.id || req.body?.id || ""
   ).trim();
 
-  // Validação de assinatura (best-effort — sem MP_WEBHOOK_SECRET, só loga warning)
-  if (MP_WEBHOOK_SECRET && dataId) {
+  // Validação de assinatura (best-effort — sem MP_WEBHOOK_SECRET_THERAPY, só loga warning)
+  if (MP_WEBHOOK_SECRET_THERAPY && dataId) {
     try {
       const sigHeader = String(req.headers["x-signature"] || "");
       const reqId     = String(req.headers["x-request-id"] || "");
@@ -5547,7 +5548,7 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
         const ts = parts.ts, v1 = parts.v1;
         if (ts && v1) {
           const template = `id:${dataId};request-id:${reqId};ts:${ts};`;
-          const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET).update(template).digest("hex");
+          const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET_THERAPY).update(template).digest("hex");
           let match = false;
           try { match = crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v1, "hex")); } catch {}
           if (!match) {
@@ -5570,7 +5571,7 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   // Busca o estado atual do preapproval na API MP
   let preapproval;
   try {
-    const { response, data } = await mercadoPagoFetch(
+    const { response, data } = await mercadoPagoFetchTherapy(
       `https://api.mercadopago.com/preapproval/${encodeURIComponent(dataId)}`
     );
     if (!response.ok) {
@@ -6796,8 +6797,8 @@ router.get("/therapy/health", (req, res) => {
     ok: true,
     livekitConfigured: !!(LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
     livekitUrl: LIVEKIT_URL,
-    mpAccessTokenConfigured:   !!MP_ACCESS_TOKEN,
-    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET,
+    mpAccessTokenConfigured:   !!MP_ACCESS_TOKEN_THERAPY,
+    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET_THERAPY,
     docValidatorProvider: String(process.env.DOC_VALIDATOR_PROVIDER || "claude").toLowerCase()
   });
 });

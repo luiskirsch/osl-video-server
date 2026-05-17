@@ -19,8 +19,24 @@ const S3_ENDPOINT          = process.env.S3_ENDPOINT          || "";
 const S3_PUBLIC_URL        = process.env.S3_PUBLIC_URL        || "";
 const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://preludiojogos.com/recording-layout.html";
 
-const MP_ACCESS_TOKEN    = process.env.MP_ACCESS_TOKEN    || "";
-const MP_WEBHOOK_SECRET  = process.env.MP_WEBHOOK_SECRET  || ""; // Security #1: pra validar x-signature
+// Mercado Pago — tokens separados por produto (Prelúdio Jogos vs Espaço
+// Prelúdio). Cada um aponta pra uma aplicação MP distinta no painel do
+// desenvolvedor (https://www.mercadopago.com.br/developers/panel/app).
+// Permite que dinheiro de jogo e de telessaúde caia em contas MP separadas.
+//
+// Fallback: se MP_ACCESS_TOKEN_X específico não estiver setado, usa
+// MP_ACCESS_TOKEN legado — backwards-compat pra deploys que ainda usam
+// uma conta MP só. Remover o legado quando ambas contas estiverem migradas.
+const MP_ACCESS_TOKEN_JOGO     = process.env.MP_ACCESS_TOKEN_JOGO     || process.env.MP_ACCESS_TOKEN    || "";
+const MP_ACCESS_TOKEN_THERAPY  = process.env.MP_ACCESS_TOKEN_THERAPY  || process.env.MP_ACCESS_TOKEN    || "";
+// Webhook secret idem — separado por produto (cada app MP gera o seu).
+const MP_WEBHOOK_SECRET_JOGO    = process.env.MP_WEBHOOK_SECRET_JOGO    || process.env.MP_WEBHOOK_SECRET || "";
+const MP_WEBHOOK_SECRET_THERAPY = process.env.MP_WEBHOOK_SECRET_THERAPY || process.env.MP_WEBHOOK_SECRET || "";
+
+// Aliases legados — apontam pro jogo. Mantidos pra não quebrar imports
+// existentes (routes/payments.js, routes/license.js, services/payments.js).
+const MP_ACCESS_TOKEN   = MP_ACCESS_TOKEN_JOGO;
+const MP_WEBHOOK_SECRET = MP_WEBHOOK_SECRET_JOGO;
 
 // Webhook do Asaas (cobranças do financeiro do terapeuta). Token compartilhado
 // — cada terapeuta configura no painel Asaas a URL `.../webhooks/asaas/financeiro?token=<x>`.
@@ -241,7 +257,10 @@ module.exports = {
   APP_ENV, IS_STAGING, IS_PRODUCTION,
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
-  RECORDING_LAYOUT_URL, MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
+  RECORDING_LAYOUT_URL,
+  MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET,
+  MP_ACCESS_TOKEN_JOGO, MP_ACCESS_TOKEN_THERAPY,
+  MP_WEBHOOK_SECRET_JOGO, MP_WEBHOOK_SECRET_THERAPY,
   ASAAS_WEBHOOK_TOKEN,
   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
