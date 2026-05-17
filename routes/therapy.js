@@ -5673,6 +5673,11 @@ router.get("/therapy/admin/comprovantes-estudante", asyncHandler(async (req, res
       } : null
     };
   })
+  // Filtra fora profissionais que entraram no resultset do "all" mas nunca
+  // submeteram comprovante de estudante (sem lastUploadId, nada pra revisar).
+  // Pros outros status (pending/approved/rejected) o where do Firestore ja
+  // restringe — esse filtro vira no-op, é só safety net.
+  .filter(item => !!item.studentDoc?.lastUploadId)
   .sort((a, b) => (b.studentDoc?.lastUploadedAt || 0) - (a.studentDoc?.lastUploadedAt || 0));
 
   return res.json({ ok: true, items });
@@ -5870,6 +5875,9 @@ router.get("/therapy/admin/comprovantes-recem-formado", asyncHandler(async (req,
       } : null
     };
   })
+  // Filtra fora profissionais sem comprovante real (mesmo motivo do
+  // /comprovantes-estudante — evita "Abrir" cair em COMPROVANTE_NAO_ENCONTRADO).
+  .filter(item => !!item.recemFormadoDoc?.lastUploadId)
   .sort((a, b) => (b.recemFormadoDoc?.lastUploadedAt || 0) - (a.recemFormadoDoc?.lastUploadedAt || 0));
 
   return res.json({ ok: true, items });
@@ -6062,6 +6070,9 @@ router.get("/therapy/admin/comprovantes-formacao", asyncHandler(async (req, res)
     };
   })
   .filter(item => {
+    // Em qualquer status, exige comprovante real submetido — senão "Abrir"
+    // quebra com COMPROVANTE_NAO_ENCONTRADO no admin UI.
+    if (!item.formacaoDoc?.lastUploadId) return false;
     if (wantStatus === "all") return true;
     if (wantStatus === "pending-review") return item.formacaoDoc?.decision === "pending-review";
     if (wantStatus === "verified")       return item.verificationStatus === "verified";
