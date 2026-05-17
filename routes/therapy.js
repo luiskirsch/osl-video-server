@@ -4926,6 +4926,14 @@ router.post("/therapy/profissional/verificacao/submeter", asyncHandler(async (re
   if (therapist.verificationStatus === "verified") {
     return sendError(res, 409, "JA_VERIFICADO");
   }
+  // SEM_CONSELHO usa fluxo dedicado em /comprovante-formacao — submissoes
+  // aqui caem na fila admin de CRP/CRM e o auto-validador quebra (sem
+  // CRP/CRM pra checar contra conselho). Rejeita com mensagem clara.
+  if (therapist.tipoConselho === "SEM_CONSELHO") {
+    return sendError(res, 400, "FLUXO_INCORRETO_USE_COMPROVANTE_FORMACAO", {
+      detail: "Profissionais sem conselho regulamentado devem enviar comprovante de formação em /comprovante-formacao.html (não nessa página)."
+    });
+  }
 
   const documentBase64 = String(req.body?.documentBase64 || "").trim();
   const documentMime   = String(req.body?.documentMime   || "").trim().toLowerCase();
