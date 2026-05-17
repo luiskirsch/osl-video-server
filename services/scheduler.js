@@ -13,7 +13,7 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
-const { sendEmail, templateReminder, templateBirthday, templateNps, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl } = require("./email");
+const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, templateRecemFormadoEndingSoon, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { processPendingReferrals } = require("./affiliate");
 
@@ -270,6 +270,9 @@ async function runFullTick() {
   // Chat: dispara e-mail fallback pra threads com mensagem unread > 24h
   // (best-effort caso push notification tenha falhado ou user esteja off).
   await runChatUnreadEmailTick().catch(e => logError("chat_unread_tick_unhandled", e));
+  // Reverificação anual de tiers (estudante expira / recém-formado vira pro)
+  await runStudentExpirationTick().catch(e => logError("student_expiration_tick_unhandled", e));
+  await runRecemFormadoTransitionTick().catch(e => logError("recem_formado_transition_tick_unhandled", e));
 }
 
 // ─── Chat: e-mail fallback pra unread > 24h ──────────────────────────
@@ -566,6 +569,136 @@ async function runStudentDocCleanup() {
   }
 }
 
+// ─── Reverificação anual ─────────────────────────────────────────────
+// Detecta tiers que expiraram e age:
+// 1) Estudante: studentVerifiedUntil <= now → downgrade pra trial (7d grace)
+//    + email pedindo novo comprovante. Idempotente via plano change.
+// 2) Recém-formado: 30d antes do aniversário de 12 meses da dataInscricao →
+//    email avisando que vai migrar pra profissional. Idempotente via
+//    recemFormadoEndingNoticeSentAt. (Migração automática real do MP
+//    preapproval fica pra fase futura — exige PUT em /preapproval/:id
+//    com novo transaction_amount.)
+//
+// Por que aqui: a fonte da verdade do tier vive em therapists/{uid}. O
+// tick principal já passa por essa coleção em outras checagens; adicionar
+// um query semanal cabe sem custo extra.
+const STUDENT_GRACE_DAYS = 7;
+const RECEM_FORMADO_DURATION_MS = 365 * 24 * 60 * 60 * 1000; // 12 meses
+const RECEM_FORMADO_NOTICE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000; // 30d antes
+
+async function runStudentExpirationTick() {
+  const db = getDb();
+  if (!db) return;
+
+  const now = new Date();
+  // Firestore aceita where com Date — converte pra Timestamp internamente.
+  const snap = await db.collection("therapists")
+    .where("plano", "==", "student-active")
+    .where("studentVerifiedUntil", "<=", now)
+    .limit(200)
+    .get();
+
+  if (snap.empty) return;
+
+  let downgraded = 0, errors = 0;
+  for (const doc of snap.docs) {
+    const t = doc.data();
+    try {
+      await doc.ref.set({
+        plano: "trial",
+        trialUntil: new Date(Date.now() + STUDENT_GRACE_DAYS * 24 * 60 * 60 * 1000),
+        studentExpiredAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      // Email best-effort — não bloqueia downgrade se falhar
+      if (t.email) {
+        try {
+          const tpl = templateStudentExpired({
+            therapistName: t.displayName || "profissional",
+            retryUrl: buildComprovanteEstudanteUrl(),
+            planosUrl: buildPlanosUrl()
+          });
+          await sendEmail({ to: t.email, ...tpl });
+        } catch (e) {
+          logError("student_expired_email_failed", e, { uid: t.uid });
+        }
+      }
+      downgraded++;
+    } catch (e) {
+      logError("student_expiration_downgrade_failed", e, { uid: t.uid });
+      errors++;
+    }
+  }
+
+  if (downgraded > 0 || errors > 0) {
+    logInfo("student_expiration_tick", { downgraded, errors, graceDays: STUDENT_GRACE_DAYS });
+  }
+}
+
+async function runRecemFormadoTransitionTick() {
+  const db = getDb();
+  if (!db) return;
+
+  // Busca quem está em plano "pro" com tier recem-formado ATIVO (sem aviso
+  // enviado ainda). Não dá pra usar where em campo aninhado de timestamp
+  // direto — filtra em memória após query simples por plano+proTier.
+  const snap = await db.collection("therapists")
+    .where("plano", "==", "pro")
+    .where("proTier", "==", "recem-formado")
+    .limit(500)
+    .get();
+
+  if (snap.empty) return;
+
+  const now = Date.now();
+  let notified = 0, errors = 0;
+  for (const doc of snap.docs) {
+    const t = doc.data();
+    if (t.recemFormadoEndingNoticeSentAt) continue; // já avisado
+
+    // dataInscricao vive em recemFormadoDoc.extracted.dataInscricao
+    // (string ISO ou "YYYY-MM-DD"). Pode estar ausente em contas antigas.
+    const dataInscricaoStr = t.recemFormadoDoc?.extracted?.dataInscricao;
+    if (!dataInscricaoStr) continue;
+
+    const inscricaoMs = Date.parse(dataInscricaoStr);
+    if (!Number.isFinite(inscricaoMs)) continue;
+
+    const endingMs = inscricaoMs + RECEM_FORMADO_DURATION_MS;
+    const noticeAt = endingMs - RECEM_FORMADO_NOTICE_AHEAD_MS;
+
+    // Janela: avisar APENAS se cruzou a marca dos 30d-antes E ainda não
+    // cruzou a marca de expiração (caso contrário já passou da hora).
+    if (now < noticeAt) continue; // ainda cedo
+    if (now >= endingMs) continue; // já expirou — outra cron lida com isso
+
+    try {
+      if (t.email) {
+        const tpl = templateRecemFormadoEndingSoon({
+          therapistName: t.displayName || "profissional",
+          endingDateIso: new Date(endingMs).toISOString(),
+          planosUrl: buildPlanosUrl()
+        });
+        await sendEmail({ to: t.email, ...tpl });
+      }
+      await doc.ref.set({
+        recemFormadoEndingNoticeSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        recemFormadoEndingDate: new Date(endingMs),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      notified++;
+    } catch (e) {
+      logError("recem_formado_notice_failed", e, { uid: t.uid });
+      errors++;
+    }
+  }
+
+  if (notified > 0 || errors > 0) {
+    logInfo("recem_formado_transition_tick", { notified, errors });
+  }
+}
+
 function startSchedulerLoop() {
   if (timer) return;
   // Primeiro tick depois de 1min (evita bater no startup do Firebase Admin).
@@ -584,4 +717,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick, runStudentExpirationTick, runRecemFormadoTransitionTick };

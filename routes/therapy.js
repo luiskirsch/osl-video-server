@@ -19,7 +19,7 @@ const admin   = require("firebase-admin");
 const crypto  = require("crypto");
 const { AccessToken } = require("livekit-server-sdk");
 
-const { logError, logInfo } = require("../logger");
+const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
@@ -5610,6 +5610,28 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   if (plano) update.plano = plano;
   if (plano === "pro") update.proSince = admin.firestore.FieldValue.serverTimestamp();
 
+  // Reconcilia proTier/proPriceCents com o valor REAL do preapproval no MP
+  // (source of truth = MP, não o que `/plano/iniciar` planejou). Cobre casos
+  // de mismatch: cache stale, race, troca de plano no meio, ou plano criado
+  // fora do /plano/iniciar. Mapeia transaction_amount -> tier conhecido.
+  const txAmount = Number(preapproval?.auto_recurring?.transaction_amount);
+  if (Number.isFinite(txAmount) && txAmount > 0) {
+    update.proPriceCents = Math.round(txAmount * 100);
+    let derivedTier;
+    if (txAmount === THERAPY_PLAN_RECEM_FORMADO_AMOUNT)      derivedTier = "recem-formado";
+    else if (txAmount === THERAPY_PLAN_PROFISSIONAL_AMOUNT)  derivedTier = "profissional";
+    else if (txAmount === THERAPY_PLAN_AMOUNT)               derivedTier = "default";
+    else {
+      // Valor cobrado nao bate com nenhum tier conhecido — não sobrescreve
+      // proTier (preserva o valor anterior do /plano/iniciar) mas loga.
+      logWarn("therapy_mp_webhook_amount_desconhecido", {
+        uid, preapprovalId: preapproval.id, txAmount,
+        knownTiers: { THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT, THERAPY_PLAN_AMOUNT }
+      });
+    }
+    if (derivedTier) update.proTier = derivedTier;
+  }
+
   await db.collection("therapists").doc(uid).set(update, { merge: true });
 
   await logAudit({
@@ -5617,7 +5639,9 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     therapistUid: uid,
     preapprovalId: preapproval.id,
     mpStatus: status,
-    plano: plano || "unchanged"
+    plano: plano || "unchanged",
+    proTier: update.proTier || null,
+    proPriceCents: update.proPriceCents || null
   });
 
   return res.status(200).json({ ok: true });
