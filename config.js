@@ -21,7 +21,7 @@ const RECORDING_LAYOUT_URL = process.env.RECORDING_LAYOUT_URL || "https://prelud
 
 // Mercado Pago — tokens separados por produto (Prelúdio Jogos vs Espaço
 // Prelúdio). Cada um aponta pra uma aplicação MP distinta no painel do
-// desenvolvedor (https://www.mercadopago.com.br/developers/panel/app).
+// desenvolvedor (mercadopago.com.br/developers/panel/app).
 // Permite que dinheiro de jogo e de telessaúde caia em contas MP separadas.
 //
 // Fallback: se MP_ACCESS_TOKEN_X específico não estiver setado, usa
