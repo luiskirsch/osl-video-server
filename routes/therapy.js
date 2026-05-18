@@ -38,6 +38,7 @@ const {
 const { mercadoPagoFetchTherapy } = require("../services/payments");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
+const tiss     = require("../services/tiss");
 const pushService = require("../services/push");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -9511,6 +9512,278 @@ router.get("/therapy/tiss/guias", asyncHandler(async (req, res) => {
     .sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
 
   return res.json({ ok: true, items });
+}));
+
+// ─────────────────────────────────────────────────────────────────────
+// TISS — Geração XML/PDF/Lote (Fase 2 + 3)
+// ─────────────────────────────────────────────────────────────────────
+
+// Resolve CBOS a partir do conselho + especialidade. Tabela mínima dos
+// mais comuns; em produção pode evoluir pra services/cbos.js. Sem match,
+// retorna string vazia (válido em alguns convênios) e gera warn no log.
+function _resolveCbos(therapist) {
+  const conselho = (therapist.crp ? "CRP" : therapist.crm ? "CRM" : "").toUpperCase();
+  if (conselho === "CRP") return "251510"; // Psicólogo clínico
+  if (conselho === "CRM") {
+    if (therapist.especialidade === "psiquiatria") return "225133";
+    return "225125"; // Médico clínico
+  }
+  return ""; // outros conselhos: terapeuta preenche manualmente se quiser
+}
+
+// Monta o objeto da guia a partir de session + therapist + paciente + conv.
+// Reusado por XML e HTML/PDF — mesma fonte de verdade.
+async function _buildGuiaPayload(uid, sessionId) {
+  const db = getDb();
+  const ssnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!ssnap.exists) return { error: "SESSAO_NAO_ENCONTRADA" };
+  const session = ssnap.data();
+  if (session.therapistUid !== uid) return { error: "ACESSO_NEGADO" };
+  if (!session.tiss?.numeroGuiaPrestador) return { error: "GUIA_TISS_NAO_EXISTE" };
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return { error: "PROFISSIONAL_NAO_ENCONTRADO" };
+
+  const convenio = (therapist.tissConvenios || []).find(c => c.code === session.tiss.convenioCode);
+  if (!convenio) return { error: "CONVENIO_NAO_CADASTRADO" };
+
+  // Carteirinha do paciente p/ esse convênio
+  let carteirinha = null;
+  if (session.patientId) {
+    const psnap = await db.collection("therapy_patients").doc(session.patientId).get();
+    if (psnap.exists) {
+      const p = psnap.data();
+      carteirinha = (p.convenios || []).find(c => c.convenioCode === convenio.code);
+    }
+  }
+
+  // CRP/CRM do prof. — separa em numero/UF (ex: "12/12345" -> {numero:"12345", uf:"12"})
+  const crpcrm = String(therapist.crp || therapist.crm || "").trim();
+  const conselhoSigla = therapist.crp ? "CRP" : therapist.crm ? "CRM" : "";
+  let numeroConselho = crpcrm;
+  let ufConselho = "";
+  const matchCRP = crpcrm.match(/^(\d{2})[\/-](\d+)$/);
+  if (matchCRP) { ufConselho = matchCRP[1]; numeroConselho = matchCRP[2]; }
+  const matchCRM = crpcrm.match(/^(\d+)[\/-]([A-Z]{2})$/i);
+  if (matchCRM) { numeroConselho = matchCRM[1]; ufConselho = matchCRM[2].toUpperCase(); }
+
+  return {
+    therapist, session, convenio, carteirinha,
+    guia: {
+      numeroGuiaPrestador: session.tiss.numeroGuiaPrestador,
+      numeroGuiaOperadora: session.tiss.numeroGuiaOperadora || null,
+      numeroCarteira: carteirinha?.numeroCarteirinha || "",
+      atendimentoRN: "N",
+      nomeBeneficiario: session.patientName || carteirinha?.titular || "",
+      codigoPrestadorNaOperadora: convenio.numeroContratado,
+      cnesContratado: therapist.cnes || null,
+      nomeContratado: therapist.displayName || "",
+      nomeProfissional: therapist.displayName || "",
+      conselhoProfissional: conselhoSigla,
+      numeroConselho,
+      ufConselho,
+      cbosProfissional: _resolveCbos(therapist),
+      dataAtendimento: session.scheduledAt || Date.now(),
+      tussCodigo: session.tiss.tussCode,
+      tussDescricao: session.tiss.tussLabel,
+      valorProcedimento: session.tiss.valorProcedimento || 0
+    }
+  };
+}
+
+// GET /therapy/tiss/guias/:sessionId/xml — gera XML 4.01.00 da guia individual
+router.get("/therapy/tiss/guias/:sessionId/xml", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  const built = await _buildGuiaPayload(uid, sessionId);
+  if (built.error) return sendError(res, 400, built.error);
+
+  const { xml, hash } = tiss.buildLoteGuias({
+    sequencialTransacao: `${Date.now()}`,
+    numeroLote: `${Date.now()}`,
+    registroAnsOperadora: built.convenio.registroAns || "000000",
+    codigoPrestadorNaOperadora: built.convenio.numeroContratado,
+    guiasConsulta: [built.guia]
+  });
+
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="guia-${built.guia.numeroGuiaPrestador}.xml"`);
+  return res.send(xml);
+}));
+
+// GET /therapy/tiss/guias/:sessionId/pdf — gera HTML pra impressão (PDF via browser print)
+router.get("/therapy/tiss/guias/:sessionId/pdf", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  const built = await _buildGuiaPayload(uid, sessionId);
+  if (built.error) return sendError(res, 400, built.error);
+  const html = tiss.buildGuiaConsultaHTML(built.guia);
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.send(html);
+}));
+
+// POST /therapy/tiss/lote — gera XML de lote mensal com todas as guias do prof
+// no período + status filtrável. Body: { ano, mes (1-12), status?, convenioCode? }
+router.post("/therapy/tiss/lote", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const ano = Number(req.body?.ano);
+  const mes = Number(req.body?.mes);
+  if (!Number.isInteger(ano) || !Number.isInteger(mes) || mes < 1 || mes > 12) {
+    return sendError(res, 400, "ANO_MES_INVALIDO");
+  }
+  const wantStatus       = String(req.body?.status || "rascunho").trim().toLowerCase();
+  const wantConvenioCode = String(req.body?.convenioCode || "").trim().toLowerCase() || null;
+
+  // Filtra sessões com guia TISS no mês solicitado.
+  const start = new Date(Date.UTC(ano, mes - 1, 1)).getTime();
+  const end   = new Date(Date.UTC(ano, mes, 1)).getTime();
+  const db = getDb();
+  const snap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("scheduledAt", ">=", start)
+    .where("scheduledAt", "<", end)
+    .limit(2000)
+    .get();
+
+  const sessions = snap.docs
+    .map(d => ({ sessionId: d.id, ...d.data() }))
+    .filter(s => !!s.tiss?.numeroGuiaPrestador)
+    .filter(s => s.tiss.status === wantStatus)
+    .filter(s => !wantConvenioCode || s.tiss.convenioCode === wantConvenioCode);
+
+  if (sessions.length === 0) return sendError(res, 404, "NENHUMA_GUIA_NO_PERIODO");
+
+  // Todas as guias do lote devem ser do MESMO convênio (TISS exige).
+  const conveniosUsados = [...new Set(sessions.map(s => s.tiss.convenioCode))];
+  if (conveniosUsados.length > 1) {
+    return sendError(res, 400, "MULTIPLOS_CONVENIOS_NO_LOTE", {
+      detail: "TISS exige um lote por convênio. Use o filtro convenioCode no body.",
+      conveniosEncontrados: conveniosUsados
+    });
+  }
+
+  const guiaPayloads = [];
+  for (const s of sessions) {
+    const built = await _buildGuiaPayload(uid, s.sessionId);
+    if (built.error) continue;
+    guiaPayloads.push(built.guia);
+  }
+
+  const convenioCode = conveniosUsados[0];
+  const therapist = await loadTherapist(uid);
+  const convenio = (therapist.tissConvenios || []).find(c => c.code === convenioCode);
+
+  const numeroLote = `LOTE-${ano}${String(mes).padStart(2, "0")}-${Date.now().toString(36).toUpperCase()}`;
+  const { xml, hash, totalGuias } = tiss.buildLoteGuias({
+    sequencialTransacao: `${Date.now()}`,
+    numeroLote,
+    registroAnsOperadora: convenio?.registroAns || "000000",
+    codigoPrestadorNaOperadora: convenio?.numeroContratado,
+    guiasConsulta: guiaPayloads
+  });
+
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${numeroLote}.xml"`);
+  res.setHeader("X-Tiss-Lote-Hash", hash);
+  res.setHeader("X-Tiss-Lote-Total", String(totalGuias));
+  return res.send(xml);
+}));
+
+// POST /therapy/tiss/demonstrativo — recebe arquivo XML de demonstrativo de
+// pagamento (DP) da operadora e atualiza status das guias.
+// Body: { xml: string }. Parser minimalista — não valida assinatura digital
+// nem usa parser XML completo (sax/xml2js); regex pra extrair numeroGuia +
+// status conforme TISS 4.01.00 schema.
+router.post("/therapy/tiss/demonstrativo", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const xml = String(req.body?.xml || "");
+  if (!xml || xml.length < 100) return sendError(res, 400, "XML_INVALIDO");
+  if (xml.length > 5_000_000) return sendError(res, 413, "XML_GRANDE_DEMAIS");
+
+  // Extrai pares (numeroGuiaPrestador, status) do XML.
+  // Status TISS: 1=pago, 2=glosado, 3=pago_parcial. Mapeamos pra:
+  //   1 → "paga"
+  //   2 → "glosada"
+  //   3 → "paga" (parcial é melhor que "em_analise" pra UI)
+  const guiaBlocks = xml.match(/<[^>]*numeroGuiaPrestador[^>]*>[\s\S]*?<\/[^>]+>/g) || [];
+  // Fallback genérico — extrai pares numeroGuia/status varrendo o XML.
+  const regex = /<[^>]*numeroGuiaPrestador[^>]*>([^<]+)<[\s\S]*?<[^>]*statusProtocolo[^>]*>(\d)<\//g;
+  const updates = [];
+  let m;
+  while ((m = regex.exec(xml)) !== null) {
+    const num = m[1].trim();
+    const stCode = m[2];
+    const status = stCode === "1" || stCode === "3" ? "paga" : stCode === "2" ? "glosada" : null;
+    if (!status) continue;
+    updates.push({ numeroGuiaPrestador: num, status });
+  }
+
+  if (updates.length === 0) return sendError(res, 400, "NENHUMA_GUIA_RECONHECIDA");
+
+  const db = getDb();
+  let updated = 0, notFound = 0;
+  for (const u of updates) {
+    // Localiza session com esse numeroGuiaPrestador do prof.
+    const snap = await db.collection("therapy_sessions")
+      .where("therapistUid", "==", uid)
+      .limit(2000).get();
+    const target = snap.docs.find(d => d.data().tiss?.numeroGuiaPrestador === u.numeroGuiaPrestador);
+    if (!target) { notFound++; continue; }
+    const sess = target.data();
+    await target.ref.set({
+      tiss: {
+        ...sess.tiss,
+        status: u.status,
+        dataPagamento: u.status === "paga" ? Date.now() : sess.tiss.dataPagamento,
+        dataGlosa:     u.status === "glosada" ? Date.now() : sess.tiss.dataGlosa
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    updated++;
+  }
+
+  return res.json({ ok: true, processed: updates.length, updated, notFound });
+}));
+
+// ─────────────────────────────────────────────────────────────────────
+// Fase 4 (scaffolding): registry de submitters por convênio.
+// Cada convênio tem sua API/portal próprio — registramos qual submitter
+// usar via código curto. Implementações reais vivem em services/tiss-submitters/.
+// Por enquanto retorna NOT_IMPLEMENTED — credencial real exige credenciamento
+// formal de cada convênio (Unimed, Bradesco, Amil etc.).
+// ─────────────────────────────────────────────────────────────────────
+const TISS_SUBMITTERS = {
+  // Exemplos do que vai aparecer aqui:
+  // "unimed-rio":     require("../services/tiss-submitters/unimed-rio"),
+  // "bradesco-saude": require("../services/tiss-submitters/bradesco"),
+  // "amil":           require("../services/tiss-submitters/amil"),
+  // "sulamerica":     require("../services/tiss-submitters/sulamerica")
+};
+
+router.post("/therapy/tiss/submeter/:convenioCode", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const convenioCode = String(req.params.convenioCode || "").trim().toLowerCase();
+  const submitter = TISS_SUBMITTERS[convenioCode];
+  if (!submitter) {
+    return sendError(res, 501, "SUBMITTER_NAO_IMPLEMENTADO", {
+      detail: "Auto-submit pra esse convênio ainda não foi integrado. Use export XML + portal manual.",
+      convenioCode,
+      submittersDisponiveis: Object.keys(TISS_SUBMITTERS)
+    });
+  }
+  // Quando implementado: submitter.submit({uid, lote, credenciais})
+  return sendError(res, 501, "NAO_IMPLEMENTADO");
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
