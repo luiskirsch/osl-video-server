@@ -200,8 +200,20 @@ async function loadTherapist(uid) {
 function evaluatePlanAccess(therapist) {
   if (!therapist) return { ok: false, reason: "PROFISSIONAL_NAO_REGISTRADO", plano: null };
   const plano = therapist.plano || "trial";
-  if (plano === "student-active" || plano === "pro") {
+  if (plano === "pro") {
     return { ok: true, plano };
+  }
+  // student-active: cron runStudentExpirationTick deveria baixar pra trial
+  // quando studentVerifiedUntil <= now, mas se cron falhar/atrasar, defesa em
+  // profundidade aqui evita uso pos-expiracao.
+  if (plano === "student-active") {
+    const studentUntil = therapist.studentVerifiedUntil?.toMillis
+      ? therapist.studentVerifiedUntil.toMillis()
+      : Number(therapist.studentVerifiedUntil) || 0;
+    if (studentUntil && studentUntil > Date.now()) {
+      return { ok: true, plano };
+    }
+    return { ok: false, reason: "STUDENT_EXPIRADO", plano, studentVerifiedUntil: studentUntil || null };
   }
   const until = therapist.trialUntil?.toMillis ? therapist.trialUntil.toMillis() : Number(therapist.trialUntil) || 0;
   if (until && until > Date.now()) {
@@ -1610,7 +1622,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       therapistName: therapist.displayName || "seu profissional",
       scheduledAt: created[0].scheduledAt || Date.now(),
       joinUrl: buildPatientJoinUrl(firstJoinToken),
-      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token),
+      minCancelHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
     });
     sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(e =>
       logError("therapy_confirmation_email_failed", e, { sessionId: created[0].sessionId })
@@ -6827,7 +6840,8 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
       therapistName: therapist.displayName || "seu profissional",
       scheduledAt: reqData.requestedSlot,
       joinUrl: buildPatientJoinUrl(joinToken),
-      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token),
+      minCancelHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
     });
     sendEmail({ to: reqData.patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(e =>
       logError("scheduling_request_approval_email_failed", e, { requestId, sessionId: sId })
@@ -8595,6 +8609,29 @@ Se você recebeu, o canal está funcionando corretamente. Não é necessário re
 // (número é só de envio + ligação telefônica pra contato). Mas registramos
 // mensagens recebidas pra audit/debug. Sem ação automatizada por enquanto.
 router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
+  // Auth via token compartilhado (ZAPI_WEBHOOK_SECRET) — Z-API configura
+  // como query string. Sem secret configurado, rejeita silenciosamente (evita
+  // que qualquer um POST encha logs/audit). Comparacao timing-safe.
+  const ZAPI_WEBHOOK_SECRET = String(process.env.ZAPI_WEBHOOK_SECRET || "").trim();
+  if (!ZAPI_WEBHOOK_SECRET) {
+    // Modo permissivo durante setup inicial. Loga warn. Pra producao, setar
+    // ZAPI_WEBHOOK_SECRET no Railway + adicionar `?token=X` na URL do
+    // webhook no painel Z-API.
+    logWarn("zapi_webhook_no_secret_configured");
+  } else {
+    const tokenIn = String(req.query?.token || "").trim();
+    let tokenOk = false;
+    if (tokenIn.length === ZAPI_WEBHOOK_SECRET.length) {
+      try {
+        tokenOk = crypto.timingSafeEqual(Buffer.from(tokenIn), Buffer.from(ZAPI_WEBHOOK_SECRET));
+      } catch { tokenOk = false; }
+    }
+    if (!tokenOk) {
+      logWarn("zapi_webhook_token_invalido", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress });
+      return res.status(401).json({ ok: false });
+    }
+  }
+
   // Z-API envia múltiplos tipos de evento: ReceivedCallback, MessageStatusCallback,
   // ConnectionUpdate, etc. Logamos tudo pra observabilidade inicial.
   const type = req.body?.type || req.body?.event || "unknown";
@@ -10383,9 +10420,18 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
   const before = Number(req.query?.before) || Date.now();
   const limit  = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
+  // OrderBy createdAt desc com startAfter — pagina cursored em vez de
+  // grab-and-sort. Antes: .limit(500) sem orderBy pegava ordem natural do
+  // Firestore (pseudo-random pelo doc ID = crypto.randomBytes), threads
+  // com >500 msgs perdiam paginacao. Agora: indice composto (threadId asc,
+  // createdAt desc) requerido. Firestore vai dar erro indicando o link
+  // pra criar — clicar gera o indice automaticamente.
   const msgSnap = await db.collection("therapy_messages")
     .where("threadId", "==", threadId)
-    .limit(500).get();
+    .where("createdAt", "<", new Date(before))
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
 
   const messages = msgSnap.docs
     .map(d => {
@@ -10400,9 +10446,8 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
         createdAt: ts
       };
     })
-    .filter(m => m.createdAt < before)
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .slice(-limit);
+    // Reverte pra ordem cronologica (asc) pra UI renderizar normal.
+    .sort((a, b) => a.createdAt - b.createdAt);
 
   return res.json({ ok: true, messages });
 }));

@@ -82,16 +82,28 @@ EMAIL_FROM=Espaço Prelúdio <nao-responda@espacopreludio.com>
 
 Sem isso: ninguém paga, todos ficam em trial pra sempre.
 
-- [mercadopago.com.br/developers](https://www.mercadopago.com.br/developers) → suas aplicações → criar
-- Access token de produção
-- Configurar webhook: `https://osl-video-server-staging.up.railway.app/webhooks/mercadopago`
-- Eventos: `payment` + `subscription_preapproval`
+Duas aplicações MP, uma por produto. Cada uma com webhook próprio:
+
+**Prelúdio Jogos (pagamento único do jogo):**
+- App MP "Prelúdio Jogos" em [mercadopago.com.br/developers](https://www.mercadopago.com.br/developers)
+- Webhook: `https://osl-video-server-staging.up.railway.app/webhook`
+- Eventos: `payment`
+- (URL configurada automaticamente via API quando criar preference, mas pode setar manual no painel pra redundância)
+
+**Espaço Prelúdio (assinatura recorrente):**
+- App MP "Espaco Preludio" — separada da app de jogo
+- Webhook: `https://osl-video-server-staging.up.railway.app/therapy/webhook/mp`
+- Eventos: `Planos e assinaturas` (`preapproval` / `subscription_preapproval`)
 
 ```
-MP_ACCESS_TOKEN=APP_USR-xxxxxxxxxxxxxxxxx
-MP_WEBHOOK_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+MP_ACCESS_TOKEN_JOGO=APP_USR-xxxxxxxxxxxxxxxxx
+MP_WEBHOOK_SECRET_JOGO=...
+MP_ACCESS_TOKEN_THERAPY=APP_USR-yyyyyyyyyyyyyyyyy
+MP_WEBHOOK_SECRET_THERAPY=...
 MP_WEBHOOK_REQUIRE_SIG=true
 ```
+
+Fallback: se `MP_ACCESS_TOKEN_X`/`MP_WEBHOOK_SECRET_X` específicos não estiverem setados, o backend cai pra `MP_ACCESS_TOKEN`/`MP_WEBHOOK_SECRET` genéricos (legado).
 
 ### 6. S3 ou Cloudflare R2 (uploads + recibos)
 

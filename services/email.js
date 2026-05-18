@@ -252,9 +252,15 @@ function templateSchedulingRequest({ therapistName, patientName, patientEmail, p
   return { subject, html, text };
 }
 
-function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl }) {
+function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl, cancelUrl, minCancelHours }) {
   const subject = `Sua consulta com ${therapistName} foi agendada`;
   const when = fmtDateTimePtBR(scheduledAt);
+  // Default 24h se nao passado (compat com chamadores antigos). Backend
+  // que chama deve passar THERAPY_MIN_CANCEL_HOURS_PATIENT do config.
+  const hours = Number.isFinite(Number(minCancelHours)) && Number(minCancelHours) > 0
+    ? Math.round(Number(minCancelHours))
+    : 24;
+  const hoursLabel = hours === 24 ? "24h" : `${hours}h`;
   const html = renderShell({
     heading: "Consulta agendada",
     bodyHtml: `
@@ -263,11 +269,11 @@ function templateConfirmation({ patientName, therapistName, scheduledAt, joinUrl
       <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-weight:500;">${escHtml(when)}</p>
       <p style="margin:0 0 20px;">No horário, entre na sessão por este link:</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(joinUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Entrar na consulta</a></p>
-      ${cancelUrl ? `<p style="margin:0 0 8px; font-size:13px; color:rgba(28,31,29,0.65);">Precisa cancelar? <a href="${escHtml(cancelUrl)}" style="color:rgba(28,31,29,0.65);">Use este link</a> com pelo menos 24h de antecedência.</p>` : ""}
+      ${cancelUrl ? `<p style="margin:0 0 8px; font-size:13px; color:rgba(28,31,29,0.65);">Precisa cancelar? <a href="${escHtml(cancelUrl)}" style="color:rgba(28,31,29,0.65);">Use este link</a> com pelo menos ${escHtml(hoursLabel)} de antecedência.</p>` : ""}
     `,
     footer: "Você recebeu este e-mail porque foi marcada uma consulta para você no Espaço Prelúdio. Se isso não foi você, ignore."
   });
-  const text = `Olá ${patientName},\n\nSua consulta com ${therapistName} foi marcada para ${when}.\n\nLink para entrar: ${joinUrl}\n${cancelUrl ? `Cancelar: ${cancelUrl} (com 24h de antecedência)\n` : ""}\nEspaço Prelúdio`;
+  const text = `Olá ${patientName},\n\nSua consulta com ${therapistName} foi marcada para ${when}.\n\nLink para entrar: ${joinUrl}\n${cancelUrl ? `Cancelar: ${cancelUrl} (com ${hoursLabel} de antecedência)\n` : ""}\nEspaço Prelúdio`;
   return { subject, html, text };
 }
 

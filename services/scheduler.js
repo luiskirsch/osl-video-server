@@ -77,26 +77,24 @@ async function runReminderTick() {
     .limit(500)
     .get();
 
+  // Idempotencia por canal: emailReminderSentAt / waReminderSentAt.
+  // Legacy `reminderSentAt` (sem granularidade) ainda eh respeitado pra
+  // skip — docs antigos foram marcados com ele e nao devem reenviar.
+  // Cada canal marca seu proprio campo APENAS quando o envio sucede,
+  // evitando o bug anterior de "WA enviado, email falhou, reverte tudo,
+  // proximo tick reenvia WA duplicado".
   let candidates = 0, sent = 0, errors = 0, waSent = 0;
   for (const doc of snap.docs) {
     const s = doc.data();
     const at = Number(s.scheduledAt || 0);
     if (!at || at <= lookaheadStart || at > lookaheadEnd) continue;
-    if (s.reminderSentAt) continue;
-    // Sem nenhum canal de contato (email NEM phone) → no-op
+    if (s.reminderSentAt) continue; // legacy — sessoes marcadas antes da refatoracao
     if (!s.patientEmail && !s.patientPhone) continue;
-    candidates++;
 
-    // Marca antes de enviar pra evitar duplicação se este tick crashar.
-    try {
-      await doc.ref.set({
-        reminderSentAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-    } catch (e) {
-      logError("reminder_mark_failed", e, { sessionId: s.sessionId });
-      errors++;
-      continue;
-    }
+    const emailNeeded = !!s.patientEmail && !s.emailReminderSentAt;
+    const waNeeded    = !!s.patientPhone && !s.waReminderSentAt;
+    if (!emailNeeded && !waNeeded) continue;
+    candidates++;
 
     const joinToken    = buildJoinTokenForSession(s);
     const cancelToken  = buildCancelTokenForSession(s.sessionId);
@@ -105,9 +103,10 @@ async function runReminderTick() {
     const cancelUrl  = buildCancelUrl(cancelToken);
     const confirmUrl = buildConfirmUrl(confirmToken);
 
-    // E-mail (canal primário, mais antigo).
-    let emailOk = false;
-    if (s.patientEmail) {
+    let anySent = false;
+
+    // E-mail (canal primario).
+    if (emailNeeded) {
       try {
         const tpl = templateReminder({
           patientName: s.patientName || "Paciente",
@@ -116,18 +115,21 @@ async function runReminderTick() {
           joinUrl, cancelUrl, confirmUrl
         });
         const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
-        emailOk = result.ok || result.skipped;
-        if (!emailOk) errors++;
+        if (result.ok || result.skipped) {
+          await doc.ref.set({ emailReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          sent++;
+          anySent = true;
+        } else {
+          errors++;
+        }
       } catch (e) {
         logError("reminder_email_failed", e, { sessionId: s.sessionId });
+        errors++;
       }
-    } else {
-      emailOk = true; // no-op não conta como erro
     }
 
-    // WhatsApp (canal secundário). Só envia se o therapist tem
-    // whatsappConfig.enabled — busca lazy do doc.
-    if (s.patientPhone) {
+    // WhatsApp (canal secundario). So envia se therapist tem whatsappConfig.enabled.
+    if (waNeeded) {
       try {
         const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
         const therapist = tsnap.exists ? tsnap.data() : null;
@@ -137,23 +139,26 @@ async function runReminderTick() {
             scheduledAt: at
           };
           const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
-          if (r.ok) waSent++;
+          if (r.ok) {
+            await doc.ref.set({ waReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            waSent++;
+            anySent = true;
+          }
         }
       } catch (e) {
         logError("reminder_wa_failed", e, { sessionId: s.sessionId });
       }
     }
 
-    // Se nenhum canal funcionou (e tinha algum pra tentar), reverte
-    // reminderSentAt pra retry. Caso contrário, conta como enviado.
-    if (!emailOk && !s.patientEmail) {
-      // não tinha email, não tinha como falhar nele
+    // Marca o legacy reminderSentAt como espelho — se algum canal sucedeu, evita
+    // que outros consumidores que ainda checam o campo legado reprocesse.
+    if (anySent) {
+      try {
+        await doc.ref.set({ reminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      } catch (e) {
+        logError("reminder_legacy_mark_failed", e, { sessionId: s.sessionId });
+      }
     }
-    if (!emailOk && s.patientEmail) {
-      await doc.ref.set({ reminderSentAt: null }, { merge: true });
-      continue;
-    }
-    sent++;
   }
 
   if (candidates > 0 || errors > 0) {
@@ -186,24 +191,19 @@ async function runReminder1hTick() {
     .limit(500)
     .get();
 
+  // Mesma logica de canais separados do reminder T-24h (ver acima).
   let candidates = 0, sent = 0, errors = 0, waSent = 0;
   for (const doc of snap.docs) {
     const s = doc.data();
     const at = Number(s.scheduledAt || 0);
     if (!at || at <= windowStart || at > windowEnd) continue;
-    if (s.reminder1hSentAt) continue;
+    if (s.reminder1hSentAt) continue; // legacy
     if (!s.patientEmail && !s.patientPhone) continue;
-    candidates++;
 
-    try {
-      await doc.ref.set({
-        reminder1hSentAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-    } catch (e) {
-      logError("reminder_1h_mark_failed", e, { sessionId: s.sessionId });
-      errors++;
-      continue;
-    }
+    const emailNeeded = !!s.patientEmail && !s.emailReminder1hSentAt;
+    const waNeeded    = !!s.patientPhone && !s.waReminder1hSentAt;
+    if (!emailNeeded && !waNeeded) continue;
+    candidates++;
 
     const joinToken    = buildJoinTokenForSession(s);
     const cancelToken  = buildCancelTokenForSession(s.sessionId);
@@ -212,8 +212,9 @@ async function runReminder1hTick() {
     const cancelUrl  = buildCancelUrl(cancelToken);
     const confirmUrl = buildConfirmUrl(confirmToken);
 
-    let emailOk = false;
-    if (s.patientEmail) {
+    let anySent = false;
+
+    if (emailNeeded) {
       try {
         const tpl = templateReminder({
           patientName: s.patientName || "Paciente",
@@ -222,16 +223,20 @@ async function runReminder1hTick() {
           joinUrl, cancelUrl, confirmUrl
         });
         const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
-        emailOk = result.ok || result.skipped;
-        if (!emailOk) errors++;
+        if (result.ok || result.skipped) {
+          await doc.ref.set({ emailReminder1hSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          sent++;
+          anySent = true;
+        } else {
+          errors++;
+        }
       } catch (e) {
         logError("reminder_1h_email_failed", e, { sessionId: s.sessionId });
+        errors++;
       }
-    } else {
-      emailOk = true;
     }
 
-    if (s.patientPhone) {
+    if (waNeeded) {
       try {
         const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
         const therapist = tsnap.exists ? tsnap.data() : null;
@@ -241,18 +246,24 @@ async function runReminder1hTick() {
             scheduledAt: at
           };
           const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
-          if (r.ok) waSent++;
+          if (r.ok) {
+            await doc.ref.set({ waReminder1hSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            waSent++;
+            anySent = true;
+          }
         }
       } catch (e) {
         logError("reminder_1h_wa_failed", e, { sessionId: s.sessionId });
       }
     }
 
-    if (!emailOk && s.patientEmail) {
-      await doc.ref.set({ reminder1hSentAt: null }, { merge: true });
-      continue;
+    if (anySent) {
+      try {
+        await doc.ref.set({ reminder1hSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      } catch (e) {
+        logError("reminder_1h_legacy_mark_failed", e, { sessionId: s.sessionId });
+      }
     }
-    sent++;
   }
 
   if (candidates > 0 || errors > 0) {
@@ -453,14 +464,21 @@ async function runNpsTick() {
 
 const BIRTHDAY_TARGET_HOUR_BRT = 9; // hora local brasileira de envio
 const BIRTHDAY_TARGET_HOUR_UTC = 12; // ~9h BRT (sem DST no Brasil desde 2019)
+// Janela de 3h pra dispararar — protege contra outage/restart do scheduler
+// na hora exata. Idempotencia via lastSentAt+todayYMD evita reenvio.
+const BIRTHDAY_TARGET_WINDOW_HOURS = 3;
 
 async function runBirthdayTick() {
   const db = getDb();
   if (!db) return;
 
   const now = new Date();
-  // Só dispara na "janela" da hora alvo. Outros ticks do dia passam batido.
-  if (now.getUTCHours() !== BIRTHDAY_TARGET_HOUR_UTC) return;
+  // Janela 12-15 UTC (~9-12 BRT). Antes era so a hora 12 — se cron parasse
+  // de rodar entre 12:00 e 12:59 UTC (restart, deploy, Railway sleep), o
+  // aniversario do dia era perdido. Idempotencia de envio fica no
+  // lastSentAt+todayYMD logo abaixo.
+  const hour = now.getUTCHours();
+  if (hour < BIRTHDAY_TARGET_HOUR_UTC || hour >= BIRTHDAY_TARGET_HOUR_UTC + BIRTHDAY_TARGET_WINDOW_HOURS) return;
 
   const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(now.getUTCDate()).padStart(2, "0");
