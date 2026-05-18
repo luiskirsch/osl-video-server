@@ -9755,35 +9755,205 @@ router.post("/therapy/tiss/demonstrativo", asyncHandler(async (req, res) => {
 }));
 
 // ─────────────────────────────────────────────────────────────────────
-// Fase 4 (scaffolding): registry de submitters por convênio.
+// Fase 4: registry de submitters por convênio.
 // Cada convênio tem sua API/portal próprio — registramos qual submitter
-// usar via código curto. Implementações reais vivem em services/tiss-submitters/.
-// Por enquanto retorna NOT_IMPLEMENTED — credencial real exige credenciamento
-// formal de cada convênio (Unimed, Bradesco, Amil etc.).
+// usar via convenioCode (slug definido pelo profissional ao cadastrar
+// convênio aceito). Implementações vivem em services/tiss-submitters/.
+//
+// Pra adicionar novo convênio:
+//   1. Crie services/tiss-submitters/<nome>.js extendendo TissSubmitterBase
+//   2. Adicione entry no TISS_SUBMITTERS abaixo
+//   3. Frontend mostra botão "Enviar pro convênio" automaticamente via
+//      GET /tiss/submitters
 // ─────────────────────────────────────────────────────────────────────
-const TISS_SUBMITTERS = {
-  // Exemplos do que vai aparecer aqui:
-  // "unimed-rio":     require("../services/tiss-submitters/unimed-rio"),
-  // "bradesco-saude": require("../services/tiss-submitters/bradesco"),
-  // "amil":           require("../services/tiss-submitters/amil"),
-  // "sulamerica":     require("../services/tiss-submitters/sulamerica")
-};
+const { TissMockSubmitter } = require("../services/tiss-submitters/_mock");
+const TissSigner = require("../services/tiss-submitters/_signer");
 
+const TISS_SUBMITTERS = {};
+
+// Mock — só liga se env explícita. Útil enquanto profissional não tem cert/credenciais.
+if (String(process.env.TISS_MOCK_ENABLED || "").trim() === "1") {
+  TISS_SUBMITTERS["mock"] = TissMockSubmitter;
+}
+
+// Quando primeira integração real chegar (após credenciamento + cert sandbox):
+//   const { TissBradescoSubmitter } = require("../services/tiss-submitters/bradesco");
+//   TISS_SUBMITTERS["bradesco"] = TissBradescoSubmitter;
+//   const { TissUnimedPoaSubmitter } = require("../services/tiss-submitters/unimed-poa");
+//   TISS_SUBMITTERS["unimed-poa"] = TissUnimedPoaSubmitter;
+
+/**
+ * Resolve submitter pelo convenioCode do prof.
+ * convenioCode pode ser exato (ex "bradesco") ou prefixo (ex "unimed-poa"
+ * casa com "unimed-poa" mas não com "unimed-rio").
+ */
+function _resolveSubmitter(convenioCode) {
+  if (!convenioCode) return null;
+  const Cls = TISS_SUBMITTERS[convenioCode];
+  return Cls || null;
+}
+
+// GET /therapy/tiss/submitters — lista os convenioCodes que TÊM submitter
+// auto-submit implementado. Frontend usa pra mostrar botão "Enviar pro
+// convênio" só quando houver implementação.
+router.get("/therapy/tiss/submitters", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const items = Object.entries(TISS_SUBMITTERS).map(([code, Cls]) => {
+    const inst = new Cls({});
+    return {
+      convenioCode: code,
+      displayName: inst.displayName,
+      tissVersion: inst.tissVersion,
+      requiresSignature: inst.requiresSignature
+    };
+  });
+  return res.json({ ok: true, submitters: items });
+}));
+
+// POST /therapy/tiss/submeter/:convenioCode
+// Body: { ano, mes, status?, certPfxBase64?, certPassword?, sandboxMode? }
+//
+// Fluxo:
+//   1. Resolve submitter pelo convenioCode
+//   2. Gera lote (reusa lógica de POST /tiss/lote)
+//   3. Se submitter.requiresSignature, assina XML com A1 cert
+//   4. Submitter.submitLote(...) → retorna protocolo
+//   5. Atualiza status das guias (rascunho → enviada) + grava protocolo
+//
+// Cert NUNCA é persistido — vem no body, usa e descarta.
 router.post("/therapy/tiss/submeter/:convenioCode", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
   const convenioCode = String(req.params.convenioCode || "").trim().toLowerCase();
-  const submitter = TISS_SUBMITTERS[convenioCode];
-  if (!submitter) {
+
+  const SubmitterCls = _resolveSubmitter(convenioCode);
+  if (!SubmitterCls) {
     return sendError(res, 501, "SUBMITTER_NAO_IMPLEMENTADO", {
       detail: "Auto-submit pra esse convênio ainda não foi integrado. Use export XML + portal manual.",
       convenioCode,
       submittersDisponiveis: Object.keys(TISS_SUBMITTERS)
     });
   }
-  // Quando implementado: submitter.submit({uid, lote, credenciais})
-  return sendError(res, 501, "NAO_IMPLEMENTADO");
+
+  const ano = Number(req.body?.ano);
+  const mes = Number(req.body?.mes);
+  if (!Number.isInteger(ano) || !Number.isInteger(mes) || mes < 1 || mes > 12) {
+    return sendError(res, 400, "ANO_MES_INVALIDO");
+  }
+
+  // Reutiliza logica de filtragem do POST /tiss/lote.
+  const start = new Date(Date.UTC(ano, mes - 1, 1)).getTime();
+  const end   = new Date(Date.UTC(ano, mes, 1)).getTime();
+  const wantStatus = String(req.body?.status || "rascunho").trim().toLowerCase();
+
+  const db = getDb();
+  const snap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("scheduledAt", ">=", start)
+    .where("scheduledAt", "<", end)
+    .limit(2000).get();
+
+  const sessions = snap.docs
+    .map(d => ({ sessionId: d.id, ...d.data() }))
+    .filter(s => !!s.tiss?.numeroGuiaPrestador)
+    .filter(s => s.tiss.status === wantStatus)
+    .filter(s => s.tiss.convenioCode === convenioCode);
+
+  if (sessions.length === 0) return sendError(res, 404, "NENHUMA_GUIA_NO_PERIODO");
+
+  const guiaPayloads = [];
+  for (const s of sessions) {
+    const built = await _buildGuiaPayload(uid, s.sessionId);
+    if (built.error) continue;
+    guiaPayloads.push(built.guia);
+  }
+
+  const therapist = await loadTherapist(uid);
+  const convenio = (therapist.tissConvenios || []).find(c => c.code === convenioCode);
+
+  const numeroLote = `LOTE-${ano}${String(mes).padStart(2,"0")}-${Date.now().toString(36).toUpperCase()}`;
+  const { xml, hash, totalGuias } = tiss.buildLoteGuias({
+    sequencialTransacao: `${Date.now()}`,
+    numeroLote,
+    registroAnsOperadora: convenio?.registroAns || "000000",
+    codigoPrestadorNaOperadora: convenio?.numeroContratado,
+    guiasConsulta: guiaPayloads
+  });
+
+  // Instancia submitter com config vinda do prof (cert + sandboxMode)
+  const submitter = new SubmitterCls({
+    certPfx: req.body?.certPfxBase64 ? Buffer.from(req.body.certPfxBase64, "base64") : null,
+    certPassword: req.body?.certPassword || "",
+    sandboxMode: req.body?.sandboxMode !== false,
+    codigoPrestador: convenio?.numeroContratado,
+    convenio
+  });
+
+  try { submitter.validateConfig(); }
+  catch (e) { return sendError(res, 400, "CONFIG_SUBMITTER_INVALIDA", { detail: e.message }); }
+
+  // Assina XML se submitter exigir
+  let xmlFinal = xml;
+  if (submitter.requiresSignature) {
+    if (!req.body?.certPfxBase64) return sendError(res, 400, "CERT_PFX_OBRIGATORIO");
+    try {
+      const certBuffer = Buffer.from(req.body.certPfxBase64, "base64");
+      const { xmlAssinado } = TissSigner.signTissXml(xmlFinal, certBuffer, req.body.certPassword || "");
+      xmlFinal = xmlAssinado;
+    } catch (e) {
+      logError("tiss_xml_sign_failed", e, { uid, convenioCode });
+      return sendError(res, 400, "XML_ASSINATURA_FALHOU", { detail: e.message });
+    }
+  }
+
+  // Submete
+  let result;
+  try {
+    result = await submitter.submitLote({ xml: xmlFinal, hash, totalGuias, numeroLote });
+  } catch (e) {
+    logError("tiss_submit_failed", e, { uid, convenioCode });
+    return sendError(res, 502, "SUBMITTER_FALHOU", { detail: e.message });
+  }
+
+  if (!result?.ok) {
+    return sendError(res, 502, result?.error || "SUBMITTER_RETORNOU_ERRO", { detail: result?.detail || null });
+  }
+
+  // Sucesso: atualiza guias pra "enviada" + grava protocolo + numeroGuiaOperadora se veio
+  const protocolo = result.protocolo || null;
+  const guiaMap = result.numeroGuiaOperadoraMap || {};
+  for (const s of sessions) {
+    const num = s.tiss.numeroGuiaPrestador;
+    await db.collection("therapy_sessions").doc(s.sessionId).set({
+      tiss: {
+        ...s.tiss,
+        status: "enviada",
+        dataEnvio: Date.now(),
+        protocoloOperadora: protocolo,
+        numeroGuiaOperadora: guiaMap[num] || s.tiss.numeroGuiaOperadora || null
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+
+  await logAudit({
+    type: "tiss_lote_submitted",
+    therapistUid: uid,
+    convenioCode,
+    numeroLote,
+    totalGuias,
+    protocolo
+  });
+
+  return res.json({
+    ok: true,
+    protocolo,
+    numeroLote,
+    totalGuias,
+    mensagem: result.mensagem || null
+  });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
