@@ -11371,4 +11371,267 @@ router.get("/therapy/chat/peers", asyncHandler(async (req, res) => {
   return res.json({ ok: true, peers });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// PRO-CHAT — Chat E2EE entre dois profissionais.
+//
+// Schema: therapy_pro_threads/{threadId}
+//   { threadId, participantA, participantB (uids sorted lex pra dedup),
+//     threadKeyForA, threadKeyForB,           // {ciphertext, iv} cada
+//     creatorEcdhPublicJwkSnapshot,
+//     displayNameA, displayNameB,
+//     createdAt, createdBy,
+//     lastMessageAt, lastMessageSenderUid,
+//     lastReadByA, lastReadByB }
+//
+// Mensagens: therapy_pro_messages/{messageId}
+//   { messageId, threadId, senderUid, ciphertext, iv, createdAt }
+//
+// Dedup de thread: (participantA, participantB) sorted asc — qualquer
+// dos dois iniciando entre A↔B retorna mesma thread.
+// ═════════════════════════════════════════════════════════════════════════
+
+function _sortUids(u1, u2) {
+  return u1 < u2 ? [u1, u2] : [u2, u1];
+}
+
+// POST /therapy/pro-chat/threads
+// Body: { peerUid, threadKeyForCreator, threadKeyForPeer, creatorEcdhPublicJwk }
+router.post("/therapy/pro-chat/threads", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const peerUid = String(req.body?.peerUid || "").trim();
+  if (!peerUid || peerUid === uid) return sendError(res, 400, "PEER_INVALIDO");
+
+  // Ambos precisam ser therapists
+  const [me, peer] = await Promise.all([loadTherapist(uid), loadTherapist(peerUid)]);
+  if (!me)   return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!peer) return sendError(res, 404, "PEER_NAO_PROFISSIONAL");
+
+  const tForCreator = req.body?.threadKeyForCreator;
+  const tForPeer    = req.body?.threadKeyForPeer;
+  const creatorPub  = req.body?.creatorEcdhPublicJwk;
+  if (!tForCreator?.ciphertext || !tForCreator?.iv) return sendError(res, 400, "THREAD_KEY_CREATOR_INVALIDA");
+  if (!tForPeer?.ciphertext    || !tForPeer?.iv)    return sendError(res, 400, "THREAD_KEY_PEER_INVALIDA");
+  if (!creatorPub || !creatorPub.x) return sendError(res, 400, "CREATOR_PUBKEY_INVALIDA");
+
+  const [participantA, participantB] = _sortUids(uid, peerUid);
+  const isCreatorA = uid === participantA;
+
+  const db = getDb();
+  const existing = await db.collection("therapy_pro_threads")
+    .where("participantA", "==", participantA)
+    .where("participantB", "==", participantB)
+    .limit(1).get();
+  if (!existing.empty) {
+    return res.json({ ok: true, threadId: existing.docs[0].id, existed: true });
+  }
+
+  const threadId = newId("pro-thr");
+  await db.collection("therapy_pro_threads").doc(threadId).set({
+    threadId,
+    participantA,
+    participantB,
+    displayNameA: (isCreatorA ? me : peer).displayName || "",
+    displayNameB: (isCreatorA ? peer : me).displayName || "",
+    threadKeyForA: isCreatorA ? tForCreator : tForPeer,
+    threadKeyForB: isCreatorA ? tForPeer    : tForCreator,
+    creatorEcdhPublicJwkSnapshot: creatorPub,
+    createdBy: uid,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastMessageAt: null,
+    lastMessageSenderUid: null,
+    lastReadByA: Date.now(),
+    lastReadByB: Date.now()
+  });
+
+  await logAudit({ type: "pro_chat_thread_created", threadId, participantA, participantB, createdBy: uid });
+  return res.json({ ok: true, threadId, existed: false });
+}));
+
+// GET /therapy/pro-chat/threads — lista threads do prof (com unread counts)
+router.get("/therapy/pro-chat/threads", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const [snapA, snapB] = await Promise.all([
+    db.collection("therapy_pro_threads").where("participantA", "==", uid).limit(500).get(),
+    db.collection("therapy_pro_threads").where("participantB", "==", uid).limit(500).get()
+  ]);
+
+  const docs = [...snapA.docs, ...snapB.docs];
+  const threads = docs.map(d => {
+    const t = d.data();
+    const meIsA = t.participantA === uid;
+    const peerUid = meIsA ? t.participantB : t.participantA;
+    const peerName = meIsA ? t.displayNameB : t.displayNameA;
+    const lastRead = meIsA ? t.lastReadByA : t.lastReadByB;
+    const lastMsg = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : Number(t.lastMessageAt) || 0;
+    return {
+      threadId: t.threadId,
+      peerUid,
+      peerName,
+      lastMessageAt: lastMsg || null,
+      lastMessageSenderUid: t.lastMessageSenderUid || null,
+      hasUnread: lastMsg > (lastRead || 0) && t.lastMessageSenderUid !== uid,
+      myWrappedThreadKey: meIsA ? t.threadKeyForA : t.threadKeyForB,
+      peerEcdhPublicJwkSnapshot: t.createdBy === uid ? null : t.creatorEcdhPublicJwkSnapshot
+    };
+  }).sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+
+  return res.json({ ok: true, threads });
+}));
+
+// GET /therapy/pro-chat/threads/:id — detalhe da thread
+router.get("/therapy/pro-chat/threads/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const snap = await getDb().collection("therapy_pro_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const meIsA = t.participantA === uid;
+  return res.json({
+    ok: true,
+    thread: {
+      threadId: t.threadId,
+      peerUid: meIsA ? t.participantB : t.participantA,
+      peerName: meIsA ? t.displayNameB : t.displayNameA,
+      myWrappedThreadKey: meIsA ? t.threadKeyForA : t.threadKeyForB,
+      peerEcdhPublicJwkSnapshot: t.createdBy === uid ? null : t.creatorEcdhPublicJwkSnapshot,
+      lastReadByMe: meIsA ? t.lastReadByA : t.lastReadByB
+    }
+  });
+}));
+
+// GET /therapy/pro-chat/threads/:id/messages?before=ms&limit=50
+router.get("/therapy/pro-chat/threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const before = Number(req.query?.before) || Date.now() + 1;
+  const limit = Math.min(Number(req.query?.limit) || 50, 200);
+
+  const db = getDb();
+  const snap = await db.collection("therapy_pro_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const msgs = await db.collection("therapy_pro_messages")
+    .where("threadId", "==", threadId)
+    .where("createdAt", "<", before)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+
+  const items = msgs.docs.map(d => {
+    const m = d.data();
+    return {
+      messageId: m.messageId,
+      senderUid: m.senderUid,
+      ciphertext: m.ciphertext,
+      iv: m.iv,
+      createdAt: m.createdAt?.toMillis ? m.createdAt.toMillis() : Number(m.createdAt) || null
+    };
+  }).reverse();
+  return res.json({ ok: true, messages: items });
+}));
+
+// POST /therapy/pro-chat/threads/:id/messages — envia mensagem
+// Body: { ciphertext, iv }
+router.post("/therapy/pro-chat/threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const ciphertext = String(req.body?.ciphertext || "").trim();
+  const iv = String(req.body?.iv || "").trim();
+  if (!ciphertext || !iv) return sendError(res, 400, "MENSAGEM_INVALIDA");
+  if (ciphertext.length > 50_000) return sendError(res, 413, "MENSAGEM_GRANDE_DEMAIS");
+
+  const db = getDb();
+  const tref = db.collection("therapy_pro_threads").doc(threadId);
+  const tsnap = await tref.get();
+  if (!tsnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = tsnap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const messageId = newId("pro-msg");
+  const now = Date.now();
+  await db.collection("therapy_pro_messages").doc(messageId).set({
+    messageId,
+    threadId,
+    senderUid: uid,
+    ciphertext,
+    iv,
+    createdAt: now
+  });
+  await tref.set({
+    lastMessageAt: now,
+    lastMessageSenderUid: uid
+  }, { merge: true });
+  return res.json({ ok: true, messageId, createdAt: now });
+}));
+
+// POST /therapy/pro-chat/threads/:id/marcar-lido — atualiza lastReadByMe
+router.post("/therapy/pro-chat/threads/:id/marcar-lido", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const until = Number(req.body?.until) || Date.now();
+  const tref = getDb().collection("therapy_pro_threads").doc(threadId);
+  const tsnap = await tref.get();
+  if (!tsnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = tsnap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const meIsA = t.participantA === uid;
+  await tref.set(meIsA ? { lastReadByA: until } : { lastReadByB: until }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/pro-chat/buscar?q=... — busca profissionais por nome ou CRP/CRM.
+// Limite intencional: só retorna profissionais com verificationStatus="verified"
+// (selo da equipe) — evita spam de contas novas/falsas.
+router.get("/therapy/pro-chat/buscar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const q = String(req.query?.q || "").trim().toLowerCase();
+  if (q.length < 3) return sendError(res, 400, "QUERY_CURTA_DEMAIS", { detail: "Digite ao menos 3 caracteres." });
+
+  // Firestore não tem full-text — busca por prefix em displayName + match exato
+  // de CRP/CRM. Volume baixo (~thousands of therapists), client-filter OK.
+  const db = getDb();
+  const snap = await db.collection("therapists")
+    .where("verificationStatus", "==", "verified")
+    .limit(500).get();
+
+  const items = snap.docs
+    .map(d => ({ uid: d.id, ...d.data() }))
+    .filter(t => t.uid !== uid) // exclui o próprio
+    .filter(t => {
+      const name = (t.displayName || "").toLowerCase();
+      const crp = (t.crp || "").toLowerCase();
+      const crm = (t.crm || "").toLowerCase();
+      return name.includes(q) || crp.includes(q) || crm.includes(q);
+    })
+    .slice(0, 20)
+    .map(t => ({
+      uid: t.uid,
+      displayName: t.displayName || "",
+      crp: t.crp || "",
+      crm: t.crm || "",
+      especialidade: t.especialidade || ""
+    }));
+
+  return res.json({ ok: true, items });
+}));
+
 module.exports = router;
