@@ -112,6 +112,7 @@ const {
   templateEscalaEnviada, templateEscalaRespondida,
   templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
+  templateClinicInvite,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
@@ -8091,6 +8092,18 @@ router.post("/therapy/clinicas/:id/membros", asyncHandler(async (req, res) => {
   });
 
   await logAudit({ type: "clinic_member_invited", clinicId, memberId, invitedEmail, by: uid });
+
+  // Email de convite (fire-and-forget — falha de envio nao bloqueia convite).
+  try {
+    const ownerName  = ownerSnap.exists ? (ownerSnap.data().displayName || "Profissional") : "Profissional";
+    const clinicName = csnap.data().name || "Clínica";
+    const acceptUrl  = `${THERAPY_FRONTEND_BASE}/painel.html?convite=${encodeURIComponent(memberId)}`;
+    const tpl = templateClinicInvite({ ownerName, clinicName, invitedEmail, repasseRule, acceptUrl });
+    sendEmail({ to: invitedEmail, ...tpl }).catch(err => logWarn("clinic_invite_email_failed", { memberId, error: err.message }));
+  } catch (e) {
+    logWarn("clinic_invite_email_template_error", { memberId, error: e.message });
+  }
+
   return res.json({ ok: true, memberId, therapistUidResolvido: !!therapistUid });
 }));
 

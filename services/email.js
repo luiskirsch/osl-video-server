@@ -584,6 +584,38 @@ function templateRecemFormadoEndingSoon({ therapistName, endingDateIso, planosUr
   return { subject, html, text };
 }
 
+// Convite pra membro de clinica multidisciplinar. invitedEmail recebe email
+// com link pra criar conta (ou logar existente) + aceitar.
+function templateClinicInvite({ ownerName, clinicName, invitedEmail, repasseRule, acceptUrl }) {
+  const subject = `${ownerName} te convidou pra clínica "${clinicName}" no Espaço Prelúdio`;
+  let repasseDesc = "";
+  if (repasseRule?.type === "percentual") {
+    repasseDesc = `Você recebe <strong>${repasseRule.value}%</strong> sobre receita das suas consultas.`;
+  } else if (repasseRule?.type === "valor-fixo") {
+    const reais = (Number(repasseRule.value) / 100).toFixed(2).replace(".", ",");
+    repasseDesc = `Você recebe <strong>R$ ${reais}</strong> fixo por consulta atendida.`;
+  }
+  const html = renderShell({
+    heading: `Você foi convidado(a) pra uma clínica`,
+    bodyHtml: `
+      <p style="margin:0 0 14px;">Olá,</p>
+      <p style="margin:0 0 14px;"><strong>${escHtml(ownerName)}</strong> te convidou pra ser membro da clínica <strong>${escHtml(clinicName)}</strong> no Espaço Prelúdio.</p>
+      <p style="margin:0 0 14px;">${repasseDesc}</p>
+      <p style="margin:24px 0;"><a href="${escHtml(acceptUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Ver convite e aceitar</a></p>
+      <p style="margin:0 0 14px; font-size:13px; color:rgba(28,31,29,0.65);">
+        Como funciona: você atende seus próprios pacientes normalmente. Quando emite recibo de uma consulta como membro da clínica, o sistema calcula o repasse automaticamente.
+        Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 199/mês).
+      </p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">
+        Se você ainda não tem conta no Espaço Prelúdio, clique no botão acima e siga o cadastro com o email <strong>${escHtml(invitedEmail)}</strong> — o convite vincula automaticamente.
+      </p>
+    `,
+    footer: `Você recebeu este e-mail porque ${escHtml(ownerName)} te convidou pra clínica no Espaço Prelúdio. Se não foi você, ignore.`
+  });
+  const text = `${ownerName} te convidou pra clínica "${clinicName}" no Espaço Prelúdio.\n\n${repasseDesc.replace(/<[^>]+>/g, "")}\n\nVer convite e aceitar: ${acceptUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 module.exports = {
   sendEmail,
   templateConfirmation,
@@ -605,6 +637,7 @@ module.exports = {
   templateFormacaoRejected,
   templateStudentExpired,
   templateRecemFormadoEndingSoon,
+  templateClinicInvite,
   buildJoinUrl,
   buildCancelUrl,
   buildConfirmUrl,
