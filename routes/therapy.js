@@ -39,6 +39,9 @@ const { mercadoPagoFetchTherapy } = require("../services/payments");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const tiss     = require("../services/tiss");
+const smsService = require("../services/sms");
+const supportBot = require("../services/support-bot");
+const marketing = require("../services/marketing");
 const pushService = require("../services/push");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -1296,6 +1299,34 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     updates.nfseConfig = cfg;
   }
 
+  // SMS config — token plaintext per-user. Justificativa: cron de lembretes
+  // precisa enviar SMS sem DEK do user (que so existe em sessao ativa).
+  // Trade-off documentado: vazamento de DB exporia tokens Twilio (custo
+  // limitado: atacante manda SMS ate creditos do user esgotarem).
+  if (req.body?.smsConfig && typeof req.body.smsConfig === "object") {
+    const s = req.body.smsConfig;
+    const existing = therapist.smsConfig || {};
+    const cfg = { ...existing };
+    if (s.provider !== undefined) {
+      cfg.provider = ["twilio"].includes(s.provider) ? s.provider : "twilio";
+    }
+    if (s.accountSid !== undefined) {
+      cfg.accountSid = s.accountSid ? String(s.accountSid).trim().slice(0, 100) : null;
+    }
+    if (s.authToken !== undefined) {
+      // Mantem token anterior se enviar string vazia (UX: usuario edita outros campos sem reenviar token)
+      const t = String(s.authToken || "").trim();
+      if (t) cfg.authToken = t.slice(0, 200);
+    }
+    if (s.fromNumber !== undefined) {
+      cfg.fromNumber = s.fromNumber ? String(s.fromNumber).trim().slice(0, 30) : null;
+    }
+    if (s.enabled !== undefined) {
+      cfg.enabled = !!s.enabled;
+    }
+    updates.smsConfig = cfg;
+  }
+
   // Consultório (objeto)
   if (req.body?.consultorio && typeof req.body.consultorio === "object") {
     const c = req.body.consultorio;
@@ -1474,6 +1505,15 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
     therapistPublic.nfseConfig = {
       ...nfsePublic,
       apiTokenConfigured: !!apiTokenEncrypted
+    };
+  }
+
+  // SMS: nunca devolve authToken plaintext. Frontend só sabe se está configurado.
+  if (therapistPublic.smsConfig) {
+    const { authToken, ...smsPublic } = therapistPublic.smsConfig;
+    therapistPublic.smsConfig = {
+      ...smsPublic,
+      authTokenConfigured: !!authToken
     };
   }
 
@@ -2084,6 +2124,26 @@ router.get("/therapy/nfse/encrypted-token", asyncHandler(async (req, res) => {
   const enc = therapist.nfseConfig?.apiTokenEncrypted;
   if (!enc) return sendError(res, 404, "TOKEN_NAO_CONFIGURADO");
   return res.json({ ok: true, apiTokenEncrypted: enc });
+}));
+
+// POST /therapy/sms/test — envia um SMS de teste pra validar config Twilio.
+// Body: { to } — numero pra receber o teste. Usa smsConfig do therapist.
+router.post("/therapy/sms/test", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  if (!therapist.smsConfig?.enabled) return sendError(res, 400, "SMS_NAO_HABILITADO");
+  if (!therapist.smsConfig?.authToken) return sendError(res, 400, "TOKEN_AUSENTE", { hint: "Salve o authToken antes de testar." });
+
+  const to = String(req.body?.to || "").trim();
+  if (!to) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+
+  const body = `[Espaço Prelúdio] Teste de SMS de ${(therapist.displayName || "seu profissional").split(/\s+/).slice(0, 2).join(" ")}. Se chegou, a configuração está OK.`;
+  const r = await smsService.sendSms(therapist.smsConfig, { to, body });
+  if (!r.ok) return sendError(res, r.error?.startsWith("TWILIO_") ? 502 : 400, r.error || "FALHA_ENVIO", { detail: r.detail || null });
+  return res.json({ ok: true, sid: r.sid });
 }));
 
 // POST /therapy/nfse/test — valida companyId + token chamando NFE.io.
@@ -11646,5 +11706,190 @@ router.get("/therapy/pro-chat/buscar", asyncHandler(async (req, res) => {
 
   return res.json({ ok: true, items });
 }));
+
+// ═════════════════════════════════════════════════════════════════════════
+// SUPPORT BOT — Chatbot Claude pra suporte 24/7 (FAQ + troubleshooting)
+//
+// Rate limit: 30 req/dia por uid pra controlar custo (~R$ 0,005 por req).
+// History de mensagens fica do lado do cliente (sessionStorage); backend é
+// stateless — recebe histórico no body e responde uma mensagem.
+// ═════════════════════════════════════════════════════════════════════════
+
+const _supportQuota = new Map(); // uid -> { count, resetAt }
+const SUPPORT_DAILY_QUOTA = 30;
+const SUPPORT_RESET_MS = 24 * 60 * 60 * 1000;
+
+function _checkSupportQuota(uid) {
+  const now = Date.now();
+  const entry = _supportQuota.get(uid);
+  if (!entry || now > entry.resetAt) {
+    _supportQuota.set(uid, { count: 1, resetAt: now + SUPPORT_RESET_MS });
+    return { ok: true, remaining: SUPPORT_DAILY_QUOTA - 1 };
+  }
+  if (entry.count >= SUPPORT_DAILY_QUOTA) {
+    return { ok: false, remaining: 0, resetAt: entry.resetAt };
+  }
+  entry.count++;
+  return { ok: true, remaining: SUPPORT_DAILY_QUOTA - entry.count };
+}
+
+// POST /therapy/support/chat
+// Body: { message, history?: [{role, content}] }
+// Retorna: { ok, reply, remaining }
+router.post("/therapy/support/chat", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const quota = _checkSupportQuota(uid);
+  if (!quota.ok) {
+    return sendError(res, 429, "QUOTA_DIARIA_EXCEDIDA", {
+      detail: "Limite de 30 perguntas/dia. Reset em " + new Date(quota.resetAt).toISOString(),
+      resetAt: quota.resetAt
+    });
+  }
+
+  const message = String(req.body?.message || "").trim();
+  if (!message) return sendError(res, 400, "MENSAGEM_OBRIGATORIA");
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+
+  const result = await supportBot.askBot({ history, userMessage: message });
+  if (!result.ok) {
+    return sendError(res, 502, result.error || "BOT_FALHOU", { detail: result.detail || null });
+  }
+  return res.json({ ok: true, reply: result.reply, remaining: quota.remaining, usage: result.usage });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// MARKETING AUTOMATION — Campanhas one-shot pra pacientes
+//
+// Audiences predefinidas (services/marketing.js). Backend conhece sessões
+// (plaintext metadata: scheduledAt) e devolve lista de patientIds elegíveis.
+// Frontend pega os IDs, decifra patient docs locais, decide quais têm email
+// válido, e dispara envios via /marketing/send.
+//
+// Rate limit: 200 emails/dia por uid pra controlar custo (Resend free = 100/d).
+// ═════════════════════════════════════════════════════════════════════════
+
+const _marketingQuota = new Map();
+const MARKETING_DAILY_QUOTA = 200;
+const MARKETING_RESET_MS = 24 * 60 * 60 * 1000;
+
+function _checkMarketingQuota(uid, qty = 1) {
+  const now = Date.now();
+  const entry = _marketingQuota.get(uid);
+  if (!entry || now > entry.resetAt) {
+    if (qty > MARKETING_DAILY_QUOTA) return { ok: false, remaining: 0 };
+    _marketingQuota.set(uid, { count: qty, resetAt: now + MARKETING_RESET_MS });
+    return { ok: true, remaining: MARKETING_DAILY_QUOTA - qty };
+  }
+  if (entry.count + qty > MARKETING_DAILY_QUOTA) {
+    return { ok: false, remaining: MARKETING_DAILY_QUOTA - entry.count, resetAt: entry.resetAt };
+  }
+  entry.count += qty;
+  return { ok: true, remaining: MARKETING_DAILY_QUOTA - entry.count };
+}
+
+// GET /therapy/marketing/audiences — lista audiences predefinidas
+router.get("/therapy/marketing/audiences", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  return res.json({ ok: true, audiences: marketing.AUDIENCES, templates: marketing.TEMPLATES });
+}));
+
+// POST /therapy/marketing/resolve — devolve patientIds elegíveis pra audience
+// Body: { audienceKey, audienceParams? }
+// Retorna: { ok, patientIds: [{patientId, lastSessionAt}] }
+router.post("/therapy/marketing/resolve", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const audienceKey = String(req.body?.audienceKey || "").trim();
+  if (!marketing.AUDIENCES[audienceKey]) return sendError(res, 400, "AUDIENCE_INVALIDA");
+
+  const db = getDb();
+
+  // Lista pacientes do prof. Patient docs vem cifrados (E2EE) mas backend
+  // só precisa de patientId + birthdate (este NÃO é cifrado).
+  const pSnap = await db.collection("therapy_patients")
+    .where("therapistUid", "==", uid).limit(5000).get();
+  const patients = pSnap.docs.map(d => {
+    const x = d.data();
+    return { patientId: d.id, birthdate: x.birthdate || null };
+  });
+
+  // Last session por patient
+  const sSnap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid).limit(5000).get();
+  const sessionsByPatientId = new Map();
+  for (const sd of sSnap.docs) {
+    const s = sd.data();
+    if (!s.patientId) continue;
+    const at = Number(s.scheduledAt) || 0;
+    const cur = sessionsByPatientId.get(s.patientId) || 0;
+    if (at > cur) sessionsByPatientId.set(s.patientId, at);
+  }
+
+  const eligibleSet = marketing.resolveAudiencePatients(
+    audienceKey, req.body?.audienceParams || {}, sessionsByPatientId, patients
+  );
+
+  const patientIds = [...eligibleSet].map(pid => ({
+    patientId: pid,
+    lastSessionAt: sessionsByPatientId.get(pid) || null
+  }));
+
+  return res.json({ ok: true, audienceKey, patientIds, total: patientIds.length });
+}));
+
+// POST /therapy/marketing/send — envia 1 email pra 1 destinatário.
+// Body: { to, subject, body (markdown), patientId? }
+// Frontend chamou já fez o render (substituicao de placeholders) e envia
+// markdown — backend converte pra HTML basico via mdToHtml.
+router.post("/therapy/marketing/send", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const to = String(req.body?.to || "").trim();
+  const subject = String(req.body?.subject || "").trim().slice(0, 200);
+  const body = String(req.body?.body || "").trim().slice(0, 10000);
+  if (!to || !subject || !body) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return sendError(res, 400, "EMAIL_INVALIDO");
+
+  const quota = _checkMarketingQuota(uid, 1);
+  if (!quota.ok) {
+    return sendError(res, 429, "QUOTA_MARKETING_EXCEDIDA", {
+      detail: `Limite ${MARKETING_DAILY_QUOTA} emails/dia. Reset em 24h.`,
+      remaining: quota.remaining,
+      resetAt: quota.resetAt
+    });
+  }
+
+  const therapist = await loadTherapist(uid);
+  const therapistName = therapist?.displayName || "Profissional";
+  const therapistEmail = therapist?.email || null;
+
+  const html = marketing.mdToHtml(body);
+  try {
+    const r = await sendEmail({
+      to,
+      replyTo: therapistEmail,
+      subject,
+      html: `<div style="font-family: Inter, system-ui, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #1c1f1d;">
+        ${html}
+        <hr style="margin: 30px 0 16px; border: 0; border-top: 1px solid #ddd;">
+        <p style="font-size: 11px; color: #888; margin: 0;">Mensagem enviada por ${escHtmlSafe(therapistName)} via Espaço Prelúdio.</p>
+      </div>`,
+      text: body + "\n\n---\nMensagem enviada por " + therapistName + " via Espaço Prelúdio."
+    });
+    return res.json({ ok: true, sent: !!(r.ok || r.skipped), remaining: quota.remaining });
+  } catch (e) {
+    return sendError(res, 502, "FALHA_ENVIO", { detail: e.message });
+  }
+}));
+
+function escHtmlSafe(s) {
+  return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
 
 module.exports = router;

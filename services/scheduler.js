@@ -15,6 +15,7 @@ const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
 const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, templateRecemFormadoEndingSoon, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
+const { sendSms } = require("./sms");
 const { processPendingReferrals } = require("./affiliate");
 
 // Intervalo do tick principal. 15min é fino o suficiente pra cobrir o
@@ -93,7 +94,8 @@ async function runReminderTick() {
 
     const emailNeeded = !!s.patientEmail && !s.emailReminderSentAt;
     const waNeeded    = !!s.patientPhone && !s.waReminderSentAt;
-    if (!emailNeeded && !waNeeded) continue;
+    const smsNeeded   = !!s.patientPhone && !s.smsReminderSentAt;
+    if (!emailNeeded && !waNeeded && !smsNeeded) continue;
     candidates++;
 
     const joinToken    = buildJoinTokenForSession(s);
@@ -147,6 +149,33 @@ async function runReminderTick() {
         }
       } catch (e) {
         logError("reminder_wa_failed", e, { sessionId: s.sessionId });
+      }
+    }
+
+    // SMS (canal terciario, mais caro). So envia se therapist tem smsConfig.enabled.
+    // Corpo curto (limite 160 chars) e sem link cancelar (SMS marketing rules).
+    if (smsNeeded) {
+      try {
+        const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
+        const therapist = tsnap.exists ? tsnap.data() : null;
+        if (therapist?.smsConfig?.enabled) {
+          const horario = new Date(at).toLocaleString("pt-BR", {
+            day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+            timeZone: "America/Sao_Paulo"
+          });
+          const proNome = (therapist.displayName || "seu profissional").split(/\s+/).slice(0, 2).join(" ");
+          // SMS curto, 1 segmento (≤160 chars). Inclui link encurtado de join.
+          const body = `Lembrete: consulta com ${proNome} em ${horario}. Link: ${joinUrl}`;
+          const r = await sendSms(therapist.smsConfig, { to: s.patientPhone, body });
+          if (r.ok) {
+            await doc.ref.set({ smsReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            anySent = true;
+          } else if (!r.skipped) {
+            logWarn("reminder_sms_failed", { sessionId: s.sessionId, error: r.error });
+          }
+        }
+      } catch (e) {
+        logError("reminder_sms_exception", e, { sessionId: s.sessionId });
       }
     }
 
