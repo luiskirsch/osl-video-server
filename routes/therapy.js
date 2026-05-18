@@ -5779,10 +5779,12 @@ router.post("/therapy/admin/comprovantes-estudante/:uid/aprovar", asyncHandler(a
     plano: "student-active",
     studentVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
     studentVerifiedUntil: validUntil,
-    "studentDoc.decision": "approved",
-    "studentDoc.reviewedBy": adminAuth.email,
-    "studentDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "studentDoc.reviewNotes": notes,
+    studentDoc: {
+      decision: "approved",
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: notes
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -5828,10 +5830,12 @@ router.post("/therapy/admin/comprovantes-estudante/:uid/rejeitar", asyncHandler(
 
   await getDb().collection("therapists").doc(targetUid).set({
     plano: "trial", // volta pra trial — usuário pode tentar de novo ou pagar tier pro
-    "studentDoc.decision": "rejected",
-    "studentDoc.reviewedBy": adminAuth.email,
-    "studentDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "studentDoc.reviewNotes": reason,
+    studentDoc: {
+      decision: "rejected",
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: reason
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -5977,10 +5981,12 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/aprovar", asyncHandl
   await getDb().collection("therapists").doc(targetUid).set({
     plano: "recem-formado-eligible",
     recemFormadoVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-    "recemFormadoDoc.decision": "approved",
-    "recemFormadoDoc.reviewedBy": adminAuth.email,
-    "recemFormadoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "recemFormadoDoc.reviewNotes": notes,
+    recemFormadoDoc: {
+      decision: "approved",
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: notes
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -6025,10 +6031,12 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/rejeitar", asyncHand
 
   await getDb().collection("therapists").doc(targetUid).set({
     plano: "trial",
-    "recemFormadoDoc.decision": "rejected",
-    "recemFormadoDoc.reviewedBy": adminAuth.email,
-    "recemFormadoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "recemFormadoDoc.reviewNotes": reason,
+    recemFormadoDoc: {
+      decision: "rejected",
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: reason
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -6174,10 +6182,12 @@ router.post("/therapy/admin/comprovantes-formacao/:uid/aprovar", asyncHandler(as
   await getDb().collection("therapists").doc(targetUid).set({
     verificationStatus: "verified",
     verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-    "formacaoDoc.decision": "approved",
-    "formacaoDoc.reviewedBy": adminAuth.email,
-    "formacaoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "formacaoDoc.reviewNotes": notes,
+    formacaoDoc: {
+      decision: "approved",
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: notes
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -6223,11 +6233,13 @@ router.post("/therapy/admin/comprovantes-formacao/:uid/rejeitar", asyncHandler(a
   // Mantém verificationStatus="pending-review" pra user poder reenviar.
   // Marca o doc como rejected pra UI mostrar o motivo.
   await getDb().collection("therapists").doc(targetUid).set({
-    "formacaoDoc.decision": "rejected",
-    "formacaoDoc.reasons": [reason],
-    "formacaoDoc.reviewedBy": adminAuth.email,
-    "formacaoDoc.reviewedAt": admin.firestore.FieldValue.serverTimestamp(),
-    "formacaoDoc.reviewNotes": reason,
+    formacaoDoc: {
+      decision: "rejected",
+      reasons: [reason],
+      reviewedBy: adminAuth.email,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNotes: reason
+    },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
