@@ -9197,6 +9197,307 @@ router.get("/therapy/recibo/publico", asyncHandler(async (req, res) => {
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
+// TISS — Troca de Informação em Saúde Suplementar (Fase 1)
+//
+// Fase 1: schema + CRUD. Sem geração XML ainda — só estrutura de dados.
+// XML 4.01.00 entra na Fase 2. Auto-submit por convênio na Fase 4+.
+//
+// Modelo de dados:
+//   therapists/{uid}.tissEnabled: boolean (opt-in, esconde UI se false)
+//   therapists/{uid}.tissConvenios: array de:
+//     { code, nome, registroAns?, numeroContratado, plano?, enabled }
+//   patients/{patientId}.convenios: array de:
+//     { convenioCode, numeroCarteirinha, validade?, plano?, titular? }
+//   therapy_sessions/{sessionId}.tiss: {
+//     convenioCode, numeroGuiaPrestador (sequencial nosso),
+//     numeroGuiaOperadora?, tussCode, tussLabel, valorProcedimento,
+//     status: rascunho|enviada|em_analise|paga|glosada,
+//     dataEnvio?, dataPagamento?, dataGlosa?, codigoGlosa?, motivoGlosa?
+//   }
+//
+// Compliance: dados sensíveis (numeroCarteirinha, CPF) ficam plaintext no
+// backend por enquanto — em fase futura migrar pra E2EE igual prontuário.
+// LGPD: documentar consentimento explícito na anamnese.
+// ═════════════════════════════════════════════════════════════════════════
+const TISS_CONVENIO_NOME_MAX = 80;
+const TISS_NUM_CONTRATADO_MAX = 40;
+const TISS_CARTEIRINHA_MAX = 40;
+
+// GET /therapy/profissional/tiss/convenios — lista convênios aceitos pelo prof.
+router.get("/therapy/profissional/tiss/convenios", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  return res.json({
+    ok: true,
+    tissEnabled: !!therapist.tissEnabled,
+    convenios: Array.isArray(therapist.tissConvenios) ? therapist.tissConvenios : []
+  });
+}));
+
+// POST /therapy/profissional/tiss/toggle — opt-in/out TISS na conta
+router.post("/therapy/profissional/tiss/toggle", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const enabled = !!req.body?.enabled;
+  await getDb().collection("therapists").doc(uid).set({
+    tissEnabled: enabled,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  return res.json({ ok: true, tissEnabled: enabled });
+}));
+
+// POST /therapy/profissional/tiss/convenios — upsert convênio aceito.
+// Body: { code, nome, registroAns?, numeroContratado, plano?, enabled? }
+// `code` é o ID local (slug curto que o prof define, ex "unimed-rj"). Upsert
+// faz find-by-code e substitui o objeto inteiro.
+router.post("/therapy/profissional/tiss/convenios", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const code = String(req.body?.code || "").trim().toLowerCase().slice(0, 40);
+  if (!/^[a-z0-9-]+$/.test(code)) return sendError(res, 400, "CODE_INVALIDO", { detail: "Use letras minúsculas, números e hífen." });
+  const nome = String(req.body?.nome || "").trim().slice(0, TISS_CONVENIO_NOME_MAX);
+  if (!nome) return sendError(res, 400, "NOME_OBRIGATORIO");
+  const registroAns       = String(req.body?.registroAns       || "").trim().slice(0, 20) || null;
+  const numeroContratado  = String(req.body?.numeroContratado  || "").trim().slice(0, TISS_NUM_CONTRATADO_MAX);
+  if (!numeroContratado) return sendError(res, 400, "NUMERO_CONTRATADO_OBRIGATORIO", { detail: "Sua matrícula como prestador no convênio." });
+  const plano             = String(req.body?.plano             || "").trim().slice(0, 80) || null;
+  const enabled           = req.body?.enabled !== false; // default true
+
+  const entry = { code, nome, registroAns, numeroContratado, plano, enabled, updatedAt: Date.now() };
+  const current = Array.isArray(therapist.tissConvenios) ? therapist.tissConvenios.slice() : [];
+  const idx = current.findIndex(c => c.code === code);
+  if (idx >= 0) current[idx] = { ...current[idx], ...entry };
+  else current.push({ ...entry, createdAt: Date.now() });
+
+  await getDb().collection("therapists").doc(uid).set({
+    tissConvenios: current,
+    tissEnabled: true, // primeiro cadastro auto-habilita
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, convenio: entry });
+}));
+
+// DELETE /therapy/profissional/tiss/convenios/:code
+router.delete("/therapy/profissional/tiss/convenios/:code", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+  const code = String(req.params.code || "").trim().toLowerCase();
+  const current = Array.isArray(therapist.tissConvenios) ? therapist.tissConvenios : [];
+  const next = current.filter(c => c.code !== code);
+  if (next.length === current.length) return sendError(res, 404, "CONVENIO_NAO_ENCONTRADO");
+  await getDb().collection("therapists").doc(uid).set({
+    tissConvenios: next,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/paciente/:patientId/convenio — upsert carteirinha de paciente.
+// Body: { convenioCode, numeroCarteirinha, validade?, plano?, titular? }
+router.post("/therapy/paciente/:patientId/convenio", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PATIENT_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const pref = db.collection("therapy_patients").doc(patientId);
+  const psnap = await pref.get();
+  if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  const patient = psnap.data();
+  if (patient.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const convenioCode      = String(req.body?.convenioCode || "").trim().toLowerCase();
+  const numeroCarteirinha = String(req.body?.numeroCarteirinha || "").trim().slice(0, TISS_CARTEIRINHA_MAX);
+  if (!convenioCode) return sendError(res, 400, "CONVENIO_CODE_OBRIGATORIO");
+  if (!numeroCarteirinha) return sendError(res, 400, "CARTEIRINHA_OBRIGATORIA");
+
+  // Valida que o convenioCode existe nos aceitos pelo prof.
+  const therapist = await loadTherapist(uid);
+  const aceitos = Array.isArray(therapist?.tissConvenios) ? therapist.tissConvenios : [];
+  if (!aceitos.find(c => c.code === convenioCode)) {
+    return sendError(res, 400, "CONVENIO_NAO_ACEITO", { detail: "Cadastre o convênio em Perfil → Convênios TISS antes de vincular ao paciente." });
+  }
+
+  const validade = String(req.body?.validade || "").trim() || null;
+  if (validade && !/^\d{4}-\d{2}-\d{2}$/.test(validade)) {
+    return sendError(res, 400, "VALIDADE_FORMATO_INVALIDO", { detail: "Use YYYY-MM-DD." });
+  }
+  const plano   = String(req.body?.plano   || "").trim().slice(0, 80) || null;
+  const titular = String(req.body?.titular || "").trim().slice(0, 80) || null;
+
+  const entry = { convenioCode, numeroCarteirinha, validade, plano, titular, updatedAt: Date.now() };
+  const current = Array.isArray(patient.convenios) ? patient.convenios.slice() : [];
+  const idx = current.findIndex(c => c.convenioCode === convenioCode);
+  if (idx >= 0) current[idx] = { ...current[idx], ...entry };
+  else current.push({ ...entry, createdAt: Date.now() });
+
+  await pref.set({
+    convenios: current,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, convenio: entry });
+}));
+
+// DELETE /therapy/paciente/:patientId/convenio/:convenioCode
+router.delete("/therapy/paciente/:patientId/convenio/:convenioCode", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const patientId = String(req.params.patientId || "").trim();
+  const convenioCode = String(req.params.convenioCode || "").trim().toLowerCase();
+  const db = getDb();
+  const pref = db.collection("therapy_patients").doc(patientId);
+  const psnap = await pref.get();
+  if (!psnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  const patient = psnap.data();
+  if (patient.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const current = Array.isArray(patient.convenios) ? patient.convenios : [];
+  const next = current.filter(c => c.convenioCode !== convenioCode);
+  if (next.length === current.length) return sendError(res, 404, "CONVENIO_NAO_ENCONTRADO_PACIENTE");
+  await pref.set({
+    convenios: next,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/sessao/:sessionId/tiss/marcar — marca consulta como via convênio.
+// Body: { convenioCode, tussCode, tussLabel, valorProcedimento }
+router.post("/therapy/sessao/:sessionId/tiss/marcar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const sref = db.collection("therapy_sessions").doc(sessionId);
+  const ssnap = await sref.get();
+  if (!ssnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = ssnap.data();
+  if (session.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const convenioCode      = String(req.body?.convenioCode || "").trim().toLowerCase();
+  const tussCode          = String(req.body?.tussCode     || "").trim().slice(0, 20);
+  const tussLabel         = String(req.body?.tussLabel    || "").trim().slice(0, 200);
+  const valorProcedimento = Number(req.body?.valorProcedimento) || 0;
+  if (!convenioCode) return sendError(res, 400, "CONVENIO_CODE_OBRIGATORIO");
+  if (!tussCode)     return sendError(res, 400, "TUSS_CODE_OBRIGATORIO");
+
+  // Gera numeroGuiaPrestador sequencial (atomic counter no therapist doc).
+  const therapist = await loadTherapist(uid);
+  const seq = (therapist?.tissNextGuiaSeq || 1);
+  const numeroGuiaPrestador = String(seq).padStart(8, "0");
+
+  await db.collection("therapists").doc(uid).set({
+    tissNextGuiaSeq: seq + 1,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await sref.set({
+    tiss: {
+      convenioCode,
+      numeroGuiaPrestador,
+      numeroGuiaOperadora: null,
+      tussCode,
+      tussLabel,
+      valorProcedimento,
+      status: "rascunho",
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, numeroGuiaPrestador });
+}));
+
+// POST /therapy/sessao/:sessionId/tiss/status — atualiza status da guia.
+// Body: { status, numeroGuiaOperadora?, codigoGlosa?, motivoGlosa? }
+router.post("/therapy/sessao/:sessionId/tiss/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  const db = getDb();
+  const sref = db.collection("therapy_sessions").doc(sessionId);
+  const ssnap = await sref.get();
+  if (!ssnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = ssnap.data();
+  if (session.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (!session.tiss) return sendError(res, 404, "GUIA_TISS_NAO_EXISTE");
+
+  const status = String(req.body?.status || "").trim().toLowerCase();
+  const ALLOWED = new Set(["rascunho", "enviada", "em_analise", "paga", "glosada"]);
+  if (!ALLOWED.has(status)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const tissUpdate = { ...session.tiss, status };
+  if (req.body?.numeroGuiaOperadora !== undefined) {
+    tissUpdate.numeroGuiaOperadora = String(req.body.numeroGuiaOperadora || "").trim().slice(0, 40) || null;
+  }
+  if (status === "enviada" && !tissUpdate.dataEnvio) tissUpdate.dataEnvio = Date.now();
+  if (status === "paga"    && !tissUpdate.dataPagamento) tissUpdate.dataPagamento = Date.now();
+  if (status === "glosada") {
+    tissUpdate.dataGlosa    = Date.now();
+    tissUpdate.codigoGlosa  = String(req.body?.codigoGlosa  || "").trim().slice(0, 10) || null;
+    tissUpdate.motivoGlosa  = String(req.body?.motivoGlosa  || "").trim().slice(0, 500) || null;
+  }
+
+  await sref.set({
+    tiss: tissUpdate,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, tiss: tissUpdate });
+}));
+
+// GET /therapy/tiss/guias?status=...&convenioCode=...
+// Lista todas as sessões do prof que têm `tiss` setado, filtradas opcionalmente
+// por status e/ou convenioCode. Default sem filtro = todas as guias.
+router.get("/therapy/tiss/guias", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const wantStatus       = String(req.query?.status || "").trim().toLowerCase() || null;
+  const wantConvenioCode = String(req.query?.convenioCode || "").trim().toLowerCase() || null;
+
+  // Firestore: filtra by therapistUid + presença de tiss (não-null), depois
+  // filtra em memória por status/convenioCode (volume baixo: <500 guias típico).
+  let q = db.collection("therapy_sessions").where("therapistUid", "==", uid);
+  const snap = await q.limit(2000).get();
+  const items = snap.docs
+    .map(d => ({ sessionId: d.id, ...d.data() }))
+    .filter(s => !!s.tiss?.numeroGuiaPrestador)
+    .filter(s => !wantStatus || s.tiss.status === wantStatus)
+    .filter(s => !wantConvenioCode || s.tiss.convenioCode === wantConvenioCode)
+    .map(s => ({
+      sessionId: s.sessionId,
+      patientName: s.patientName || null,
+      patientId: s.patientId || null,
+      scheduledAt: Number(s.scheduledAt) || null,
+      tiss: s.tiss
+    }))
+    .sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
+
+  return res.json({ ok: true, items });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
 // ANAMNESE PRÉ-CONSULTA — terapeuta envia link público pro paciente
 // preencher antes da 1ª sessão. Coleção `therapy_anamneses/{anamneseId}`.
 //
