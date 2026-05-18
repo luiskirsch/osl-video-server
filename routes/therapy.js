@@ -3528,6 +3528,22 @@ router.delete("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => 
   return res.json({ ok: true });
 }));
 
+// GET /therapy/pacientes/:patientId — devolve o doc do paciente (com convenios).
+// Útil pra UI de edição pegar dados auxiliares (carteirinhas TISS, tags, etc.).
+router.get("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+  const db = getDb();
+  const snap = await db.collection("therapy_patients").doc(patientId).get();
+  if (!snap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  const patient = snap.data();
+  if (patient.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  return res.json({ ok: true, patient: { patientId, ...patient } });
+}));
+
 // GET /therapy/pacientes/:patientId/sessoes — todas as sessões deste paciente
 router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
