@@ -5618,26 +5618,32 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   if (plano) update.plano = plano;
   if (plano === "pro") update.proSince = admin.firestore.FieldValue.serverTimestamp();
 
-  // Reconcilia proTier/proPriceCents com o valor REAL do preapproval no MP
-  // (source of truth = MP, não o que `/plano/iniciar` planejou). Cobre casos
-  // de mismatch: cache stale, race, troca de plano no meio, ou plano criado
-  // fora do /plano/iniciar. Mapeia transaction_amount -> tier conhecido.
+  // Reconcilia proPriceCents com o transaction_amount real do preapproval
+  // (source of truth = MP). proTier so e derivado quando o valor cobrado
+  // bate UNICAMENTE com um tier (sem ambiguidade) — quando dois tiers tem
+  // o mesmo amount (ex: default e recem-formado ambos R$ 99,50), preserva
+  // o proTier ja salvo pelo /plano/iniciar via merge:true em vez de chutar.
   const txAmount = Number(preapproval?.auto_recurring?.transaction_amount);
   if (Number.isFinite(txAmount) && txAmount > 0) {
     update.proPriceCents = Math.round(txAmount * 100);
-    let derivedTier;
-    if (txAmount === THERAPY_PLAN_RECEM_FORMADO_AMOUNT)      derivedTier = "recem-formado";
-    else if (txAmount === THERAPY_PLAN_PROFISSIONAL_AMOUNT)  derivedTier = "profissional";
-    else if (txAmount === THERAPY_PLAN_AMOUNT)               derivedTier = "default";
-    else {
-      // Valor cobrado nao bate com nenhum tier conhecido — não sobrescreve
-      // proTier (preserva o valor anterior do /plano/iniciar) mas loga.
+    const matches = [];
+    // Float compare tolerante (Math.abs < 0.005 = meio centavo)
+    const eq = (a, b) => Math.abs(a - b) < 0.005;
+    if (eq(txAmount, THERAPY_PLAN_RECEM_FORMADO_AMOUNT))     matches.push("recem-formado");
+    if (eq(txAmount, THERAPY_PLAN_PROFISSIONAL_AMOUNT))      matches.push("profissional");
+    if (eq(txAmount, THERAPY_PLAN_AMOUNT))                   matches.push("default");
+    if (matches.length === 1) {
+      // Unico match — pode reconciliar com seguranca.
+      update.proTier = matches[0];
+    } else if (matches.length === 0) {
+      // Nao bate com nenhum tier conhecido — preserva proTier existente, loga.
       logWarn("therapy_mp_webhook_amount_desconhecido", {
         uid, preapprovalId: preapproval.id, txAmount,
         knownTiers: { THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT, THERAPY_PLAN_AMOUNT }
       });
     }
-    if (derivedTier) update.proTier = derivedTier;
+    // matches.length > 1: ambiguo — preserva proTier salvo pelo /plano/iniciar.
+    // Nao sobrescreve pra evitar reclassificar tier legitimo errado.
   }
 
   await db.collection("therapists").doc(uid).set(update, { merge: true });
@@ -5965,6 +5971,10 @@ router.get("/therapy/admin/comprovantes-recem-formado/:uid", asyncHandler(async 
 }));
 
 // POST /therapy/admin/comprovantes-recem-formado/:uid/aprovar
+// Body: { notes?: string, dataInscricao?: "YYYY-MM-DD" }
+// dataInscricao: data de inscrição no conselho (lê do comprovante). Usada
+// pelo cron runRecemFormadoTransitionTick pra avisar 30d antes dos 12m.
+// Se nao informada AND validador automatico nao extraiu, cron nao notifica.
 router.post("/therapy/admin/comprovantes-recem-formado/:uid/aprovar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const adminAuth = await verifyAdminTherapy(req, res);
@@ -5978,15 +5988,38 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/aprovar", asyncHandl
 
   const notes = String(req.body?.notes || "").trim().slice(0, 500);
 
+  // dataInscricao opcional, formato YYYY-MM-DD. Valida e sobrescreve em
+  // recemFormadoDoc.extracted.dataInscricao se fornecida; senao preserva
+  // valor existente (mantido pelo merge:true).
+  const dataInscricaoRaw = String(req.body?.dataInscricao || "").trim();
+  const recemFormadoDocUpdate = {
+    decision: "approved",
+    reviewedBy: adminAuth.email,
+    reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    reviewNotes: notes
+  };
+  if (dataInscricaoRaw) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dataInscricaoRaw)) {
+      return sendError(res, 400, "DATA_INSCRICAO_FORMATO_INVALIDO", {
+        detail: "Use formato YYYY-MM-DD."
+      });
+    }
+    const parsedMs = Date.parse(dataInscricaoRaw + "T00:00:00Z");
+    if (!Number.isFinite(parsedMs) || parsedMs > Date.now()) {
+      return sendError(res, 400, "DATA_INSCRICAO_INVALIDA", {
+        detail: "Data deve ser passada/presente em formato YYYY-MM-DD."
+      });
+    }
+    recemFormadoDocUpdate.extracted = {
+      ...(therapist.recemFormadoDoc?.extracted || {}),
+      dataInscricao: dataInscricaoRaw
+    };
+  }
+
   await getDb().collection("therapists").doc(targetUid).set({
     plano: "recem-formado-eligible",
     recemFormadoVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-    recemFormadoDoc: {
-      decision: "approved",
-      reviewedBy: adminAuth.email,
-      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
-      reviewNotes: notes
-    },
+    recemFormadoDoc: recemFormadoDocUpdate,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -8780,9 +8813,16 @@ router.post("/webhooks/asaas/financeiro", asyncHandler(async (req, res) => {
 
   // Validação por token compartilhado (env var). Asaas configura no painel
   // como query string da URL do webhook. Sem token = ignora silenciosamente
-  // (não dá info pra atacantes).
+  // (não dá info pra atacantes). Comparacao timing-safe pra evitar oracle
+  // de byte-prefix em rede.
   const tokenIn = String(req.query?.token || "").trim();
-  if (!ASAAS_WEBHOOK_TOKEN || tokenIn !== ASAAS_WEBHOOK_TOKEN) {
+  let tokenOk = false;
+  if (ASAAS_WEBHOOK_TOKEN && tokenIn.length === ASAAS_WEBHOOK_TOKEN.length) {
+    try {
+      tokenOk = crypto.timingSafeEqual(Buffer.from(tokenIn), Buffer.from(ASAAS_WEBHOOK_TOKEN));
+    } catch { tokenOk = false; }
+  }
+  if (!tokenOk) {
     logWarn("asaas_webhook_token_invalido", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress });
     return res.status(401).json({ ok: false });
   }

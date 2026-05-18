@@ -47,7 +47,17 @@ function verifySignedToken(token, secret) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
 
-  if (signature !== expectedSignature) {
+  // timing-safe compare: evita oracle de length/byte-prefix em endpoints HTTP.
+  // String length differ ja invalida (e a propria comparacao por bytes precisa
+  // de mesmo size pra timingSafeEqual nao dar throw).
+  if (signature.length !== expectedSignature.length) {
+    return { valid: false, error: "ASSINATURA_INVALIDA" };
+  }
+  let match = false;
+  try {
+    match = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+  } catch { match = false; }
+  if (!match) {
     return { valid: false, error: "ASSINATURA_INVALIDA" };
   }
 

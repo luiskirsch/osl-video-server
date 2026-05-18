@@ -336,7 +336,7 @@ async function runChatUnreadEmailTick() {
       await sendEmail({
         to: receiverEmail,
         subject: `Você tem uma mensagem não lida no Espaço Prelúdio`,
-        bodyHtml: `
+        html: `
           <p>Olá ${escHtml(receiverName || "")},</p>
           <p><strong>${escHtml(senderName || "Sua conversa")}</strong> te enviou uma mensagem há mais de 24h e ela ainda não foi lida.</p>
           <p style="margin: 22px 0;">
