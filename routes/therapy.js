@@ -8632,8 +8632,8 @@ Se você recebeu, o canal está funcionando corretamente. Não é necessário re
 // mensagens recebidas pra audit/debug. Sem ação automatizada por enquanto.
 router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
   // Auth via token compartilhado (ZAPI_WEBHOOK_SECRET) — Z-API configura
-  // como query string. Sem secret configurado, rejeita silenciosamente (evita
-  // que qualquer um POST encha logs/audit). Comparacao timing-safe.
+  // como query string `?token=X`. Sem secret configurado, rejeita silenciosamente
+  // (evita que qualquer um POST encha logs/audit). Comparacao timing-safe.
   const ZAPI_WEBHOOK_SECRET = String(process.env.ZAPI_WEBHOOK_SECRET || "").trim();
   if (!ZAPI_WEBHOOK_SECRET) {
     // Modo permissivo durante setup inicial. Loga warn. Pra producao, setar
