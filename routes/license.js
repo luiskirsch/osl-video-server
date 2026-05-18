@@ -1,12 +1,28 @@
 const express = require("express");
-const { logError } = require("../logger");
+const admin = require("firebase-admin");
+const { logError, logWarn } = require("../logger");
 const { asyncHandler, sendError, normalizeUid, normalizeEmail } = require("../utils");
 const { ensureDb, saveLicenseRecord, claimOrValidateLicenseOwnership } = require("../services/firestore");
 const { mercadoPagoFetch } = require("../services/payments");
 const { approveReferralRewardFromPayment } = require("../services/affiliate");
 const {
-  signPayload, verifySignedToken, generateLicenseCode, verifyFirebaseToken
+  signPayload, verifySignedToken, generateLicenseCode, verifyFirebaseToken, getBearerToken
 } = require("../services/auth");
+
+// Versao opcional: se Bearer presente, valida e devolve uid; senao retorna
+// null SEM enviar erro. Usado em rotas legadas que aceitavam uid no body
+// pra compat — quando Bearer existe, e' preferido (defesa em profundidade
+// contra atacante reivindicando licenseCode com uid forjado).
+async function tryDecodeBearerUid(req) {
+  const bearer = getBearerToken(req);
+  if (!bearer) return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(bearer);
+    return decoded.uid || null;
+  } catch {
+    return null;
+  }
+}
 const { pagamentosAprovados } = require("../game/state");
 const {
   PRODUCT_ID, PRODUCT_TITLE, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_CATALOG,
@@ -89,7 +105,14 @@ router.post("/validar-codigo-licenca", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
-  const uid         = normalizeUid(req.body?.uid);
+  // Prefere uid do Bearer Firebase quando presente — defesa contra atacante
+  // claimar licenseCode com uid forjado. Se Bearer ausente (clientes legados),
+  // cai pro body uid + loga warn pra observabilidade.
+  const bearerUid = await tryDecodeBearerUid(req);
+  const uid = bearerUid || normalizeUid(req.body?.uid);
+  if (!bearerUid && req.body?.uid) {
+    logWarn("license_validar_sem_bearer", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress, licenseCode: licenseCode.slice(0, 8) + "..." });
+  }
   const email       = normalizeEmail(req.body?.email);
 
   if (!licenseCode) return sendError(res, 400, "CODIGO_OBRIGATORIO");
@@ -132,7 +155,12 @@ router.post("/emitir-acesso-por-codigo", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
-  const uid         = normalizeUid(req.body?.uid);
+  // Mesmo padrao do /validar-codigo-licenca — prefere uid do Bearer quando presente.
+  const bearerUid = await tryDecodeBearerUid(req);
+  const uid = bearerUid || normalizeUid(req.body?.uid);
+  if (!bearerUid && req.body?.uid) {
+    logWarn("license_emitir_sem_bearer", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress, licenseCode: licenseCode.slice(0, 8) + "..." });
+  }
   const email       = normalizeEmail(req.body?.email);
 
   if (!licenseCode) return sendError(res, 400, "CODIGO_OBRIGATORIO");

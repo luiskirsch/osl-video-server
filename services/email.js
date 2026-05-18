@@ -201,7 +201,10 @@ function templateAnamneseRespondida({ therapistName, patientName, painelUrl }) {
 // (com download PDF). Texto formato carta curta + valor destacado.
 function templateReciboEnviado({ patientName, therapistName, amountCents, paymentMethodLabel, paidDateMs, reciboUrl, sequentialNumber }) {
   const subject = `Recibo de ${therapistName} ${sequentialNumber ? `(nº ${sequentialNumber})` : ""}`.trim();
-  const valor = "R$ " + (amountCents / 100).toFixed(2).replace(".", ",");
+  // Coercao defensiva — amountCents pode chegar null/undefined em recibos
+  // manuais sem valor, antes dava "R$ NaN" no email.
+  const cents = Number(amountCents) || 0;
+  const valor = "R$ " + (cents / 100).toFixed(2).replace(".", ",");
   const dataFmt = paidDateMs
     ? new Date(paidDateMs).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric", timeZone: "America/Sao_Paulo" })
     : "";
@@ -522,7 +525,7 @@ function templateBirthday({ patientName, therapistName, clinicName }) {
   const fromWhom = clinicName || therapistName || "Espaço Prelúdio";
   const subject = `Feliz aniversário, ${firstName}!`;
   const html = renderShell({
-    heading: `Feliz aniversário, ${escHtml(firstName)}! 🎉`,
+    heading: `Feliz aniversário, ${firstName}! 🎉`,
     bodyHtml: `
       <p style="margin:0 0 14px;">Hoje é o seu dia.</p>
       <p style="margin:0 0 14px;">Que este novo ciclo traga saúde, leveza e tempo pra você cuidar do que importa.</p>

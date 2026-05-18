@@ -1720,6 +1720,8 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
 
   await ref.set({
     joinTokenExp: joinPayload.exp,
+    // Limpa flag de consumo — link regenerado eh novo single-use.
+    joinTokenConsumedAt: admin.firestore.FieldValue.delete(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -1793,6 +1795,11 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
 
   const session = snap.data();
   if (session.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  // Sessao cancelada ou encerrada nao deve ressuscitar via livekit-token.
+  // Antes, qualquer status virava "in_progress" silenciosamente — terapeuta
+  // entrava em sala de sessao cancelada sem refazer agendamento.
+  if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
+  if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
 
   const therapist = await loadTherapist(uid);
   const identity = `pro_${uid}`;
@@ -1804,7 +1811,7 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
   });
 
   await db.collection("therapy_sessions").doc(sessionId).set({
-    status: session.status === "completed" ? session.status : "in_progress",
+    status: "in_progress",
     therapistJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -1845,10 +1852,17 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   if (payload.token_type !== "therapy_join") return sendError(res, 401, "JOIN_TOKEN_NAO_AUTORIZADO");
 
   const db = getDb();
-  const snap = await db.collection("therapy_sessions").doc(payload.sessionId).get();
+  const sessionRef = db.collection("therapy_sessions").doc(payload.sessionId);
+  const snap = await sessionRef.get();
   if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   const session = snap.data();
   if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
+  // Cancelamento revoga o joinToken — paciente nao entra em sala cancelada.
+  if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
+  // Single-use enforcement — token nao pode ser reusado depois do consumo.
+  // joinTokenConsumedAt eh setado no primeiro join bem-sucedido (logo abaixo)
+  // e checado aqui via field path no doc da sessao.
+  if (session.joinTokenConsumedAt) return sendError(res, 410, "JOIN_TOKEN_JA_USADO");
 
   // Se paciente logado, vincula a sessão à conta dele para histórico futuro.
   // É opcional — convidado anônimo continua entrando sem conta.
@@ -1880,11 +1894,14 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
     patientNameFinal: finalName,
     patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Marca o token como consumido — proxima tentativa cai no JOIN_TOKEN_JA_USADO.
+    // Se paciente precisar reentrar, terapeuta gera novo link via /regenerar-link.
+    joinTokenConsumedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
   if (patientAccountUid) sessionUpdate.patientAccountUid = patientAccountUid;
 
-  await db.collection("therapy_sessions").doc(payload.sessionId).set(sessionUpdate, { merge: true });
+  await sessionRef.set(sessionUpdate, { merge: true });
 
   await logAudit({
     type: "patient_joined",
@@ -2267,6 +2284,11 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
     canceledAt: admin.firestore.FieldValue.serverTimestamp(),
     canceledBy,
     cancelReason: reason || null,
+    // Revoga joinToken — paciente com link em maos nao consegue mais entrar
+    // depois do cancelamento. Endpoint /sessao/join checa status=canceled
+    // separadamente; aqui zeramos joinTokenExp defensivamente pra qualquer
+    // consumidor que olhe o campo.
+    joinTokenExp: 0,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
   await db.collection("therapy_sessions").doc(sessionId).set(update, { merge: true });
