@@ -89,9 +89,11 @@ function getClient() {
  * @param {object} params
  * @param {Array<{role:"user"|"assistant", content:string}>} params.history
  * @param {string} params.userMessage
+ * @param {string} [params.userName] - Nome completo do profissional; bot
+ *   usa primeiro nome na saudação da 1ª mensagem.
  * @returns {Promise<{ok: boolean, reply?: string, error?: string}>}
  */
-async function askBot({ history = [], userMessage }) {
+async function askBot({ history = [], userMessage, userName = "" }) {
   const client = getClient();
   if (!client) return { ok: false, error: "ANTHROPIC_NAO_CONFIGURADO" };
   if (!userMessage || typeof userMessage !== "string") return { ok: false, error: "MENSAGEM_INVALIDA" };
@@ -104,11 +106,27 @@ async function askBot({ history = [], userMessage }) {
     content: String(h.content || "").slice(0, 2000)
   }));
 
+  // Monta system prompt com bloco de identificação. Primeiro nome só (mais
+  // natural). Se nome vier vazio, omite o bloco e cai no comportamento padrão.
+  // isFirstMessage = true quando history ainda não tem nenhuma resposta do
+  // assistant — sinaliza pro bot cumprimentar pelo nome.
+  const firstName = String(userName || "").trim().split(/\s+/)[0] || "";
+  const isFirstMessage = !recentHistory.some(h => h.role === "assistant");
+  let systemPrompt = SYSTEM_PROMPT;
+  if (firstName) {
+    systemPrompt += `\n\nIDENTIFICAÇÃO DO USUÁRIO:\nO profissional se chama ${firstName}.`;
+    if (isFirstMessage) {
+      systemPrompt += ` Esta é a PRIMEIRA mensagem da conversa — cumprimente-o pelo primeiro nome (ex: "Oi, ${firstName}!" ou "Olá ${firstName},") antes de responder.`;
+    } else {
+      systemPrompt += ` Use o primeiro nome ocasionalmente (não em toda mensagem) pra deixar o atendimento pessoal.`;
+    }
+  }
+
   try {
     const response = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 600,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [
         ...recentHistory,
         { role: "user", content: cleanMsg }

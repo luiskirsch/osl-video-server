@@ -11752,7 +11752,16 @@ router.post("/therapy/support/chat", asyncHandler(async (req, res) => {
   if (!message) return sendError(res, 400, "MENSAGEM_OBRIGATORIA");
   const history = Array.isArray(req.body?.history) ? req.body.history : [];
 
-  const result = await supportBot.askBot({ history, userMessage: message });
+  // Carrega nome do profissional pra bot personalizar a saudação.
+  // Falha silenciosa: se Firestore der pau ou nome não existe, bot
+  // responde sem nome (comportamento anterior).
+  let userName = "";
+  try {
+    const therapist = await loadTherapist(uid);
+    userName = String(therapist?.displayName || "").trim();
+  } catch (_) { /* no-op */ }
+
+  const result = await supportBot.askBot({ history, userMessage: message, userName });
   if (!result.ok) {
     return sendError(res, 502, result.error || "BOT_FALHOU", { detail: result.detail || null });
   }
