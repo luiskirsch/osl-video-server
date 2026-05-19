@@ -139,6 +139,42 @@ ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxxx
 
 ## 🟢 OPCIONAL (features específicas, podem esperar)
 
+### 7.5. Sentry (monitoramento de erros — Fase 1 de resiliência)
+
+Ativa visibilidade dos crashes JS no frontend + erros no backend. Free tier dá 5k events/mês (mais que suficiente sem clientes).
+
+**Setup:**
+1. Cria conta em [sentry.io](https://sentry.io) (Google login OK)
+2. New Project → Platform: **Node.js** (pra backend) → nomeia `osl-video-server`
+3. Copia o `SENTRY_DSN` que aparece (formato `https://abc...@o123.ingest.sentry.io/456`)
+4. **Backend**: cola no Railway → Variables → `SENTRY_DSN=...`
+5. New Project → Platform: **JavaScript (Browser)** → nomeia `espaco-preludio-web`
+6. Copia o DSN do browser (diferente do backend, mas mesmo formato)
+7. **Frontend**: edita `js/firebase-config.js`, linha `// window.EP_SENTRY_DSN = ...` → descomenta e cola o DSN. Faz o mesmo em `staging/js/firebase-config.js`. Commit + push.
+
+Sem DSN, é no-op total — não quebra nada.
+
+### 7.6. Instatus / Better Stack (status page público)
+
+Status page que você divulga (ex.: `status.espacopreludio.com.br`). Tem free tier com até 5 monitors.
+
+**Recomendado: [Instatus](https://instatus.com)** (free tier mais generoso que Better Stack).
+
+**Setup:**
+1. Cria conta em instatus.com (free tier)
+2. New Status Page → nomeia "Espaço Prelúdio"
+3. Add Component:
+   - Name: Backend API
+   - Monitor: HTTP → URL `https://osl-video-server-staging.up.railway.app/health`
+   - Expected: status code 200, body contains `"ok":true`
+4. Add Component:
+   - Name: Frontend (GitHub Pages)
+   - URL: `https://espacopreludio.com.br`
+5. (Opcional) Aponta CNAME `status.espacopreludio.com.br` pro endereço Instatus em Settings → Custom Domain
+6. **Importante**: atualiza `STATUS_URL` em `js/monitoring.js` pro link real (default placeholder = `https://status.espacopreludio.com.br`)
+
+Custo: R$ 0/mês (free tier).
+
 ### 8. Z-API (WhatsApp)
 
 - [z-api.io](https://z-api.io) → instância → conectar WhatsApp

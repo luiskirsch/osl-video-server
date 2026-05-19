@@ -1,12 +1,38 @@
-// Bootstrap: error handlers precisam ser os primeiros
+// Bootstrap: Sentry + error handlers precisam ser os primeiros (Sentry
+// captura uncaughtException internamente, e o logger é dependência circular
+// se carregado antes).
+
+// Sentry init — só ativa se SENTRY_DSN estiver setado no Railway env. Sem
+// DSN, no-op completo (não importa o módulo). Custo zero quando desligado.
+let Sentry = null;
+if (process.env.SENTRY_DSN) {
+  try {
+    Sentry = require("@sentry/node");
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      environment: process.env.APP_ENV || process.env.NODE_ENV || "production",
+      release: process.env.RAILWAY_GIT_COMMIT_SHA || undefined,
+      tracesSampleRate: 0,
+      // Não envia dados pessoais por default — só erro stack.
+      sendDefaultPii: false
+    });
+  } catch (e) {
+    console.error("[sentry] failed to init:", e.message);
+    Sentry = null;
+  }
+}
+
 const { logInfo, logWarn, logError } = require("./logger");
 
 process.on("uncaughtException", (err) => {
+  if (Sentry) try { Sentry.captureException(err); } catch (_) { /* empty */ }
   logError("uncaughtException", err);
 });
 
 process.on("unhandledRejection", (reason) => {
-  logError("unhandledRejection", reason instanceof Error ? reason : new Error(String(reason)));
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  if (Sentry) try { Sentry.captureException(err); } catch (_) { /* empty */ }
+  logError("unhandledRejection", err);
 });
 
 const express = require("express");
@@ -120,6 +146,18 @@ app.use((err, req, res, next) => {
     method: req.method,
     path: req.originalUrl
   });
+
+  // Reporta pro Sentry junto com contexto da request (sem body — pode ter PII)
+  if (Sentry) {
+    try {
+      Sentry.withScope(scope => {
+        scope.setTag("requestId", req.requestId || "");
+        scope.setTag("path", req.originalUrl || "");
+        scope.setTag("method", req.method || "");
+        Sentry.captureException(err);
+      });
+    } catch (_) { /* empty */ }
+  }
 
   if (res.headersSent) return next(err);
 

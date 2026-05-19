@@ -43,6 +43,7 @@ const smsService = require("../services/sms");
 const supportBot = require("../services/support-bot");
 const marketing = require("../services/marketing");
 const pushService = require("../services/push");
+const { withRetry } = require("../services/retry");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
 const scales = require("../services/scales");
@@ -5689,20 +5690,43 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     return sendError(res, 400, "DATA_ID_AUSENTE");
   }
 
-  // Busca o estado atual do preapproval na API MP
+  // Busca o estado atual do preapproval na API MP, com retry-com-backoff.
+  // Falha em 5xx ou network = transient. Retorna 500 pra MP retentar
+  // (evita perder evento durante outage da API MP).
   let preapproval;
   try {
-    const { response, data } = await mercadoPagoFetchTherapy(
-      `https://api.mercadopago.com/preapproval/${encodeURIComponent(dataId)}`
-    );
-    if (!response.ok) {
-      logError("therapy_mp_preapproval_fetch_failed", new Error("FETCH_FAIL"), { dataId, status: response.status });
-      return res.status(200).json({ ok: true, ignored: true, reason: "FETCH_FAIL" });
-    }
-    preapproval = data;
+    preapproval = await withRetry(async () => {
+      const { response, data } = await mercadoPagoFetchTherapy(
+        `https://api.mercadopago.com/preapproval/${encodeURIComponent(dataId)}`
+      );
+      if (!response.ok) {
+        // 4xx = erro permanente do nosso lado (token errado, ID inválido).
+        // 5xx + 429 = transient, retry pega.
+        if (response.status >= 500 || response.status === 429) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const err = new Error(`MP_HTTP_${response.status}`);
+        err.permanent = true;
+        throw err;
+      }
+      return data;
+    }, {
+      maxAttempts: 3,
+      baseDelayMs: 400,
+      shouldRetry: (err) => !err.permanent,
+      onRetry: (err, attempt, delay) => {
+        logWarn("therapy_mp_preapproval_retry", { dataId, attempt, delay, error: err.message });
+      }
+    });
   } catch (err) {
-    logError("therapy_mp_preapproval_fetch_error", err, { dataId });
-    return res.status(200).json({ ok: true, ignored: true, reason: "NETWORK" });
+    if (err.permanent) {
+      // Erro permanente — MP retentar não adianta. Ack pra parar reentrega.
+      logError("therapy_mp_preapproval_fetch_permanent", err, { dataId });
+      return res.status(200).json({ ok: true, ignored: true, reason: "FETCH_PERMANENT" });
+    }
+    // Transient — retorna 500 pro MP retentar a entrega do webhook.
+    logError("therapy_mp_preapproval_fetch_failed", err, { dataId });
+    return sendError(res, 503, "MP_API_INDISPONIVEL", { detail: "Tentativa de busca do preapproval falhou; MP deve reentregar." });
   }
 
   // Resolve UID via external_reference (formato EP_THERAPY_<uid>)
@@ -5759,7 +5783,18 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     // Nao sobrescreve pra evitar reclassificar tier legitimo errado.
   }
 
-  await db.collection("therapists").doc(uid).set(update, { merge: true });
+  // Firestore write com retry — falha transitória do Google deve causar
+  // reentrega do webhook, não perda silenciosa. 3 tentativas com backoff,
+  // depois 500 pro MP retentar.
+  try {
+    await withRetry(
+      () => db.collection("therapists").doc(uid).set(update, { merge: true }),
+      { maxAttempts: 3, baseDelayMs: 250 }
+    );
+  } catch (err) {
+    logError("therapy_mp_webhook_firestore_write_failed", err, { uid, dataId, attempts: 3 });
+    return sendError(res, 503, "FIRESTORE_INDISPONIVEL", { detail: "Falha ao gravar estado do plano; MP deve reentregar." });
+  }
 
   await logAudit({
     type: "therapy_mp_webhook",
