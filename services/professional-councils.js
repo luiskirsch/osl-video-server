@@ -138,14 +138,14 @@ const CONSELHOS = {
   // - acceptedPracticeTypes: lista de "tipoPratica" aceitos no cadastro
   SEM_CONSELHO: {
     sigla: "SEM_CONSELHO",
-    label: "Sem conselho regulamentado (psicanálise, terapia integrativa, hipnoterapia)",
+    label: "Sem conselho regulamentado (psicoterapia, psicanálise, terapia integrativa, hipnoterapia)",
     profissional: "Terapeuta",
     numberFormat: "—",
     capabilities: ["consulta", "anotacoes", "atestado-comparecimento"],
     eligibleTiers: ["profissional"],
     isRegulamentado: false,
     requiresManualReview: true,
-    acceptedPracticeTypes: ["psicanalise", "terapia-integrativa", "hipnoterapia"]
+    acceptedPracticeTypes: ["psicoterapia", "psicanalise", "terapia-integrativa", "hipnoterapia"]
   }
 };
 

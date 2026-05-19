@@ -473,7 +473,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
 
     if (!isValidPracticeType("SEM_CONSELHO", tipoPratica)) {
       return sendError(res, 400, "TIPO_PRATICA_INVALIDO",
-        { hint: "Aceitos: psicanalise, terapia-integrativa, hipnoterapia." });
+        { hint: "Aceitos: psicoterapia, psicanalise, terapia-integrativa, hipnoterapia." });
     }
     if (!instituicao) return sendError(res, 400, "FORMACAO_INSTITUICAO_OBRIGATORIA");
     if (!curso)       return sendError(res, 400, "FORMACAO_CURSO_OBRIGATORIO");
