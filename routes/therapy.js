@@ -336,20 +336,7 @@ async function loadPatientAccount(uid) {
 // 401/403 e devolve null caso contrário.
 async function verifyAdminTherapy(req, res) {
   const bearer = getBearerToken(req);
-  if (!bearer) {
-    // DEBUG temporário pra investigar 401 do admin-painel via cloudflared
-    if (req.originalUrl?.includes("/admin/dashboard")) {
-      logWarn("admin_dashboard_no_token", {
-        path: req.originalUrl,
-        headerKeys: Object.keys(req.headers),
-        hasAuth: !!req.headers.authorization,
-        authPrefix: req.headers.authorization ? String(req.headers.authorization).substring(0, 20) : null,
-        origin: req.headers.origin || null,
-        ua: String(req.headers["user-agent"] || "").substring(0, 80)
-      });
-    }
-    sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null;
-  }
+  if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
   let decoded;
   try {
     decoded = await admin.auth().verifyIdToken(bearer);
