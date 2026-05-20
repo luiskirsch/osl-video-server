@@ -1,6 +1,11 @@
-// Bootstrap: Sentry + error handlers precisam ser os primeiros (Sentry
-// captura uncaughtException internamente, e o logger é dependência circular
-// se carregado antes).
+// Bootstrap: dotenv pra rodar local com .env (Railway já injeta env vars
+// nativamente, então em prod isso vira no-op). Tem que ser ANTES de
+// qualquer require que use process.env.
+try { require("dotenv").config(); } catch (_) { /* dotenv opcional em prod */ }
+
+// Sentry + error handlers precisam ser os primeiros (Sentry captura
+// uncaughtException internamente, e o logger é dependência circular se
+// carregado antes).
 
 // Sentry init — só ativa se SENTRY_DSN estiver setado no Railway env. Sem
 // DSN, no-op completo (não importa o módulo). Custo zero quando desligado.
