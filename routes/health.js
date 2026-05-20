@@ -26,6 +26,11 @@ router.get("/", (req, res) => {
 });
 
 router.get("/health", (req, res) => {
+  // Build info: Railway injeta RAILWAY_GIT_COMMIT_SHA automaticamente
+  // quando faz deploy. Útil pra confirmar exatamente qual commit está
+  // rodando (debug de auto-deploy stale).
+  const commitSha = process.env.RAILWAY_GIT_COMMIT_SHA || null;
+  const commitShort = commitSha ? commitSha.substring(0, 7) : null;
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
@@ -34,6 +39,8 @@ router.get("/health", (req, res) => {
     uptimeSec: Math.round(process.uptime()),
     startedAt: new Date(APP_START_TIME).toISOString(),
     now: new Date().toISOString(),
+    commitSha: commitShort,
+    railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
     firebaseConfigured: !!getDb(),
     firebaseProjectId: firebaseProjectId(),
     livekitConfigured: !!LIVEKIT_API_KEY,
