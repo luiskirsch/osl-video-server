@@ -5810,6 +5810,212 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// ADMIN — Dashboard agregado (admin-painel.html)
+//
+// Retorna 1 JSON com todas as métricas que o painel de controle precisa.
+// Otimizado pra fazer queries paralelas (Promise.allSettled) e devolver
+// rápido (~200-400ms tipicamente).
+// ─────────────────────────────────────────────────────────────────────────
+
+router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+  const todayMs = startOfToday.getTime();
+  const day7Ms = now - 7 * dayMs;
+  const day30Ms = now - 30 * dayMs;
+  const next24Ms = now + dayMs;
+
+  // ─── Queries paralelas ──────────────────────────────────────────────
+  const queries = await Promise.allSettled([
+    // [0] therapists — total + breakdown por plano + verifPending
+    db.collection("therapists").get(),
+    // [1] therapy_sessions — só docs dos últimos 30d (limitamos pra evitar full-scan)
+    db.collection("therapy_sessions")
+      .where("scheduledAt", ">=", day30Ms)
+      .orderBy("scheduledAt", "desc")
+      .limit(1000)
+      .get(),
+    // [2] patients
+    db.collection("therapy_patients").get(),
+    // [3] eventos recentes (audit)
+    db.collection("therapy_audit")
+      .orderBy("at", "desc")
+      .limit(25)
+      .get(),
+    // [4] comprovantes pendentes — student
+    db.collection("therapists").where("plano", "==", "student-pending-review").get(),
+    // [5] comprovantes pendentes — recém-formado
+    db.collection("therapists").where("recemFormadoDoc.decision", "==", "pending-review").get(),
+    // [6] comprovantes pendentes — sem-conselho (formação)
+    db.collection("therapists").where("formacaoDoc.decision", "==", "pending-review").get(),
+    // [7] verificações CRP/CRM pendentes
+    db.collection("therapists").where("verificationStatus", "==", "pending-review").get()
+  ]);
+
+  // ─── Helpers ─────────────────────────────────────────────────────────
+  const safeData = (snap) => snap?.docs?.map(d => d.data()) || [];
+  const toMs = (v) => {
+    if (!v) return 0;
+    if (typeof v === "number") return v;
+    if (v.toMillis) return v.toMillis();
+    if (v._seconds) return v._seconds * 1000;
+    return Number(v) || 0;
+  };
+
+  // ─── Profissionais ──────────────────────────────────────────────────
+  const therapistsRaw = queries[0].status === "fulfilled" ? safeData(queries[0].value) : [];
+  const profTotal = therapistsRaw.length;
+  let profAtivos7d = 0, profAtivos30d = 0, profNovosHoje = 0, profNovosSemana = 0;
+  let mrrCents = 0, novosPlanosHoje = 0;
+  const byTier = {
+    "student-active": 0, "student-pending-review": 0,
+    "recem-formado-eligible": 0, "pro": 0, "trial": 0,
+    "expired": 0, "canceled": 0, "outros": 0
+  };
+  let trialAtivos = 0;
+  for (const t of therapistsRaw) {
+    const createdAt = toMs(t.createdAt);
+    const lastSeen = toMs(t.lastActiveAt) || toMs(t.updatedAt) || createdAt;
+    if (lastSeen >= day7Ms) profAtivos7d++;
+    if (lastSeen >= day30Ms) profAtivos30d++;
+    if (createdAt >= todayMs) profNovosHoje++;
+    if (createdAt >= day7Ms) profNovosSemana++;
+
+    const plano = String(t.plano || "outros");
+    const trialUntil = toMs(t.trialUntil);
+    let bucket = plano;
+    if (plano === "trial" || (plano && trialUntil > now && plano !== "pro" && plano !== "student-active")) {
+      bucket = "trial";
+      trialAtivos++;
+    }
+    if (byTier[bucket] !== undefined) byTier[bucket]++;
+    else byTier.outros++;
+
+    if (plano === "pro") {
+      mrrCents += Number(t.proPriceCents) || 0;
+      const proSince = toMs(t.proSince);
+      if (proSince >= todayMs) novosPlanosHoje++;
+    }
+  }
+
+  // ─── Sessões ────────────────────────────────────────────────────────
+  const sessionsRaw = queries[1].status === "fulfilled" ? safeData(queries[1].value) : [];
+  let sesHoje = 0, sesProx24h = 0, sesProx7d = 0, sesAtivas = 0, sesTotal30d = sessionsRaw.length;
+  let sesCanceladas30d = 0, sesRealizadas30d = 0;
+  for (const s of sessionsRaw) {
+    const at = toMs(s.scheduledAt);
+    const status = String(s.status || "").toLowerCase();
+    if (at >= todayMs && at < todayMs + dayMs) sesHoje++;
+    if (at >= now && at < next24Ms) sesProx24h++;
+    if (at >= now && at < now + 7 * dayMs) sesProx7d++;
+    if (status === "live" || status === "active" || status === "in-progress") sesAtivas++;
+    if (status === "canceled" || status === "cancelled") sesCanceladas30d++;
+    if (status === "completed" || status === "ended") sesRealizadas30d++;
+  }
+
+  // ─── Pacientes ──────────────────────────────────────────────────────
+  const patientsRaw = queries[2].status === "fulfilled" ? safeData(queries[2].value) : [];
+  let patTotal = patientsRaw.length, patNovosHoje = 0, patNovosSemana = 0;
+  for (const p of patientsRaw) {
+    const c = toMs(p.createdAt);
+    if (c >= todayMs) patNovosHoje++;
+    if (c >= day7Ms) patNovosSemana++;
+  }
+
+  // ─── Eventos recentes (audit) ───────────────────────────────────────
+  const auditRaw = queries[3].status === "fulfilled" ? safeData(queries[3].value) : [];
+  const eventos = auditRaw.slice(0, 20).map(e => ({
+    type: e.type || "?",
+    at: toMs(e.at),
+    therapistUid: e.therapistUid || null,
+    detail: e.detail || e.preapprovalId || e.scheduledAt || null
+  }));
+
+  // ─── Pendências admin ───────────────────────────────────────────────
+  const pendCrpCrm = queries[7].status === "fulfilled" ? queries[7].value.size : 0;
+  const pendEstudante = queries[4].status === "fulfilled" ? queries[4].value.size : 0;
+  const pendRecemFormado = queries[5].status === "fulfilled" ? queries[5].value.size : 0;
+  const pendSemConselho = queries[6].status === "fulfilled" ? queries[6].value.size : 0;
+
+  // ─── Integrações (configurado vs não) ───────────────────────────────
+  const env = process.env;
+  const integrations = {
+    firebase: { ok: !!db, label: "Firebase" },
+    livekit: { ok: !!env.LIVEKIT_API_KEY && !!env.LIVEKIT_URL, label: "LiveKit (vídeo E2EE)" },
+    mp_jogo: { ok: !!env.MP_ACCESS_TOKEN_JOGO || !!env.MP_ACCESS_TOKEN, label: "Mercado Pago (Jogo)" },
+    mp_therapy: { ok: !!env.MP_ACCESS_TOKEN_THERAPY || !!env.MP_ACCESS_TOKEN, label: "Mercado Pago (Therapy)" },
+    anthropic: { ok: !!env.ANTHROPIC_API_KEY, label: "Anthropic (Aurora + validador)" },
+    resend: { ok: !!env.RESEND_API_KEY, label: "Resend (e-mail)" },
+    zapi: { ok: !!env.ZAPI_INSTANCE_ID && !!env.ZAPI_CLIENT_TOKEN, label: "Z-API (WhatsApp)" },
+    twilio: { ok: !!env.TWILIO_ACCOUNT_SID, label: "Twilio (SMS)" },
+    asaas: { ok: !!env.ASAAS_WEBHOOK_TOKEN, label: "Asaas" },
+    nfeio: { ok: !!env.NFEIO_API_KEY, label: "NFE.io (NFS-e)" },
+    sentry: { ok: !!env.SENTRY_DSN, label: "Sentry (errors)" }
+  };
+
+  // ─── Sistema ────────────────────────────────────────────────────────
+  const { APP_START_TIME } = require("../logger");
+  const sistema = {
+    uptimeSec: Math.round(process.uptime()),
+    startedAt: new Date(APP_START_TIME).toISOString(),
+    now: new Date(now).toISOString(),
+    appEnv: env.APP_ENV || env.NODE_ENV || "?",
+    nodeVersion: process.version,
+    memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    activeStreams: (require("../game/state").activeStreams || new Map()).size,
+    activeRecordings: (require("../game/state").activeRecordings || new Map()).size,
+    integrations
+  };
+
+  return res.json({
+    ok: true,
+    profissionais: {
+      total: profTotal,
+      ativos7d: profAtivos7d,
+      ativos30d: profAtivos30d,
+      novosHoje: profNovosHoje,
+      novosSemana: profNovosSemana,
+      byTier,
+      trialAtivos
+    },
+    pacientes: {
+      total: patTotal,
+      novosHoje: patNovosHoje,
+      novosSemana: patNovosSemana
+    },
+    sessoes: {
+      hoje: sesHoje,
+      ativas: sesAtivas,
+      prox24h: sesProx24h,
+      prox7d: sesProx7d,
+      total30d: sesTotal30d,
+      realizadas30d: sesRealizadas30d,
+      canceladas30d: sesCanceladas30d
+    },
+    financeiro: {
+      mrrCents,
+      mrrBrl: (mrrCents / 100).toFixed(2),
+      novosPlanosHoje
+    },
+    pendencias: {
+      crpCrm: pendCrpCrm,
+      estudante: pendEstudante,
+      recemFormado: pendRecemFormado,
+      semConselho: pendSemConselho,
+      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho
+    },
+    eventos,
+    sistema
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // ADMIN — Revisão de comprovantes-estudante na fila manual
 //
 // Quando o validador devolve decision="manual-review" (confiança média), o
