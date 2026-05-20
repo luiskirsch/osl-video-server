@@ -1,5 +1,10 @@
 node_modules
 .env
+.env.bak
+.env.bak*
 *.log
 *.log.*
 .claude/
+local-pids.txt
+local-server.err.log
+local-tunnel.err.log

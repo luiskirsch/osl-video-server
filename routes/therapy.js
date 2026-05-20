@@ -336,7 +336,20 @@ async function loadPatientAccount(uid) {
 // 401/403 e devolve null caso contrário.
 async function verifyAdminTherapy(req, res) {
   const bearer = getBearerToken(req);
-  if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
+  if (!bearer) {
+    // DEBUG temporário pra investigar 401 do admin-painel via cloudflared
+    if (req.originalUrl?.includes("/admin/dashboard")) {
+      logWarn("admin_dashboard_no_token", {
+        path: req.originalUrl,
+        headerKeys: Object.keys(req.headers),
+        hasAuth: !!req.headers.authorization,
+        authPrefix: req.headers.authorization ? String(req.headers.authorization).substring(0, 20) : null,
+        origin: req.headers.origin || null,
+        ua: String(req.headers["user-agent"] || "").substring(0, 80)
+      });
+    }
+    sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null;
+  }
   let decoded;
   try {
     decoded = await admin.auth().verifyIdToken(bearer);
@@ -5841,7 +5854,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       .orderBy("scheduledAt", "desc")
       .limit(1000)
       .get(),
-    // [2] patients
+    // [2] therapy_patients (registros clínicos criados pelo profissional)
     db.collection("therapy_patients").get(),
     // [3] eventos recentes (audit)
     db.collection("therapy_audit")
@@ -5854,8 +5867,11 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     db.collection("therapists").where("recemFormadoDoc.decision", "==", "pending-review").get(),
     // [6] comprovantes pendentes — sem-conselho (formação)
     db.collection("therapists").where("formacaoDoc.decision", "==", "pending-review").get(),
-    // [7] verificações CRP/CRM pendentes
-    db.collection("therapists").where("verificationStatus", "==", "pending-review").get()
+    // [7] verificações CRP/CRM pendentes — usa collection therapy_verifications
+    // (mesma fonte que admin-verificacoes.html consulta — evita badge fantasma)
+    db.collection("therapy_verifications").where("status", "==", "pending").get(),
+    // [8] therapy_patient_accounts — pacientes que se cadastraram (signup próprio)
+    db.collection("therapy_patient_accounts").get()
   ]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────
@@ -5974,7 +5990,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     }
   }
 
-  // ─── Pacientes ──────────────────────────────────────────────────────
+  // ─── Pacientes (registros clínicos criados pelos profissionais) ────
   const patientsRaw = queries[2].status === "fulfilled" ? safeData(queries[2].value) : [];
   let patTotal = patientsRaw.length, patNovosHoje = 0, patNovosSemana = 0;
   for (const p of patientsRaw) {
@@ -5982,6 +5998,25 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     if (c >= todayMs) patNovosHoje++;
     if (c >= day7Ms) patNovosSemana++;
   }
+
+  // ─── Contas de paciente (signup próprio via /paciente-cadastro) ────
+  const patAccountsRaw = queries[8].status === "fulfilled" ? safeData(queries[8].value) : [];
+  let patAccountsTotal = patAccountsRaw.length;
+  let patAccountsNovosHoje = 0, patAccountsNovosSemana = 0;
+  const patAccountsNovos24h = [];
+  for (const pa of patAccountsRaw) {
+    const c = toMs(pa.createdAt);
+    if (c >= todayMs) patAccountsNovosHoje++;
+    if (c >= day7Ms) patAccountsNovosSemana++;
+    if (c >= now - dayMs) {
+      patAccountsNovos24h.push({
+        uid: pa.uid || null,
+        displayName: pa.displayName || "(sem nome)",
+        createdAt: c
+      });
+    }
+  }
+  patAccountsNovos24h.sort((a, b) => b.createdAt - a.createdAt);
 
   // ─── Eventos recentes (audit) ───────────────────────────────────────
   const auditRaw = queries[3].status === "fulfilled" ? safeData(queries[3].value) : [];
@@ -6045,6 +6080,12 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       total: patTotal,
       novosHoje: patNovosHoje,
       novosSemana: patNovosSemana
+    },
+    pacientesContas: {
+      total: patAccountsTotal,
+      novosHoje: patAccountsNovosHoje,
+      novosSemana: patAccountsNovosSemana,
+      novos24h: patAccountsNovos24h.slice(0, 20)
     },
     sessoes: {
       hoje: sesHoje,
