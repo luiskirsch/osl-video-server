@@ -5879,6 +5879,14 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     "expired": 0, "canceled": 0, "outros": 0
   };
   let trialAtivos = 0;
+  // Bucket pra sparkline MRR (30 dias). MRR_dia_X = sum proPriceCents de
+  // todos profs que CURRENTLY são pro AND proSince <= dia_X. Aproximação:
+  // não considera cancelamentos históricos (só plano atual), então a curva
+  // é monotonicamente crescente. Pra produto early-stage é suficiente.
+  const mrrByDay = new Array(30).fill(0);
+  // Listas de profissionais novos (24h e 7d) ordenados por createdAt desc.
+  const novos24h = [];
+  const novos7d = [];
   for (const t of therapistsRaw) {
     const createdAt = toMs(t.createdAt);
     const lastSeen = toMs(t.lastActiveAt) || toMs(t.updatedAt) || createdAt;
@@ -5898,25 +5906,72 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     else byTier.outros++;
 
     if (plano === "pro") {
-      mrrCents += Number(t.proPriceCents) || 0;
+      const proPrice = Number(t.proPriceCents) || 0;
+      mrrCents += proPrice;
       const proSince = toMs(t.proSince);
       if (proSince >= todayMs) novosPlanosHoje++;
+      // MRR sparkline: este pro contribui pro MRR a partir do dia proSince
+      // até hoje. Preenche os buckets correspondentes.
+      if (proSince > 0) {
+        const startDaysAgo = Math.floor((now - proSince) / dayMs);
+        for (let i = 0; i < 30; i++) {
+          const daysAgoForBucket = 29 - i;
+          if (startDaysAgo >= daysAgoForBucket) mrrByDay[i] += proPrice;
+        }
+      } else {
+        // proSince ausente: assume já era pro há 30+ dias
+        for (let i = 0; i < 30; i++) mrrByDay[i] += proPrice;
+      }
+    }
+
+    // Listas de novos
+    if (createdAt >= now - dayMs) {
+      novos24h.push({
+        uid: t.uid || null,
+        displayName: t.displayName || "(sem nome)",
+        email: t.email || null,
+        plano,
+        tipoConselho: t.tipoConselho || null,
+        verificationStatus: t.verificationStatus || null,
+        createdAt
+      });
+    }
+    if (createdAt >= day7Ms) {
+      novos7d.push({
+        uid: t.uid || null,
+        displayName: t.displayName || "(sem nome)",
+        plano,
+        createdAt
+      });
     }
   }
+  novos24h.sort((a, b) => b.createdAt - a.createdAt);
+  novos7d.sort((a, b) => b.createdAt - a.createdAt);
 
   // ─── Sessões ────────────────────────────────────────────────────────
   const sessionsRaw = queries[1].status === "fulfilled" ? safeData(queries[1].value) : [];
   let sesHoje = 0, sesProx24h = 0, sesProx7d = 0, sesAtivas = 0, sesTotal30d = sessionsRaw.length;
-  let sesCanceladas30d = 0, sesRealizadas30d = 0;
+  let sesCanceladas30d = 0, sesRealizadas30d = 0, sesUltimos7d = 0;
+  // Bucket de sessões por dia (últimos 30 dias) pra sparkline.
+  // Index 0 = 29 dias atrás, index 29 = hoje.
+  const sessionsByDay = new Array(30).fill(0);
   for (const s of sessionsRaw) {
     const at = toMs(s.scheduledAt);
     const status = String(s.status || "").toLowerCase();
     if (at >= todayMs && at < todayMs + dayMs) sesHoje++;
     if (at >= now && at < next24Ms) sesProx24h++;
     if (at >= now && at < now + 7 * dayMs) sesProx7d++;
+    if (at >= day7Ms && at < now) sesUltimos7d++;
     if (status === "live" || status === "active" || status === "in-progress") sesAtivas++;
     if (status === "canceled" || status === "cancelled") sesCanceladas30d++;
     if (status === "completed" || status === "ended") sesRealizadas30d++;
+    // Bucket sparkline: só conta agendamentos passados (representa volume de
+    // atendimento real). Index = (dias atrás) invertido pra cronológico crescente.
+    if (at >= day30Ms && at <= now) {
+      const daysAgo = Math.floor((now - at) / dayMs);
+      const bucketIdx = 29 - daysAgo;
+      if (bucketIdx >= 0 && bucketIdx < 30) sessionsByDay[bucketIdx]++;
+    }
   }
 
   // ─── Pacientes ──────────────────────────────────────────────────────
@@ -5982,7 +6037,9 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       novosHoje: profNovosHoje,
       novosSemana: profNovosSemana,
       byTier,
-      trialAtivos
+      trialAtivos,
+      novos24h: novos24h.slice(0, 20),
+      novos7d: novos7d.slice(0, 50)
     },
     pacientes: {
       total: patTotal,
@@ -5996,12 +6053,15 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       prox7d: sesProx7d,
       total30d: sesTotal30d,
       realizadas30d: sesRealizadas30d,
-      canceladas30d: sesCanceladas30d
+      canceladas30d: sesCanceladas30d,
+      ultimos7d: sesUltimos7d,
+      byDay30: sessionsByDay
     },
     financeiro: {
       mrrCents,
       mrrBrl: (mrrCents / 100).toFixed(2),
-      novosPlanosHoje
+      novosPlanosHoje,
+      mrrByDay30: mrrByDay
     },
     pendencias: {
       crpCrm: pendCrpCrm,
