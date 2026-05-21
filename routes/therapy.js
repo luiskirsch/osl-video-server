@@ -3806,6 +3806,49 @@ router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
   return res.json({ ok: true, account });
 }));
 
+// PATCH /therapy/paciente/perfil — paciente atualiza campos opt-in/preferências
+// pós-cadastro. Hoje só aceita `consentAiSummary` (toggle pra transcrição IA).
+// Campos write-once de cripto (e2eeSalt/wrappedDEK) NÃO podem mudar aqui —
+// trocá-los inutilizaria as notas já cifradas.
+router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+  if (req.body?.consentAiSummary !== undefined) {
+    const accept = !!req.body.consentAiSummary;
+    updates.consentAiSummary = accept;
+    // Marca timestamp apenas na transição false→true. Quando paciente desliga,
+    // limpa o timestamp pra deixar claro que o consentimento atual não vale.
+    if (accept) {
+      updates.consentAiSummaryAt = account.consentAiSummaryAt || admin.firestore.FieldValue.serverTimestamp();
+    } else {
+      updates.consentAiSummaryAt = null;
+    }
+  }
+
+  if (typeof req.body?.displayName === "string") {
+    const name = req.body.displayName.trim().slice(0, 80);
+    if (name) updates.displayName = name;
+  }
+
+  await getDb().collection("therapy_patient_accounts").doc(uid).set(updates, { merge: true });
+
+  await logAudit({
+    type: "patient_account_updated",
+    patientAccountUid: uid,
+    fields: Object.keys(updates).filter(k => k !== "updatedAt")
+  });
+
+  const fresh = await loadPatientAccount(uid);
+  return res.json({ ok: true, account: fresh });
+}));
+
 // GET /therapy/paciente/sessoes — sessões em que esta conta participou
 router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
