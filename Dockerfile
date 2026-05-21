@@ -1,7 +1,9 @@
 FROM node:20-alpine
 
 # wget pra HEALTHCHECK abaixo (alpine vem sem curl/wget por padrão)
-RUN apk add --no-cache wget
+# ffmpeg pra converter webm/mp3 da sessao -> wav PCM 16kHz mono (input do Whisper local
+# via @huggingface/transformers, usado pro resumo IA de sessao)
+RUN apk add --no-cache wget ffmpeg
 
 WORKDIR /app
 

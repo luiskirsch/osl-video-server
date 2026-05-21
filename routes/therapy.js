@@ -44,6 +44,8 @@ const supportBot = require("../services/support-bot");
 const marketing = require("../services/marketing");
 const pushService = require("../services/push");
 const { withRetry } = require("../services/retry");
+const whisperSvc = require("../services/whisper");
+const sessionSummarySvc = require("../services/session-summary");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
 const scales = require("../services/scales");
@@ -1402,6 +1404,12 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
   if (req.body?.publicSchedulingEnabled !== undefined) {
     updates.publicSchedulingEnabled = Boolean(req.body.publicSchedulingEnabled);
   }
+  // Opt-in: profissional habilita transcrição IA + resumo de suas sessões.
+  // Feature ainda exige consentimento separado do paciente — backend valida
+  // ambos antes de processar áudio.
+  if (req.body?.aiSummaryEnabled !== undefined) {
+    updates.aiSummaryEnabled = Boolean(req.body.aiSummaryEnabled);
+  }
   if (req.body?.publicSchedulingMinNoticeHours !== undefined) {
     const n = Number(req.body.publicSchedulingMinNoticeHours);
     if (Number.isFinite(n) && n >= 0 && n <= 720) {
@@ -1853,6 +1861,21 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     ttlMs: SESSION_TOKEN_VALIDITY_MS
   });
 
+  // Pré-cálculo: pode o profissional rodar transcrição IA nesta sessão?
+  // Requer opt-in do profissional + consentimento do paciente (por sessão
+  // ou flag global da conta). Frontend usa pra decidir se inicia o
+  // MediaRecorder do session-ai-capture.js — evita gravar 50min de áudio
+  // que o backend recusaria depois.
+  let aiSummaryReady = !!therapist?.aiSummaryEnabled;
+  if (aiSummaryReady) {
+    let patientConsent = !!session.consentAiSummary;
+    if (!patientConsent && session.patientAccountUid) {
+      const pa = await loadPatientAccount(session.patientAccountUid);
+      patientConsent = !!pa?.consentAiSummary;
+    }
+    aiSummaryReady = patientConsent;
+  }
+
   await db.collection("therapy_sessions").doc(sessionId).set({
     status: "in_progress",
     therapistJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1868,7 +1891,8 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     livekitRoom: session.livekitRoom,
     role: "therapist",
     e2eeKey: session.e2eeKey || null,
-    e2eeSalt: therapist?.e2eeSalt || null
+    e2eeSalt: therapist?.e2eeSalt || null,
+    aiSummaryReady
   });
 }));
 
@@ -3668,6 +3692,11 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
   const wrappedDEK   = String(req.body?.wrappedDEK   || "").trim();
   const wrappedDEKIv = String(req.body?.wrappedDEKIv || "").trim();
   const consentLgpd  = !!req.body?.consentLgpd;
+  // Consentimento opt-in pra transcrição IA das sessões (sob LGPD).
+  // Paciente aceita que o profissional pode gravar e transcrever via IA pra
+  // uso exclusivo dele (revisão pré-sessão, sem treinamento de modelo).
+  // Default: false. Não bloqueia cadastro — paciente pode aceitar/recusar.
+  const consentAiSummary = !!req.body?.consentAiSummary;
 
   if (!displayName) return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!consentLgpd) return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
@@ -3702,6 +3731,11 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
     role: "patient",
     consentLgpd: true,
     consentLgpdAt: existingData?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
+    // Opt-in IA: paciente pode mudar depois via PATCH /therapy/paciente/perfil
+    consentAiSummary,
+    consentAiSummaryAt: consentAiSummary
+      ? (existingData?.consentAiSummaryAt || admin.firestore.FieldValue.serverTimestamp())
+      : null,
     createdAt: existingData?.createdAt || admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -5807,6 +5841,196 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   });
 
   return res.status(200).json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// AI SUMMARY — Transcrição + resumo IA de sessão (Whisper local + Claude)
+//
+// Fluxo:
+//   1. Profissional encerra sessão; frontend faz POST com áudio mixado
+//      (local + remote) do MediaRecorder.
+//   2. Endpoint valida: ownership da sessão + opt-in do profissional
+//      (aiSummaryEnabled) + consentimento do paciente (consentAiSummary).
+//   3. Retorna 202 imediatamente com status=processing.
+//   4. Async background: Whisper transcreve → Claude Haiku 4.5 estrutura →
+//      Firestore salva em therapy_session_summaries/{sessionId}.
+//   5. Frontend GET /therapy/session/:id/ai-summary pra buscar quando pronto.
+//
+// Privacidade: áudio nunca persiste em disco; processado em-memory,
+// transcript fica no Firestore (cifrado? não — texto direto. TODO: E2EE
+// no flow patient-DEK quando profissional acessa via prontuário).
+// ─────────────────────────────────────────────────────────────────────────
+
+const express_raw_audio = express.raw({
+  type: ["audio/*", "application/octet-stream"],
+  limit: "100mb"
+});
+
+router.post("/therapy/session/:sessionId/ai-summarize",
+  express_raw_audio,
+  asyncHandler(async (req, res) => {
+    if (!ensureDb(res)) return;
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+
+    const sessionId = String(req.params.sessionId || "").trim();
+    if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+    const db = getDb();
+    const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+    if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+    const sess = sessSnap.data();
+    if (sess.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+    // Verifica opt-in do profissional
+    const therapist = await loadTherapist(uid);
+    if (!therapist?.aiSummaryEnabled) {
+      return sendError(res, 403, "AI_SUMMARY_NAO_HABILITADO",
+        { detail: "Profissional não habilitou transcrição IA no perfil." });
+    }
+
+    // Verifica consentimento do paciente. Aceita 2 fontes:
+    //   1. Flag explícita por sessão (sess.consentAiSummary)
+    //   2. Flag global da conta-paciente (patientAccount.consentAiSummary)
+    //      desde que a sessão tenha patientAccountUid
+    let patientConsent = !!sess.consentAiSummary;
+    if (!patientConsent && sess.patientAccountUid) {
+      const pa = await loadPatientAccount(sess.patientAccountUid);
+      patientConsent = !!pa?.consentAiSummary;
+    }
+    if (!patientConsent) {
+      return sendError(res, 403, "CONSENTIMENTO_PACIENTE_AUSENTE",
+        { detail: "Paciente não consentiu com transcrição IA nesta sessão." });
+    }
+
+    const audioBuffer = req.body;
+    if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) {
+      return sendError(res, 400, "AUDIO_OBRIGATORIO");
+    }
+
+    // Marca como processing no Firestore
+    const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+    await summaryRef.set({
+      sessionId,
+      therapistUid: uid,
+      status: "processing",
+      audioBytes: audioBuffer.length,
+      startedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    // Retorna 202 imediatamente — processamento continua em background
+    res.status(202).json({
+      ok: true,
+      status: "processing",
+      sessionId,
+      audioBytes: audioBuffer.length
+    });
+
+    // Fire-and-forget processing. Erros vão pra log + Firestore status.
+    processAiSummary({
+      audioBuffer,
+      sessionId,
+      therapist,
+      session: sess
+    }).catch(err => {
+      logError("ai_summary_unhandled", err, { sessionId });
+    });
+  })
+);
+
+async function processAiSummary({ audioBuffer, sessionId, therapist, session }) {
+  const db = getDb();
+  const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+
+  try {
+    logInfo("ai_summary_started", { sessionId, audioBytes: audioBuffer.length });
+
+    // 1. Transcribe via Whisper local (Xenova/whisper-base)
+    const t0 = Date.now();
+    const transcriptResult = await whisperSvc.transcribe(audioBuffer, {
+      language: "portuguese"
+    });
+    const transcribeMs = Date.now() - t0;
+    logInfo("ai_summary_transcribed", {
+      sessionId,
+      durationSec: transcriptResult.durationSec,
+      transcribeMs,
+      textChars: transcriptResult.text.length
+    });
+
+    // 2. Summarize via Claude Haiku 4.5
+    const t1 = Date.now();
+    const summaryResult = await sessionSummarySvc.summarizeSession({
+      transcript: transcriptResult.text,
+      professionalName: therapist.displayName || "",
+      patientName: session.patientName || "",
+      durationSec: transcriptResult.durationSec
+    });
+    const summarizeMs = Date.now() - t1;
+
+    if (!summaryResult.ok) {
+      throw new Error(`Summary failed: ${summaryResult.error}${summaryResult.detail ? " — " + summaryResult.detail : ""}`);
+    }
+
+    // 3. Salva resultado
+    await summaryRef.set({
+      status: "completed",
+      transcript: transcriptResult.text,
+      transcriptChunks: transcriptResult.chunks?.slice(0, 200) || [], // limit pra evitar doc gigante
+      summary: summaryResult.summary,
+      durationSec: transcriptResult.durationSec,
+      transcribeMs,
+      summarizeMs,
+      tokenUsage: summaryResult.usage || null,
+      completedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    logInfo("ai_summary_completed", {
+      sessionId,
+      totalMs: transcribeMs + summarizeMs,
+      inputTokens: summaryResult.usage?.input,
+      outputTokens: summaryResult.usage?.output
+    });
+  } catch (err) {
+    await summaryRef.set({
+      status: "failed",
+      error: err.message.slice(0, 500),
+      failedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    logError("ai_summary_failed", err, { sessionId });
+  }
+}
+
+// GET — frontend busca o resumo gerado
+router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  // Verifica ownership da sessão
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const summarySnap = await db.collection("therapy_session_summaries").doc(sessionId).get();
+  if (!summarySnap.exists) {
+    return res.json({ ok: true, exists: false, status: "none" });
+  }
+  const data = summarySnap.data();
+  return res.json({
+    ok: true,
+    exists: true,
+    status: data.status,
+    summary: data.summary || null,
+    transcript: data.transcript || null,
+    durationSec: data.durationSec || null,
+    completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
+    error: data.error || null
+  });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
