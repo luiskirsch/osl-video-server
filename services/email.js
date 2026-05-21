@@ -420,8 +420,12 @@ function templateStudentRejected({ therapistName, reason, retryUrl }) {
 
 // ─── Helpers de URL ─────────────────────────────────────────────────────
 
-function buildJoinUrl(joinToken) {
-  return `${THERAPY_FRONTEND_BASE}/entrar.html?t=${encodeURIComponent(joinToken)}`;
+// Aceita short code (~8 chars) OU joinToken legado (JWT ~500 chars).
+// Heurística: códigos curtos ficam <= 16 chars; JWTs sempre passam disso.
+function buildJoinUrl(codeOrToken) {
+  const s = String(codeOrToken || "");
+  const paramName = s.length <= 16 ? "c" : "t";
+  return `${THERAPY_FRONTEND_BASE}/entrar.html?${paramName}=${encodeURIComponent(s)}`;
 }
 function buildCancelUrl(cancelToken) {
   return `${THERAPY_FRONTEND_BASE}/cancelar.html?t=${encodeURIComponent(cancelToken)}`;

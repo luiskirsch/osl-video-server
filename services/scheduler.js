@@ -17,6 +17,7 @@ const { sendEmail, templateReminder, templateBirthday, templateNps, templateStud
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { sendSms } = require("./sms");
 const { processPendingReferrals } = require("./affiliate");
+const { createJoinCode } = require("./join-codes");
 
 // Intervalo do tick principal. 15min é fino o suficiente pra cobrir o
 // reminder de 1h (paciente recebe entre T-75min e T-60min). Os outros
@@ -101,7 +102,16 @@ async function runReminderTick() {
     const joinToken    = buildJoinTokenForSession(s);
     const cancelToken  = buildCancelTokenForSession(s.sessionId);
     const confirmToken = buildConfirmTokenForSession(s.sessionId);
-    const joinUrl    = buildJoinUrl(joinToken);
+    // Short code pra URL bonita. Best-effort — cai no joinToken longo se falhar.
+    let joinCode = null;
+    try {
+      joinCode = await createJoinCode({
+        joinToken,
+        sessionId: s.sessionId,
+        expiresAt: Date.now() + JOIN_TOKEN_VALIDITY_MS
+      });
+    } catch (e) { logWarn("reminder_join_code_failed", { sessionId: s.sessionId, error: e.message }); }
+    const joinUrl    = buildJoinUrl(joinCode || joinToken);
     const cancelUrl  = buildCancelUrl(cancelToken);
     const confirmUrl = buildConfirmUrl(confirmToken);
 
@@ -237,7 +247,15 @@ async function runReminder1hTick() {
     const joinToken    = buildJoinTokenForSession(s);
     const cancelToken  = buildCancelTokenForSession(s.sessionId);
     const confirmToken = buildConfirmTokenForSession(s.sessionId);
-    const joinUrl    = buildJoinUrl(joinToken);
+    let joinCode = null;
+    try {
+      joinCode = await createJoinCode({
+        joinToken,
+        sessionId: s.sessionId,
+        expiresAt: Date.now() + JOIN_TOKEN_VALIDITY_MS
+      });
+    } catch (e) { logWarn("reminder_1h_join_code_failed", { sessionId: s.sessionId, error: e.message }); }
+    const joinUrl    = buildJoinUrl(joinCode || joinToken);
     const cancelUrl  = buildCancelUrl(cancelToken);
     const confirmUrl = buildConfirmUrl(confirmToken);
 

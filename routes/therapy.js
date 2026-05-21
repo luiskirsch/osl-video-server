@@ -141,6 +141,10 @@ function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
 }
 
+// Short codes pra link de paciente — entrar.html?c=K9RTPX73 (~50 chars)
+// em vez de entrar.html?t=<jwt> (~500 chars). Ver services/join-codes.js.
+const { createJoinCode, resolveJoinCode } = require("../services/join-codes");
+
 // ─── Slug público de agendamento ────────────────────────────────────────
 // Slug = identificador URL-friendly do terapeuta (ex.: "dr-roberto-fernandes").
 // Aceita 3-40 chars, lowercase a-z, dígitos, hífens. Sem hífens duplos ou nas pontas.
@@ -1635,6 +1639,10 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       firstJoinToken    = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
       firstJoinTokenExp = joinPayload.exp;
       joinTokenExp = joinPayload.exp;
+      // Short code: índice opaco pro URL bonito (entrar.html?c=XXXXXXXX).
+      // Gerado fora do batch — Firestore precisa de write isolado pra doc-id
+      // unicidade. Falha aqui não bloqueia criação da sessão (paciente cai no
+      // fluxo antigo com ?t=<jwt> se generateCode falhar).
     }
 
     batch.set(db.collection("therapy_sessions").doc(sId), {
@@ -1662,6 +1670,21 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
 
   await batch.commit();
 
+  // Short code pro URL bonito. Best-effort — se falhar, callers caem no
+  // joinToken longo (buildPatientJoinUrl detecta pelo comprimento).
+  let firstJoinCode = null;
+  if (firstJoinToken) {
+    try {
+      firstJoinCode = await createJoinCode({
+        joinToken: firstJoinToken,
+        sessionId: created[0].sessionId,
+        expiresAt: firstJoinTokenExp
+      });
+    } catch (e) {
+      logWarn("therapy_join_code_create_failed", { sessionId: created[0].sessionId, error: e.message });
+    }
+  }
+
   // Confirmação por e-mail (fire-and-forget, não bloqueia resposta).
   // Apenas a primeira ocorrência: para séries longas, enviar 52 e-mails de
   // confirmação seria spam — paciente pega calendário visual + lembretes 24h
@@ -1672,7 +1695,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       patientName,
       therapistName: therapist.displayName || "seu profissional",
       scheduledAt: created[0].scheduledAt || Date.now(),
-      joinUrl: buildPatientJoinUrl(firstJoinToken),
+      joinUrl: buildPatientJoinUrl(firstJoinCode || firstJoinToken),
       cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token),
       minCancelHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
     });
@@ -1703,7 +1726,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     };
     sendWaConfirmation({
       session: sessionForWa, therapist,
-      joinUrl:   buildPatientJoinUrl(firstJoinToken),
+      joinUrl:   buildPatientJoinUrl(firstJoinCode || firstJoinToken),
       cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
     }).then(r => {
       if (r.ok)        logInfo("therapy_confirmation_wa_sent",    { sessionId: created[0].sessionId, messageId: r.messageId });
@@ -1732,7 +1755,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
       scheduledAt: first.scheduledAt,
       status: "scheduled",
       joinToken: firstJoinToken,
-      joinTokenExp: firstJoinTokenExp
+      joinTokenExp: firstJoinTokenExp,
+      joinCode: firstJoinCode
     },
     recurrence: isRecurring ? { groupId: recurrenceGroupId, count: occurrences, sessions: created } : null
   });
@@ -1776,7 +1800,14 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
-  return res.json({ ok: true, joinToken, joinTokenExp: joinPayload.exp });
+  let joinCode = null;
+  try {
+    joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp });
+  } catch (e) {
+    logWarn("therapy_join_code_create_failed", { sessionId, error: e.message });
+  }
+
+  return res.json({ ok: true, joinToken, joinTokenExp: joinPayload.exp, joinCode });
 }));
 
 // GET /therapy/sessoes — lista as sessões do profissional logado
@@ -1899,16 +1930,26 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/sessao/join
 // Paciente troca joinToken + nome por livekitToken. Sem auth Firebase.
-// Body: { joinToken, patientName?, consentLgpd: true }
+// Body: { joinToken | joinCode, patientName?, consentLgpd: true }
+// joinCode (8 chars) resolve internamente pro joinToken (JWT). joinToken
+// legado continua aceito pra retro-compat com links já enviados.
 // ─────────────────────────────────────────────────────────────────────────
 router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   if (!ensureLivekit(res)) return;
 
-  const joinToken   = String(req.body?.joinToken   || "").trim();
+  let joinToken     = String(req.body?.joinToken   || "").trim();
+  const joinCode    = String(req.body?.joinCode    || "").trim();
   const patientName = String(req.body?.patientName || "").trim().slice(0, PATIENT_NAME_MAX);
   const consentLgpd = !!req.body?.consentLgpd;
   const patientIdToken = String(req.body?.patientIdToken || "").trim();
+
+  // Resolve short code → JWT se veio joinCode em vez de joinToken.
+  if (!joinToken && joinCode) {
+    const resolved = await resolveJoinCode(joinCode);
+    if (!resolved) return sendError(res, 401, "JOIN_CODE_INVALIDO_OU_EXPIRADO");
+    joinToken = resolved;
+  }
 
   if (!joinToken)   return sendError(res, 400, "JOIN_TOKEN_OBRIGATORIO");
   if (!consentLgpd) return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
@@ -7528,6 +7569,14 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   });
   await batch.commit();
 
+  // Short code pra URL bonita do paciente.
+  let joinCode = null;
+  try {
+    joinCode = await createJoinCode({ joinToken, sessionId: sId, expiresAt: joinPayload.exp });
+  } catch (e) {
+    logWarn("therapy_join_code_create_failed", { sessionId: sId, error: e.message });
+  }
+
   // E-mail de confirmação pro paciente.
   if (reqData.patientEmail) {
     const cancelTokenInfo = buildCancelToken(sId);
@@ -7535,7 +7584,7 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
       patientName: reqData.patientName,
       therapistName: therapist.displayName || "seu profissional",
       scheduledAt: reqData.requestedSlot,
-      joinUrl: buildPatientJoinUrl(joinToken),
+      joinUrl: buildPatientJoinUrl(joinCode || joinToken),
       cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token),
       minCancelHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
     });
