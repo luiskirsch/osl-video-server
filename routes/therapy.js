@@ -1811,17 +1811,23 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
 }));
 
 // GET /therapy/sessoes — lista as sessões do profissional logado
+// Query: ?includeHidden=true para incluir sessões marcadas como
+// hiddenFromPainel. Usado pela agenda (que mantém histórico completo
+// mesmo após o profissional "remover da lista" no painel).
 router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
+  const includeHidden = req.query.includeHidden === "true";
+
   const db = getDb();
   // Sem orderBy server-side pra evitar exigência de composite index no
   // Firestore. Limit defensivo de 200; ordenação é feita client-side.
   // Filtro hiddenFromPainel também client-side pelo mesmo motivo (composite
-  // index). Painel só mostra sessões não ocultas; prontuário do paciente
-  // continua mostrando tudo (rota /therapy/pacientes/:id/sessoes).
+  // index). Painel só mostra sessões não ocultas; agenda passa
+  // includeHidden=true pra manter histórico completo; prontuário do
+  // paciente continua mostrando tudo (rota /therapy/pacientes/:id/sessoes).
   const snap = await db.collection("therapy_sessions")
     .where("therapistUid", "==", uid)
     .limit(200)
@@ -1851,7 +1857,7 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
-    .filter(s => !s.hiddenFromPainel)
+    .filter(s => includeHidden || !s.hiddenFromPainel)
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, sessions });
