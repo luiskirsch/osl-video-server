@@ -12242,6 +12242,12 @@ router.get("/therapy/pro-chat/threads/:id", asyncHandler(async (req, res) => {
 }));
 
 // GET /therapy/pro-chat/threads/:id/messages?before=ms&limit=50
+// Query SIMPLES — só where("threadId", "==", X) + limit. Sem orderBy
+// server-side pra não exigir composite index no Firestore (where +
+// orderBy em campos diferentes = FAILED_PRECONDITION → ERRO_INTERNO).
+// Sort + paginação `before` feitos client-side aqui no Node. Trade-off
+// aceitável: cada thread costuma ter dezenas/centenas de mensagens,
+// não milhões. Limit defensivo 500 cobre threads ativas.
 router.get("/therapy/pro-chat/threads/:id/messages", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -12258,21 +12264,26 @@ router.get("/therapy/pro-chat/threads/:id/messages", asyncHandler(async (req, re
 
   const msgs = await db.collection("therapy_pro_messages")
     .where("threadId", "==", threadId)
-    .where("createdAt", "<", before)
-    .orderBy("createdAt", "desc")
-    .limit(limit)
+    .limit(500)
     .get();
 
-  const items = msgs.docs.map(d => {
+  const all = msgs.docs.map(d => {
     const m = d.data();
     return {
       messageId: m.messageId,
       senderUid: m.senderUid,
       ciphertext: m.ciphertext,
       iv: m.iv,
-      createdAt: m.createdAt?.toMillis ? m.createdAt.toMillis() : Number(m.createdAt) || null
+      createdAt: m.createdAt?.toMillis ? m.createdAt.toMillis() : Number(m.createdAt) || 0
     };
-  }).reverse();
+  });
+
+  // Filtra por `before`, ordena por createdAt asc, pega as últimas N.
+  const items = all
+    .filter(m => (m.createdAt || 0) < before)
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .slice(-limit);
+
   return res.json({ ok: true, messages: items });
 }));
 
