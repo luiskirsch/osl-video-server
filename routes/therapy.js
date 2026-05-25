@@ -7866,10 +7866,19 @@ router.get("/therapy/painel/hoje", asyncHandler(async (req, res) => {
   const sessions = sessionsSnap.docs.map(d => d.data());
 
   // Próxima sessão: scheduled OR in_progress + scheduledAt no futuro próximo
-  // (ou já em andamento). Ordena por scheduledAt asc.
+  // (ou já em andamento). Tolerâncias diferentes por status:
+  //   - in_progress: sem limite (sessão pode durar 50min+; ignorar tolerância
+  //     evitaria sumir do hero enquanto o profissional está atendendo).
+  //   - scheduled:   2h atrás (cobre atraso típico + sessão padrão de 50min;
+  //     se esqueceu de encerrar, ainda aparece como "próxima" pra ação).
+  // Ordena por scheduledAt asc.
   const nextCandidates = sessions
-    .filter(s => (s.status === "scheduled" || s.status === "in_progress"))
-    .filter(s => s.scheduledAt && s.scheduledAt >= now - 30 * 60 * 1000) // tolerância 30min atrás
+    .filter(s => {
+      if (!s.scheduledAt) return false;
+      if (s.status === "in_progress") return true;
+      if (s.status === "scheduled")   return s.scheduledAt >= now - 2 * 60 * 60 * 1000;
+      return false;
+    })
     .sort((a, b) => (a.scheduledAt || 0) - (b.scheduledAt || 0));
 
   const nextSession = nextCandidates[0] ? {
