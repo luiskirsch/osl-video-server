@@ -12201,6 +12201,7 @@ router.get("/therapy/pro-chat/threads", asyncHandler(async (req, res) => {
     const peerUid = meIsA ? t.participantB : t.participantA;
     const peerName = meIsA ? t.displayNameB : t.displayNameA;
     const lastRead = meIsA ? t.lastReadByA : t.lastReadByB;
+    const lastReadByPeer = meIsA ? t.lastReadByB : t.lastReadByA;
     const lastMsg = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : Number(t.lastMessageAt) || 0;
     return {
       threadId: t.threadId,
@@ -12209,6 +12210,7 @@ router.get("/therapy/pro-chat/threads", asyncHandler(async (req, res) => {
       lastMessageAt: lastMsg || null,
       lastMessageSenderUid: t.lastMessageSenderUid || null,
       hasUnread: lastMsg > (lastRead || 0) && t.lastMessageSenderUid !== uid,
+      lastReadByPeer: lastReadByPeer || 0,
       myWrappedThreadKey: meIsA ? t.threadKeyForA : t.threadKeyForB,
       peerEcdhPublicJwkSnapshot: t.createdBy === uid ? null : t.creatorEcdhPublicJwkSnapshot
     };
@@ -12218,6 +12220,8 @@ router.get("/therapy/pro-chat/threads", asyncHandler(async (req, res) => {
 }));
 
 // GET /therapy/pro-chat/threads/:id — detalhe da thread
+// Retorna lastReadByPeer (pra ticks de leitura ✓✓) e peerTypingAt (pra
+// indicador "digitando..."). Timestamp do peer < 6s = peer está digitando.
 router.get("/therapy/pro-chat/threads/:id", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -12236,9 +12240,29 @@ router.get("/therapy/pro-chat/threads/:id", asyncHandler(async (req, res) => {
       peerName: meIsA ? t.displayNameB : t.displayNameA,
       myWrappedThreadKey: meIsA ? t.threadKeyForA : t.threadKeyForB,
       peerEcdhPublicJwkSnapshot: t.createdBy === uid ? null : t.creatorEcdhPublicJwkSnapshot,
-      lastReadByMe: meIsA ? t.lastReadByA : t.lastReadByB
+      lastReadByMe:   meIsA ? t.lastReadByA : t.lastReadByB,
+      lastReadByPeer: meIsA ? t.lastReadByB : t.lastReadByA,
+      peerTypingAt:   meIsA ? (t.typingByB || 0) : (t.typingByA || 0)
     }
   });
+}));
+
+// POST /therapy/pro-chat/threads/:id/typing — sinaliza que estou digitando.
+// Frontend POSTa com debounce (~3s). Backend só atualiza o timestamp;
+// outro lado polla GET /threads/:id e checa peerTypingAt - now < 6s.
+router.post("/therapy/pro-chat/threads/:id/typing", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const tref = getDb().collection("therapy_pro_threads").doc(threadId);
+  const tsnap = await tref.get();
+  if (!tsnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = tsnap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const meIsA = t.participantA === uid;
+  await tref.set(meIsA ? { typingByA: Date.now() } : { typingByB: Date.now() }, { merge: true });
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/pro-chat/threads/:id/messages?before=ms&limit=50
