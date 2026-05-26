@@ -8751,6 +8751,80 @@ router.post("/therapy/clinicas", asyncHandler(async (req, res) => {
   return res.json({ ok: true, clinicId });
 }));
 
+// GET /therapy/clinicas/state — consolida me + convites-pendentes em 1 fetch.
+// Frontend de clinica.html usa só este endpoint. Reduz 2 RTT + 2 Firebase
+// Auth verifies pra 1 RTT + 1 verify. Queries internas em paralelo. Os 2
+// endpoints antigos (/me e /convites-pendentes) ficam por compat caso
+// algum outro lugar use.
+router.get("/therapy/clinicas/state", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  // Tudo em paralelo: clínica do user, memberships, profile dele (pra
+  // pegar email pros convites), convites por uid direto.
+  const [ownedClinic, memberSnap, tsnap, byUidSnap] = await Promise.all([
+    findOwnedClinic(uid),
+    db.collection("therapy_clinic_members")
+      .where("therapistUid", "==", uid)
+      .where("status", "==", "active")
+      .get(),
+    db.collection("therapists").doc(uid).get(),
+    db.collection("therapy_clinic_members").where("therapistUid", "==", uid).get()
+  ]);
+
+  const email = tsnap.exists ? normalizeClinicEmail(tsnap.data().email) : null;
+  const byEmailSnap = email
+    ? await db.collection("therapy_clinic_members").where("invitedEmail", "==", email).get()
+    : { docs: [] };
+
+  // Enriquecimento de membership + convite em paralelo.
+  const [memberships, invites] = await Promise.all([
+    Promise.all(memberSnap.docs.map(async d => {
+      const m = d.data();
+      const csnap = await db.collection("therapy_clinics").doc(m.clinicId).get();
+      return {
+        memberId: m.memberId,
+        clinicId: m.clinicId,
+        clinicName: csnap.exists ? csnap.data().name : null,
+        repasseRule: m.repasseRule,
+        acceptedAt: m.acceptedAt || null
+      };
+    })),
+    (async () => {
+      const seen = new Set();
+      const pending = [...byEmailSnap.docs, ...byUidSnap.docs]
+        .map(d => d.data())
+        .filter(m => {
+          if (m.status !== "pending") return false;
+          if (seen.has(m.memberId)) return false;
+          seen.add(m.memberId);
+          return true;
+        });
+      return Promise.all(pending.map(async m => {
+        const csnap = await db.collection("therapy_clinics").doc(m.clinicId).get();
+        return {
+          memberId: m.memberId,
+          clinicId: m.clinicId,
+          clinicName: csnap.exists ? csnap.data().name : null,
+          invitedEmail: m.invitedEmail || null,
+          invitedByName: m.invitedByName || null,
+          repasseRule: m.repasseRule,
+          invitedAt: m.invitedAt || null
+        };
+      }));
+    })()
+  ]);
+
+  return res.json({
+    ok: true,
+    ownedClinic: ownedClinic || null,
+    memberships,
+    invites
+  });
+}));
+
 // GET /therapy/clinicas/me
 // Info da clínica do user: como dono (se houver) + memberships como funcionário.
 router.get("/therapy/clinicas/me", asyncHandler(async (req, res) => {
