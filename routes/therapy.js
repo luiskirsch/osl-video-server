@@ -3793,6 +3793,14 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
     ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
   });
 
+  // Auto-link retroativo de sessões anteriores criadas com o email deste
+  // paciente (mas sem patientAccountUid porque a conta de paciente ainda
+  // não existia ou ele entrou como convidado). Não bloqueia o registro
+  // se falhar — best-effort, paciente pode chamar /auto-link depois.
+  try {
+    await autoLinkPatientSessions(uid, db);
+  } catch (e) { /* silencioso — fluxo principal continua */ }
+
   return res.json({
     ok: true,
     account: {
@@ -3802,6 +3810,59 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
       wrappedDEKIv: lockedWrappedDEKIv
     }
   });
+}));
+
+// Helper: vincula sessões antigas a uma conta de paciente recém-criada/logada.
+// Busca sessões com patientEmail igual ao email do user (auth) e patientAccountUid
+// vazio. Update em batch. Retorna contagem.
+async function autoLinkPatientSessions(uid, db) {
+  let email = null;
+  try {
+    const user = await admin.auth().getUser(uid);
+    email = (user.email || "").trim().toLowerCase();
+  } catch { return { linked: 0 }; }
+  if (!email) return { linked: 0 };
+
+  // Query: where patientEmail == email. Filtra patientAccountUid vazio em JS
+  // (Firestore não tem operador "field is missing"/null nativo confiável).
+  const snap = await db.collection("therapy_sessions")
+    .where("patientEmail", "==", email)
+    .limit(500)
+    .get();
+
+  if (snap.empty) return { linked: 0 };
+
+  // Batch updates — máximo 500 ops por batch no Firestore.
+  const batch = db.batch();
+  let linked = 0;
+  snap.forEach(doc => {
+    const data = doc.data();
+    if (data.patientAccountUid) return; // já vinculada
+    batch.update(doc.ref, {
+      patientAccountUid: uid,
+      autoLinkedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    linked++;
+  });
+  if (linked > 0) {
+    await batch.commit();
+    await logAudit({ type: "patient_sessions_auto_linked", patientAccountUid: uid, count: linked });
+  }
+  return { linked };
+}
+
+// POST /therapy/paciente/auto-link — re-roda o auto-link manualmente.
+// Idempotente. Útil pra contas antigas (registradas antes desta feature)
+// e pra cenários onde novas sessões foram criadas DEPOIS do registro.
+// Frontend pode chamar 1x no boot do paciente-painel pra cobrir esses casos.
+router.post("/therapy/paciente/auto-link", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "CONTA_NAO_REGISTRADA");
+  const result = await autoLinkPatientSessions(uid, getDb());
+  return res.json({ ok: true, linked: result.linked });
 }));
 
 // POST /therapy/paciente/recuperar — sobrescreve salt + wrappedDEK do paciente
