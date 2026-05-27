@@ -202,15 +202,29 @@ async function loadTherapist(uid) {
 
 // Determina se o profissional pode usar funções clínicas (criar consulta,
 // receita, documento, paciente). Regra de produto:
+//   - adminGrantedUntil > now → libera (cortesia manual do admin, bypass)
 //   - student-active        → libera (tier estudante gratuito)
 //   - pro                   → libera (assinatura paga e ativa)
 //   - trial COM trialUntil > now → libera (período gratuito)
 //   - qualquer outro estado → bloqueia (trial expirado, canceled, expired,
 //                              recem-formado-eligible que não contratou ainda,
 //                              pending-review além do trial)
-// Retorna { ok: bool, reason?: string, plano: string, trialUntil?: number }
+// Retorna { ok: bool, reason?: string, plano: string, trialUntil?: number,
+//           adminGrantedUntil?: number }
 function evaluatePlanAccess(therapist) {
   if (!therapist) return { ok: false, reason: "PROFISSIONAL_NAO_REGISTRADO", plano: null };
+
+  // CORTESIA ADMIN — bypass que libera acesso independente do plano. Usado
+  // pra conceder meses grátis manualmente via PATCH /therapy/admin/profissionais
+  // (grantFreeMonths). Checa PRIMEIRO pra que cortesia funcione mesmo com
+  // plano=canceled/trial-expirado/etc.
+  const adminUntil = therapist.adminGrantedUntil?.toMillis
+    ? therapist.adminGrantedUntil.toMillis()
+    : Number(therapist.adminGrantedUntil) || 0;
+  if (adminUntil && adminUntil > Date.now()) {
+    return { ok: true, plano: therapist.plano || "trial", adminGrantedUntil: adminUntil };
+  }
+
   const plano = therapist.plano || "trial";
   if (plano === "pro") {
     return { ok: true, plano };
@@ -1538,7 +1552,10 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
       reason: access.reason || null,
       plano: access.plano,
       trialUntil: trialUntilMs || null,
-      trialDaysLeft: daysLeft
+      trialDaysLeft: daysLeft,
+      // Cortesia admin (se houver) — frontend pode mostrar pill "Cortesia até X"
+      // no painel do terapeuta pra esclarecer por que está liberado sem plano pago.
+      adminGrantedUntil: access.adminGrantedUntil || null
     },
     conselho: {
       sigla: conselhoSigla || null,
