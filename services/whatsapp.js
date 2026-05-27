@@ -173,9 +173,10 @@ function resolveTemplate(whatsappConfig, kind) {
 
 // Formata timestamp pra date+time pt-BR separadamente. Usado nos templates.
 function formatBR(ms) {
+  const tz = { timeZone: "America/Sao_Paulo" };
   const d = new Date(ms);
-  const data = d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
-  const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  const data = d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", ...tz });
+  const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", ...tz });
   return { data, hora };
 }
 
