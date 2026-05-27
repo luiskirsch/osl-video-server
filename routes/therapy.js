@@ -12382,13 +12382,19 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
     .map(d => {
       const m = d.data();
       const ts = m.createdAt?.toMillis ? m.createdAt.toMillis() : (Number(m.createdAt) || 0);
+      const favoritedBy = Array.isArray(m.favoritedBy) ? m.favoritedBy : [];
+      const isDeleted = m.deleted === true;
       return {
         messageId: m.messageId,
         senderUid: m.senderUid,
         senderRole: m.senderRole,
-        ciphertext: m.ciphertext,
-        iv: m.iv,
-        createdAt: ts
+        // Msg apagada: nao devolve ciphertext (frontend mostra placeholder).
+        ciphertext: isDeleted ? null : m.ciphertext,
+        iv: isDeleted ? null : m.iv,
+        createdAt: ts,
+        deleted: isDeleted,
+        replyToMessageId: m.replyToMessageId || null,
+        favoritedByMe: favoritedBy.includes(uid)
       };
     })
     // Filtra "before" + pega ultimos N + ordena ascendente pra UI.
@@ -12418,6 +12424,10 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
   if (!ciphertext || !iv) return sendError(res, 400, "CONTEUDO_INVALIDO");
   if (ciphertext.length > 6000) return sendError(res, 413, "MENSAGEM_GRANDE_DEMAIS");
 
+  // Reply: ID da mensagem sendo respondida. Frontend mostra quote da
+  // original lookup-ando no cache. Backend so persiste o ID.
+  const replyToMessageId = String(req.body?.replyToMessageId || "").trim() || null;
+
   const db = getDb();
   const threadRef = db.collection("therapy_threads").doc(threadId);
   const threadSnap = await threadRef.get();
@@ -12438,7 +12448,8 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
     senderRole: me.role,
     ciphertext,
     iv,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    ...(replyToMessageId ? { replyToMessageId } : {})
   });
 
   // Denormaliza unread count: incrementa pro OUTRO lado, zera pro proprio.
@@ -12493,6 +12504,64 @@ router.patch("/therapy/chat/threads/:id/read", asyncHandler(async (req, res) => 
   await threadRef.set({
     ...(me.role === "therapist" ? { lastReadByTherapist: until, unreadCountForTherapist: 0 } : { lastReadByPatient: until, unreadCountForPatient: 0 })
   }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// PATCH /therapy/chat/messages/:id — ações no menu de contexto da msg.
+// Body aceita (um por vez):
+//  { deleted: true }   — soft delete; APENAS o sender pode apagar a propria msg.
+//  { favorite: bool }  — adiciona/remove o user atual do array favoritedBy.
+router.patch("/therapy/chat/messages/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const messageId = String(req.params.id || "").trim();
+  if (!messageId) return sendError(res, 400, "MESSAGE_ID_OBRIGATORIO");
+
+  const db = getDb();
+  const msgRef = db.collection("therapy_messages").doc(messageId);
+  const msgSnap = await msgRef.get();
+  if (!msgSnap.exists) return sendError(res, 404, "MENSAGEM_NAO_ENCONTRADA");
+  const m = msgSnap.data();
+
+  // Verifica que sou participante da thread.
+  const threadSnap = await db.collection("therapy_threads").doc(m.threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = threadSnap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = {};
+
+  if (req.body?.deleted === true) {
+    // Apenas o sender pode apagar a propria msg.
+    if (m.senderUid !== uid) return sendError(res, 403, "APENAS_SENDER_APAGA");
+    if (m.deleted) return res.json({ ok: true }); // idempotente
+    updates.deleted = true;
+    updates.deletedAt = admin.firestore.FieldValue.serverTimestamp();
+    // Limpa ciphertext pra economizar storage + garantir nao-recuperabilidade.
+    updates.ciphertext = admin.firestore.FieldValue.delete();
+    updates.iv = admin.firestore.FieldValue.delete();
+  }
+
+  if (typeof req.body?.favorite === "boolean") {
+    updates.favoritedBy = req.body.favorite
+      ? admin.firestore.FieldValue.arrayUnion(uid)
+      : admin.firestore.FieldValue.arrayRemove(uid);
+  }
+
+  if (Object.keys(updates).length === 0) return sendError(res, 400, "NENHUMA_ACAO");
+
+  await msgRef.set(updates, { merge: true });
+
+  await logAudit({
+    type: "chat_message_action",
+    messageId,
+    threadId: m.threadId,
+    actorUid: uid,
+    actions: Object.keys(updates).filter(k => k !== "deletedAt").join(",")
+  });
 
   return res.json({ ok: true });
 }));
