@@ -121,7 +121,7 @@ const {
   templateClinicInvite,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
-  buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl,
+  buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl, buildConfirmUrl: buildPatientConfirmUrl,
   buildReciboPublicoUrl,
   buildAnamneseUrl,
   buildEscalaUrl,
@@ -1735,7 +1735,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   // - ZAPI configurado (env vars presentes)
   // Mesma estratégia do e-mail: 1ª ocorrência só; recorrência usa lembrete 24h.
   if (patientPhone && firstJoinToken && therapist?.whatsappConfig?.enabled) {
-    const cancelTokenInfo = buildCancelToken(created[0].sessionId);
+    const cancelTokenInfo  = buildCancelToken(created[0].sessionId);
+    const confirmTokenInfo = buildConfirmToken(created[0].sessionId);
     const sessionForWa = {
       sessionId: created[0].sessionId,
       patientName, patientPhone,
@@ -1743,8 +1744,9 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     };
     sendWaConfirmation({
       session: sessionForWa, therapist,
-      joinUrl:   buildPatientJoinUrl(firstJoinCode || firstJoinToken),
-      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token)
+      joinUrl:    buildPatientJoinUrl(firstJoinCode || firstJoinToken),
+      cancelUrl:  buildPatientCancelUrl(cancelTokenInfo.token),
+      confirmUrl: buildPatientConfirmUrl(confirmTokenInfo.token)
     }).then(r => {
       if (r.ok)        logInfo("therapy_confirmation_wa_sent",    { sessionId: created[0].sessionId, messageId: r.messageId });
       else if (r.skipped) logInfo("therapy_confirmation_wa_skipped", { sessionId: created[0].sessionId, reason: r.reason });
@@ -2511,6 +2513,18 @@ function buildCancelToken(sessionId) {
   const exp = now + CANCEL_TOKEN_VALIDITY_MS;
   const token = signPayload({
     token_type: "session_cancel",
+    sessionId,
+    iat: now,
+    exp
+  }, ACCESS_TOKEN_SECRET);
+  return { token, exp };
+}
+
+function buildConfirmToken(sessionId) {
+  const now = Date.now();
+  const exp = now + CANCEL_TOKEN_VALIDITY_MS; // mesma validade de 60 dias
+  const token = signPayload({
+    token_type: "session_confirm",
     sessionId,
     iat: now,
     exp

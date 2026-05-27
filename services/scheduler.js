@@ -150,7 +150,7 @@ async function runReminderTick() {
             patientName: s.patientName, patientPhone: s.patientPhone,
             scheduledAt: at
           };
-          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
+          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl, confirmUrl });
           if (r.ok) {
             await doc.ref.set({ waReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             waSent++;
@@ -292,7 +292,7 @@ async function runReminder1hTick() {
             patientName: s.patientName, patientPhone: s.patientPhone,
             scheduledAt: at
           };
-          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl });
+          const r = await sendWaReminder({ session, therapist, joinUrl, cancelUrl, confirmUrl });
           if (r.ok) {
             await doc.ref.set({ waReminder1hSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
             waSent++;

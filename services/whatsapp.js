@@ -181,7 +181,7 @@ function formatBR(ms) {
 }
 
 // Constrói o set de variáveis padrão pra substituição em template.
-function buildVars({ session, therapist, joinUrl, cancelUrl }) {
+function buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
   const wa = therapist?.whatsappConfig || {};
   const { data, hora } = session?.scheduledAt
     ? formatBR(session.scheduledAt)
@@ -191,7 +191,7 @@ function buildVars({ session, therapist, joinUrl, cancelUrl }) {
     profissional: therapist?.displayName || "",
     data,
     hora,
-    link_confirmar: joinUrl || "",
+    link_confirmar: confirmUrl || joinUrl || "",
     link_cancelar:  cancelUrl || "",
     telefone_clinica: wa.phoneClinic || "",
     nome_clinica:     wa.clinicName  || therapist?.displayName || ""
@@ -199,20 +199,20 @@ function buildVars({ session, therapist, joinUrl, cancelUrl }) {
 }
 
 // Envia confirmação ao criar consulta. Caller já passou as URLs assinadas.
-async function sendConfirmation({ session, therapist, joinUrl, cancelUrl }) {
+async function sendConfirmation({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
   if (!therapist?.whatsappConfig?.enabled) return { ok: false, skipped: true, reason: "WA_DESATIVADO" };
   if (!session?.patientPhone) return { ok: false, skipped: true, reason: "SEM_TELEFONE" };
   const tpl  = resolveTemplate(therapist.whatsappConfig, "confirmacao");
-  const vars = buildVars({ session, therapist, joinUrl, cancelUrl });
+  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl });
   const message = applyTemplate(tpl, vars);
   return sendText({ to: session.patientPhone, message });
 }
 
-async function sendReminder({ session, therapist, joinUrl, cancelUrl }) {
+async function sendReminder({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
   if (!therapist?.whatsappConfig?.enabled) return { ok: false, skipped: true, reason: "WA_DESATIVADO" };
   if (!session?.patientPhone) return { ok: false, skipped: true, reason: "SEM_TELEFONE" };
   const tpl  = resolveTemplate(therapist.whatsappConfig, "lembrete");
-  const vars = buildVars({ session, therapist, joinUrl, cancelUrl });
+  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl });
   const message = applyTemplate(tpl, vars);
   return sendText({ to: session.patientPhone, message });
 }
