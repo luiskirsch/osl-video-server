@@ -12293,6 +12293,10 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
     const unreadField = me.role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
     const unreadCount = Math.max(0, Number(t[unreadField]) || 0);
     const senderWasMe = t.lastMessageSenderRole === me.role;
+    // Thread key wrapper pro user atual — frontend decifra lastMessage*
+    // localmente pra mostrar preview na sidebar sem precisar abrir cada thread.
+    const isCreator = (t.createdBy === me.role);
+    const myThreadKeyWrapper = me.role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
     return {
       threadId: t.threadId,
       therapistUid: t.therapistUid,
@@ -12301,6 +12305,11 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
       patientDisplayName: t.patientDisplayName,
       lastMessageAt: lastMsgMs || null,
       lastMessageSenderRole: t.lastMessageSenderRole || null,
+      lastMessageCiphertext: t.lastMessageCiphertext || null,
+      lastMessageIv: t.lastMessageIv || null,
+      myThreadKeyWrapper: myThreadKeyWrapper || null,
+      myThreadKeyWrappedVia: isCreator ? "own-dek" : "ecdh",
+      peerEcdhPublicJwk: isCreator ? null : (t.creatorEcdhPublicJwkSnapshot || null),
       unreadCount,
       hasUnread: unreadCount > 0 || (!senderWasMe && lastMsgMs > lastReadMs),
       createdAt: t.createdAt?.toMillis ? t.createdAt.toMillis() : null
@@ -12470,6 +12479,11 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
   await threadRef.set({
     lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
     lastMessageSenderRole: me.role,
+    // Denormaliza o ciphertext+iv da ultima msg pra que o frontend consiga
+    // decifrar o preview na lista de threads SEM precisar abrir cada uma.
+    // Antes, preview so aparecia depois do user abrir a thread (cache local).
+    lastMessageCiphertext: ciphertext,
+    lastMessageIv: iv,
     // Sender também marca como lido pro próprio role (não conta como unread pra si).
     ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now }),
     [otherCountField]: admin.firestore.FieldValue.increment(1),
