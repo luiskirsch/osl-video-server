@@ -6396,19 +6396,25 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
   const pendSemConselho = queries[6].status === "fulfilled" ? queries[6].value.size : 0;
 
   // ─── Integrações (configurado vs não) ───────────────────────────────
+  // Só listamos integrações CRÍTICAS pro produto funcionar. Removidos:
+  //  - Twilio: SMS não usado (canal é WhatsApp via Z-API).
+  //  - Asaas: configuração é per-therapist (cada um cola apiKey em Perfil),
+  //    não env global. Status global "OK/OFF" não faz sentido.
+  //  - NFE.io: feature inativa por enquanto.
+  //  - Sentry: opcional (recém-adicionado, DSN pode estar pendente no Railway).
+  //
+  // LiveKit usa a CONSTANTE resolvida (config.js tem default pro URL), não
+  // process.env direto — o check anterior dava OFF mesmo com app funcionando.
   const env = process.env;
+  const { LIVEKIT_URL: LK_URL, LIVEKIT_API_KEY: LK_KEY } = require("../config");
   const integrations = {
     firebase: { ok: !!db, label: "Firebase" },
-    livekit: { ok: !!env.LIVEKIT_API_KEY && !!env.LIVEKIT_URL, label: "LiveKit (vídeo E2EE)" },
+    livekit: { ok: !!LK_KEY && !!LK_URL, label: "LiveKit (vídeo E2EE)" },
     mp_jogo: { ok: !!env.MP_ACCESS_TOKEN_JOGO || !!env.MP_ACCESS_TOKEN, label: "Mercado Pago (Jogo)" },
     mp_therapy: { ok: !!env.MP_ACCESS_TOKEN_THERAPY || !!env.MP_ACCESS_TOKEN, label: "Mercado Pago (Therapy)" },
     anthropic: { ok: !!env.ANTHROPIC_API_KEY, label: "Anthropic (Aurora + validador)" },
     resend: { ok: !!env.RESEND_API_KEY, label: "Resend (e-mail)" },
-    zapi: { ok: !!env.ZAPI_INSTANCE_ID && !!env.ZAPI_CLIENT_TOKEN, label: "Z-API (WhatsApp)" },
-    twilio: { ok: !!env.TWILIO_ACCOUNT_SID, label: "Twilio (SMS)" },
-    asaas: { ok: !!env.ASAAS_WEBHOOK_TOKEN, label: "Asaas" },
-    nfeio: { ok: !!env.NFEIO_API_KEY, label: "NFE.io (NFS-e)" },
-    sentry: { ok: !!env.SENTRY_DSN, label: "Sentry (errors)" }
+    zapi: { ok: !!env.ZAPI_INSTANCE_ID && !!env.ZAPI_CLIENT_TOKEN, label: "Z-API (WhatsApp)" }
   };
 
   // ─── Sistema ────────────────────────────────────────────────────────
