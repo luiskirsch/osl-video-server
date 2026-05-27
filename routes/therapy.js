@@ -7395,6 +7395,109 @@ router.patch("/therapy/admin/denuncias/:id", asyncHandler(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+// ─── NOTIFICAÇÕES ──────────────────────────────────────────────────────────
+
+// POST /therapy/admin/notificacoes — admin envia notificação a um usuário.
+// Body: { recipientUid, title, body, type?, reportId? }
+router.post("/therapy/admin/notificacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const recipientUid = String(req.body?.recipientUid || "").trim();
+  const title        = String(req.body?.title        || "").trim().slice(0, 200);
+  const body         = String(req.body?.body         || "").trim().slice(0, 2000);
+  const type         = String(req.body?.type         || "admin_message").trim();
+  const reportId     = String(req.body?.reportId     || "").trim() || null;
+
+  if (!recipientUid) return sendError(res, 400, "DESTINATARIO_OBRIGATORIO");
+  if (!title)        return sendError(res, 400, "TITULO_OBRIGATORIO");
+  if (!body)         return sendError(res, 400, "CORPO_OBRIGATORIO");
+
+  const notifId = db.collection("therapy_notifications").doc().id;
+  await db.collection("therapy_notifications").doc(notifId).set({
+    notificationId: notifId,
+    recipientUid,
+    type,
+    title,
+    body,
+    read: false,
+    reportId,
+    sentBy: adminAuth.email,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({ type: "notification_sent", notificationId: notifId, recipientUid, sentBy: adminAuth.email, reportId });
+  return res.json({ ok: true, notificationId: notifId });
+}));
+
+// GET /therapy/notifications — notificações do usuário autenticado (max 100).
+router.get("/therapy/notifications", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_notifications")
+    .where("recipientUid", "==", uid)
+    .limit(100)
+    .get();
+
+  const items = snap.docs.map(d => {
+    const n = d.data();
+    return {
+      notificationId: n.notificationId,
+      type: n.type || "admin_message",
+      title: n.title,
+      body: n.body,
+      read: n.read || false,
+      reportId: n.reportId || null,
+      createdAt: n.createdAt?.toMillis ? n.createdAt.toMillis() : null
+    };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
+// GET /therapy/notifications/unread-count — contador para badge do sino.
+router.get("/therapy/notifications/unread-count", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_notifications")
+    .where("recipientUid", "==", uid)
+    .where("read", "==", false)
+    .limit(100)
+    .get();
+
+  return res.json({ ok: true, count: snap.size });
+}));
+
+// PATCH /therapy/notifications/read-all — marca todas as notificações do usuário como lidas.
+router.patch("/therapy/notifications/read-all", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_notifications")
+    .where("recipientUid", "==", uid)
+    .where("read", "==", false)
+    .limit(100)
+    .get();
+
+  if (!snap.empty) {
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.update(d.ref, { read: true }));
+    await batch.commit();
+  }
+
+  return res.json({ ok: true, marked: snap.size });
+}));
+
 // PATCH /therapy/admin/profissionais/:uid — ajusta plano/cortesias do prof
 // Body (todos campos opcionais — só aplica os presentes):
 //   extendTrialDays: number — +N dias no trialUntil (a partir do MAX entre
