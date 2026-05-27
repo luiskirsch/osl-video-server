@@ -12928,6 +12928,40 @@ router.post("/therapy/chat/messages/:id/report", asyncHandler(async (req, res) =
   return res.json({ ok: true, reportId });
 }));
 
+// GET /therapy/chat/profissionais — lista profissionais verificados do sistema
+// para compartilhar como contato no chat. Retorna apenas dados públicos.
+router.get("/therapy/chat/profissionais", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const snap = await getDb().collection("therapists")
+    .where("verificationStatus", "==", "verified")
+    .limit(300)
+    .get();
+
+  const profissionais = snap.docs
+    .map(d => {
+      const t = d.data();
+      const conselho = t.tipoConselho && t.tipoConselho !== "SEM_CONSELHO"
+        ? `${t.tipoConselho}: ${t.numeroConselho || t.crp || t.crm || ""}`.trim()
+        : "";
+      return {
+        uid: t.uid || d.id,
+        displayName: t.displayName || "",
+        especialidade: t.especialidade || "",
+        conselho,
+        telefone: t.consultorio?.telefone || "",
+        cidade: t.consultorio?.cidade || "",
+        uf:     t.consultorio?.uf     || ""
+      };
+    })
+    .filter(t => t.uid !== uid && t.displayName)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
+
+  return res.json({ ok: true, profissionais });
+}));
+
 // GET /therapy/chat/peers — lista os peers possíveis pra abrir chat novo.
 // - Therapist: pacientes que têm conta (therapy_patient_accounts) E que já
 //   tiveram sessão com este therapist (link via therapy_sessions.patientAccountUid).
