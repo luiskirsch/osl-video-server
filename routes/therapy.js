@@ -12287,11 +12287,11 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
     const lastReadField = me.role === "therapist" ? "lastReadByTherapist" : "lastReadByPatient";
     const lastReadMs = Number(t[lastReadField]) || 0;
     const lastMsgMs  = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : (Number(t.lastMessageAt) || 0);
-    // hasUnread: ultima msg veio do OUTRO lado E ainda nao li. Mensagem
-    // que EU mesmo mandei nao eh "nao lida". Antes o check era apenas
-    // lastMsgMs > lastReadMs — falso positivo no proprio sender por causa
-    // de drift entre serverTimestamp (lastMessageAt) e Date.now() local
-    // (lastReadByX) escritos no mesmo set().
+    // Source of truth pro 'nao lida' eh unreadCount<Role>: incrementa
+    // a cada msg do OUTRO lado, zera no PATCH /read. hasUnread mantido
+    // pra compat com clientes antigos que ainda nao migraram.
+    const unreadField = me.role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
+    const unreadCount = Math.max(0, Number(t[unreadField]) || 0);
     const senderWasMe = t.lastMessageSenderRole === me.role;
     return {
       threadId: t.threadId,
@@ -12301,7 +12301,8 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
       patientDisplayName: t.patientDisplayName,
       lastMessageAt: lastMsgMs || null,
       lastMessageSenderRole: t.lastMessageSenderRole || null,
-      hasUnread: !senderWasMe && lastMsgMs > lastReadMs,
+      unreadCount,
+      hasUnread: unreadCount > 0 || (!senderWasMe && lastMsgMs > lastReadMs),
       createdAt: t.createdAt?.toMillis ? t.createdAt.toMillis() : null
     };
   }).sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0));
@@ -12440,11 +12441,17 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
 
+  // Denormaliza unread count: incrementa pro OUTRO lado, zera pro proprio.
+  // Frontend mostra circulo verde com numero (estilo WhatsApp).
+  const otherCountField = me.role === "therapist" ? "unreadCountForPatient" : "unreadCountForTherapist";
+  const myCountField    = me.role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
   await threadRef.set({
     lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
     lastMessageSenderRole: me.role,
     // Sender também marca como lido pro próprio role (não conta como unread pra si).
-    ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now })
+    ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now }),
+    [otherCountField]: admin.firestore.FieldValue.increment(1),
+    [myCountField]: 0
   }, { merge: true });
 
   // Push notification best-effort. pushToUser cobre therapist E paciente.
@@ -12484,7 +12491,7 @@ router.patch("/therapy/chat/threads/:id/read", asyncHandler(async (req, res) => 
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   await threadRef.set({
-    ...(me.role === "therapist" ? { lastReadByTherapist: until } : { lastReadByPatient: until })
+    ...(me.role === "therapist" ? { lastReadByTherapist: until, unreadCountForTherapist: 0 } : { lastReadByPatient: until, unreadCountForPatient: 0 })
   }, { merge: true });
 
   return res.json({ ok: true });
