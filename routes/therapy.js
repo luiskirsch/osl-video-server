@@ -12384,6 +12384,11 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
       const ts = m.createdAt?.toMillis ? m.createdAt.toMillis() : (Number(m.createdAt) || 0);
       const favoritedBy = Array.isArray(m.favoritedBy) ? m.favoritedBy : [];
       const isDeleted = m.deleted === true;
+      // Agrega reactions do map {emoji: [uids]} em [{emoji, count, mine}].
+      const rxMap = (m.reactions && typeof m.reactions === "object") ? m.reactions : {};
+      const reactions = Object.entries(rxMap)
+        .filter(([_, uids]) => Array.isArray(uids) && uids.length > 0)
+        .map(([emoji, uids]) => ({ emoji, count: uids.length, mine: uids.includes(uid) }));
       return {
         messageId: m.messageId,
         senderUid: m.senderUid,
@@ -12394,7 +12399,11 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
         createdAt: ts,
         deleted: isDeleted,
         replyToMessageId: m.replyToMessageId || null,
-        favoritedByMe: favoritedBy.includes(uid)
+        forwardedFromMessageId: m.forwardedFromMessageId || null,
+        favoritedByMe: favoritedBy.includes(uid),
+        pinned: m.pinned === true,
+        pinnedAt: m.pinnedAt?.toMillis ? m.pinnedAt.toMillis() : null,
+        reactions
       };
     })
     // Filtra "before" + pega ultimos N + ordena ascendente pra UI.
@@ -12427,6 +12436,7 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
   // Reply: ID da mensagem sendo respondida. Frontend mostra quote da
   // original lookup-ando no cache. Backend so persiste o ID.
   const replyToMessageId = String(req.body?.replyToMessageId || "").trim() || null;
+  const forwardedFromMessageId = String(req.body?.forwardedFromMessageId || "").trim() || null;
 
   const db = getDb();
   const threadRef = db.collection("therapy_threads").doc(threadId);
@@ -12449,7 +12459,8 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
     ciphertext,
     iv,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    ...(replyToMessageId ? { replyToMessageId } : {})
+    ...(replyToMessageId ? { replyToMessageId } : {}),
+    ...(forwardedFromMessageId ? { forwardedFromMessageId } : {})
   });
 
   // Denormaliza unread count: incrementa pro OUTRO lado, zera pro proprio.
@@ -12551,6 +12562,19 @@ router.patch("/therapy/chat/messages/:id", asyncHandler(async (req, res) => {
       : admin.firestore.FieldValue.arrayRemove(uid);
   }
 
+  if (typeof req.body?.pinned === "boolean") {
+    // Pin: ambos participantes podem fixar/desafixar (decisao conjunta da
+    // dupla terapeuta+paciente). Audit registra quem.
+    updates.pinned = req.body.pinned;
+    if (req.body.pinned) {
+      updates.pinnedAt = admin.firestore.FieldValue.serverTimestamp();
+      updates.pinnedBy = uid;
+    } else {
+      updates.pinnedAt = admin.firestore.FieldValue.delete();
+      updates.pinnedBy = admin.firestore.FieldValue.delete();
+    }
+  }
+
   if (Object.keys(updates).length === 0) return sendError(res, 400, "NENHUMA_ACAO");
 
   await msgRef.set(updates, { merge: true });
@@ -12564,6 +12588,96 @@ router.patch("/therapy/chat/messages/:id", asyncHandler(async (req, res) => {
   });
 
   return res.json({ ok: true });
+}));
+
+// POST /therapy/chat/messages/:id/react — toggle emoji reaction.
+// Body: { emoji }. Storage: msg.reactions = { "👍": [uid1, uid2], "❤️": [...] }
+// Toggle: se o user ja tinha esse emoji, remove. Se nao, adiciona (mantendo
+// outros emojis dele em outras keys — pode reagir com varios emojis).
+const ALLOWED_REACTIONS = new Set(["👍","❤️","😂","😮","😢","🙏"]);
+router.post("/therapy/chat/messages/:id/react", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const messageId = String(req.params.id || "").trim();
+  if (!messageId) return sendError(res, 400, "MESSAGE_ID_OBRIGATORIO");
+
+  const emoji = String(req.body?.emoji || "").trim();
+  if (!emoji || !ALLOWED_REACTIONS.has(emoji)) return sendError(res, 400, "EMOJI_INVALIDO");
+
+  const db = getDb();
+  const msgRef = db.collection("therapy_messages").doc(messageId);
+  const msgSnap = await msgRef.get();
+  if (!msgSnap.exists) return sendError(res, 404, "MENSAGEM_NAO_ENCONTRADA");
+  const m = msgSnap.data();
+
+  const threadSnap = await db.collection("therapy_threads").doc(m.threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = threadSnap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  // Toggle: tem o uid no array do emoji? remove. Senao, adiciona.
+  const currentUids = (m.reactions && m.reactions[emoji]) || [];
+  const had = Array.isArray(currentUids) && currentUids.includes(uid);
+  await msgRef.set({
+    [`reactions.${emoji}`]: had
+      ? admin.firestore.FieldValue.arrayRemove(uid)
+      : admin.firestore.FieldValue.arrayUnion(uid)
+  }, { merge: true });
+
+  return res.json({ ok: true, emoji, mine: !had });
+}));
+
+// POST /therapy/chat/messages/:id/report — denuncia uma msg.
+// Body: { reason }. Cria therapy_message_reports doc + audit.
+router.post("/therapy/chat/messages/:id/report", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const me = await identifyUser(uid);
+  if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
+
+  const messageId = String(req.params.id || "").trim();
+  if (!messageId) return sendError(res, 400, "MESSAGE_ID_OBRIGATORIO");
+
+  const reason = String(req.body?.reason || "").trim().slice(0, 1000);
+  if (!reason) return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+
+  const db = getDb();
+  const msgSnap = await db.collection("therapy_messages").doc(messageId).get();
+  if (!msgSnap.exists) return sendError(res, 404, "MENSAGEM_NAO_ENCONTRADA");
+  const m = msgSnap.data();
+
+  const threadSnap = await db.collection("therapy_threads").doc(m.threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = threadSnap.data();
+  if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const reportId = newId("rep");
+  await db.collection("therapy_message_reports").doc(reportId).set({
+    reportId,
+    messageId,
+    threadId: m.threadId,
+    reporterUid: uid,
+    reporterRole: me.role,
+    reportedSenderUid: m.senderUid,
+    reportedSenderRole: m.senderRole,
+    reason,
+    status: "open",
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({
+    type: "chat_message_reported",
+    messageId,
+    threadId: m.threadId,
+    reporterUid: uid,
+    reportId
+  });
+
+  return res.json({ ok: true, reportId });
 }));
 
 // GET /therapy/chat/peers — lista os peers possíveis pra abrir chat novo.
