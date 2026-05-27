@@ -12632,13 +12632,17 @@ router.post("/therapy/chat/messages/:id/react", asyncHandler(async (req, res) =>
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   // Toggle: tem o uid no array do emoji? remove. Senao, adiciona.
+  // update() (NAO set+merge) pra dot-notation — update() sempre interpreta
+  // "reactions.emoji" como nested path. set+merge pode criar field literal
+  // "reactions.emoji" em vez de nested, causando a reaction nao persistir
+  // e sumindo na proxima leitura.
   const currentUids = (m.reactions && m.reactions[emoji]) || [];
   const had = Array.isArray(currentUids) && currentUids.includes(uid);
-  await msgRef.set({
+  await msgRef.update({
     [`reactions.${emoji}`]: had
       ? admin.firestore.FieldValue.arrayRemove(uid)
       : admin.firestore.FieldValue.arrayUnion(uid)
-  }, { merge: true });
+  });
 
   return res.json({ ok: true, emoji, mine: !had });
 }));
