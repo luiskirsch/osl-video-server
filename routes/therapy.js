@@ -7124,6 +7124,182 @@ router.post("/therapy/admin/comprovantes-formacao/:uid/rejeitar", asyncHandler(a
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
+// ADMIN — gestão de profissionais (busca, ajuste de plano, cortesias)
+//
+// Permite ao admin (Luis) listar TODOS os profissionais (verificados ou não),
+// estender trial, conceder meses grátis (adminGrantedUntil), mudar plano,
+// marcar verificado manualmente, e deixar nota administrativa.
+//
+// Campos especiais que outras partes do sistema devem respeitar:
+//  - adminGrantedUntil (ms): se setado e > now, acesso liberado mesmo sem
+//    plano pago (cortesia). Implementação do check fica onde o resto da
+//    lógica de plano vive.
+//  - adminNote: texto livre do admin (max 500), pra contexto da cortesia.
+// ═════════════════════════════════════════════════════════════════════════
+
+// GET /therapy/admin/profissionais?search=texto&status=all|verified|pending
+router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const search = String(req.query?.search || "").trim().toLowerCase();
+  const wantStatus = String(req.query?.status || "all").trim().toLowerCase();
+  const allowedStatus = new Set(["all", "verified", "pending", "rejected"]);
+  if (!allowedStatus.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  const snap = await db.collection("therapists")
+    .orderBy("createdAt", "desc")
+    .limit(500)
+    .get();
+
+  const now = Date.now();
+  let items = snap.docs.map(d => {
+    const t = d.data();
+    const trialUntilMs = t.trialUntil?.toMillis?.() || (typeof t.trialUntil === "number" ? t.trialUntil : null);
+    const studentUntilMs = t.studentVerifiedUntil?.toMillis?.() || (typeof t.studentVerifiedUntil === "number" ? t.studentVerifiedUntil : null);
+    const adminGrantedUntilMs = t.adminGrantedUntil?.toMillis?.() || (typeof t.adminGrantedUntil === "number" ? t.adminGrantedUntil : null);
+    return {
+      uid: t.uid || d.id,
+      displayName: t.displayName || "",
+      email: t.email || null,
+      tipoConselho: t.tipoConselho || null,
+      numeroConselho: t.numeroConselho || t.crp || t.crm || "",
+      especialidade: t.especialidade || null,
+      plano: t.plano || null,
+      intendedTier: t.intendedTier || null,
+      verificado: !!t.verificado,
+      verificationStatus: t.verificationStatus || null,
+      verifiedAt: t.verifiedAt?.toMillis?.() || null,
+      trialUntil: trialUntilMs,
+      trialActive: !!(trialUntilMs && trialUntilMs > now),
+      studentVerifiedUntil: studentUntilMs,
+      adminGrantedUntil: adminGrantedUntilMs,
+      adminGrantActive: !!(adminGrantedUntilMs && adminGrantedUntilMs > now),
+      adminNote: t.adminNote || null,
+      mpPreapprovalId: t.mpPreapprovalId || null,
+      createdAt: t.createdAt?.toMillis?.() || null
+    };
+  });
+
+  if (wantStatus === "verified") items = items.filter(i => i.verificado);
+  else if (wantStatus === "pending") items = items.filter(i => !i.verificado && i.verificationStatus !== "rejected");
+  else if (wantStatus === "rejected") items = items.filter(i => i.verificationStatus === "rejected");
+
+  if (search) {
+    items = items.filter(i =>
+      (i.displayName || "").toLowerCase().includes(search) ||
+      (i.email || "").toLowerCase().includes(search) ||
+      (i.numeroConselho || "").toLowerCase().includes(search)
+    );
+  }
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
+// PATCH /therapy/admin/profissionais/:uid — ajusta plano/cortesias do prof
+// Body (todos campos opcionais — só aplica os presentes):
+//   extendTrialDays: number — +N dias no trialUntil (a partir do MAX entre
+//                              now e trial atual, pra não encurtar).
+//   grantFreeMonths: number — +N meses (30 dias cada) no adminGrantedUntil.
+//   setPlano: string         — novo valor de `plano` (allowlist).
+//   setAdminNote: string     — nota livre do admin (max 500).
+//   toggleVerificado: bool   — força verificado=true/false + verifiedAt.
+const ALLOWED_PLANOS = new Set([
+  "trial", "pro", "student-pending-review", "student-active",
+  "recem-formado-eligible", "recem-formado-active", "canceled"
+]);
+const DAY_MS = 24 * 60 * 60 * 1000;
+router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const therapist = await loadTherapist(targetUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const body = req.body || {};
+  const updates = {};
+  const auditDetail = [];
+  const now = Date.now();
+
+  if (Number.isFinite(body.extendTrialDays) && body.extendTrialDays > 0) {
+    const days = Math.min(Math.floor(body.extendTrialDays), 3650); // cap 10 anos
+    const currentMs = therapist.trialUntil?.toMillis?.() || (typeof therapist.trialUntil === "number" ? therapist.trialUntil : 0);
+    const baseMs = Math.max(currentMs, now);
+    const newMs = baseMs + days * DAY_MS;
+    updates.trialUntil = new Date(newMs);
+    auditDetail.push(`+${days}d trial → ${new Date(newMs).toISOString()}`);
+  }
+
+  if (Number.isFinite(body.grantFreeMonths) && body.grantFreeMonths > 0) {
+    const months = Math.min(Math.floor(body.grantFreeMonths), 120); // cap 10 anos
+    const currentMs = therapist.adminGrantedUntil?.toMillis?.() || (typeof therapist.adminGrantedUntil === "number" ? therapist.adminGrantedUntil : 0);
+    const baseMs = Math.max(currentMs, now);
+    const newMs = baseMs + months * 30 * DAY_MS;
+    updates.adminGrantedUntil = new Date(newMs);
+    auditDetail.push(`+${months}mo cortesia → ${new Date(newMs).toISOString()}`);
+  }
+
+  if (typeof body.setPlano === "string" && body.setPlano) {
+    if (!ALLOWED_PLANOS.has(body.setPlano)) return sendError(res, 400, "PLANO_INVALIDO");
+    updates.plano = body.setPlano;
+    auditDetail.push(`plano → ${body.setPlano}`);
+  }
+
+  if (typeof body.setAdminNote === "string") {
+    updates.adminNote = body.setAdminNote.slice(0, 500);
+    auditDetail.push(`nota atualizada`);
+  }
+
+  if (typeof body.toggleVerificado === "boolean") {
+    updates.verificado = body.toggleVerificado;
+    if (body.toggleVerificado) {
+      updates.verifiedAt = admin.firestore.FieldValue.serverTimestamp();
+      updates.verificationStatus = "verified";
+    } else {
+      updates.verifiedAt = null;
+      updates.verificationStatus = "pending-review";
+    }
+    auditDetail.push(`verificado → ${body.toggleVerificado}`);
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return sendError(res, 400, "NENHUMA_ACAO");
+  }
+
+  updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+  await getDb().collection("therapists").doc(targetUid).set(updates, { merge: true });
+
+  await logAudit({
+    type: "admin_profissional_ajuste",
+    therapistUid: targetUid,
+    reviewedBy: adminAuth.email,
+    detail: auditDetail.join(" | ")
+  });
+
+  // Devolve o doc atualizado pra UI atualizar sem refetch.
+  const fresh = await loadTherapist(targetUid);
+  return res.json({
+    ok: true,
+    profissional: {
+      uid: targetUid,
+      plano: fresh.plano || null,
+      trialUntil: fresh.trialUntil?.toMillis?.() || (typeof fresh.trialUntil === "number" ? fresh.trialUntil : null),
+      adminGrantedUntil: fresh.adminGrantedUntil?.toMillis?.() || (typeof fresh.adminGrantedUntil === "number" ? fresh.adminGrantedUntil : null),
+      adminNote: fresh.adminNote || null,
+      verificado: !!fresh.verificado,
+      verificationStatus: fresh.verificationStatus || null,
+      verifiedAt: fresh.verifiedAt?.toMillis?.() || null
+    }
+  });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
 // AUTO-AGENDAMENTO PÚBLICO — paciente solicita horário via link público
 // (https://espacopreludio.com.br/agendar.html?p=<slug>) sem ter conta.
 //
