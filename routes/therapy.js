@@ -7324,15 +7324,20 @@ router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
   const snap = await q.limit(200).get();
   const rawItems = snap.docs.map(d => d.data());
 
-  // Resolve nomes dos UIDs (reporter + reported) pra admin saber quem reportou quem.
-  // Batch: coleta UIDs unicos, busca em paralelo, monta map.
+  // Resolve nomes e emails dos UIDs (reporter + reported) pra admin saber quem reportou quem.
+  // Batch: coleta UIDs unicos, busca em paralelo, monta maps.
   const uidSet = new Set();
   rawItems.forEach(r => { if (r.reporterUid) uidSet.add(r.reporterUid); if (r.reportedSenderUid) uidSet.add(r.reportedSenderUid); });
   const nameMap = {};
+  const emailMap = {};
   await Promise.all([...uidSet].map(async (uid) => {
     try {
-      const user = await identifyUser(uid);
+      const [user, authUser] = await Promise.all([
+        identifyUser(uid),
+        admin.auth().getUser(uid).catch(() => null)
+      ]);
       nameMap[uid] = user?.doc?.displayName || null;
+      emailMap[uid] = authUser?.email || null;
     } catch { /* ignora */ }
   }));
 
@@ -7343,6 +7348,7 @@ router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
     reporterUid: r.reporterUid,
     reporterRole: r.reporterRole,
     reporterName: nameMap[r.reporterUid] || null,
+    reporterEmail: emailMap[r.reporterUid] || null,
     reportedSenderUid: r.reportedSenderUid,
     reportedSenderRole: r.reportedSenderRole,
     reportedSenderName: nameMap[r.reportedSenderUid] || null,
