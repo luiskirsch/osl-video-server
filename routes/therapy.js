@@ -12362,17 +12362,13 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
   const before = Number(req.query?.before) || Date.now();
   const limit  = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
-  // OrderBy createdAt desc com startAfter — pagina cursored em vez de
-  // grab-and-sort. Antes: .limit(500) sem orderBy pegava ordem natural do
-  // Firestore (pseudo-random pelo doc ID = crypto.randomBytes), threads
-  // com >500 msgs perdiam paginacao. Agora: indice composto (threadId asc,
-  // createdAt desc) requerido. Firestore vai dar erro indicando o link
-  // pra criar — clicar gera o indice automaticamente.
+  // Sem orderBy/where composto pra evitar exigencia de indice (threadId+
+  // createdAt). Trade-off: thread com >500 msgs perde as msgs MAIS ANTIGAS
+  // alem dos 500 — aceitavel pra uso terapeutico tipico. Padrao usado em
+  // outras queries do arquivo (ver linha ~1842 de /sessoes).
   const msgSnap = await db.collection("therapy_messages")
     .where("threadId", "==", threadId)
-    .where("createdAt", "<", new Date(before))
-    .orderBy("createdAt", "desc")
-    .limit(limit)
+    .limit(500)
     .get();
 
   const messages = msgSnap.docs
@@ -12388,7 +12384,10 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
         createdAt: ts
       };
     })
-    // Reverte pra ordem cronologica (asc) pra UI renderizar normal.
+    // Filtra "before" + pega ultimos N + ordena ascendente pra UI.
+    .filter(m => m.createdAt < before)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit)
     .sort((a, b) => a.createdAt - b.createdAt);
 
   return res.json({ ok: true, messages });
