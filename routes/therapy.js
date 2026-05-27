@@ -7322,21 +7322,36 @@ router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
     q = q.where("status", "==", wantStatus);
   }
   const snap = await q.limit(200).get();
-  const items = snap.docs.map(d => {
-    const r = d.data();
-    return {
-      reportId: r.reportId || d.id,
-      messageId: r.messageId,
-      threadId: r.threadId,
-      reporterUid: r.reporterUid,
-      reporterRole: r.reporterRole,
-      reportedSenderUid: r.reportedSenderUid,
-      reportedSenderRole: r.reportedSenderRole,
-      reason: r.reason,
-      status: r.status,
-      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
-    };
-  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const rawItems = snap.docs.map(d => d.data());
+
+  // Resolve nomes dos UIDs (reporter + reported) pra admin saber quem reportou quem.
+  // Batch: coleta UIDs unicos, busca em paralelo, monta map.
+  const uidSet = new Set();
+  rawItems.forEach(r => { if (r.reporterUid) uidSet.add(r.reporterUid); if (r.reportedSenderUid) uidSet.add(r.reportedSenderUid); });
+  const nameMap = {};
+  await Promise.all([...uidSet].map(async (uid) => {
+    try {
+      const user = await identifyUser(uid);
+      nameMap[uid] = user?.doc?.displayName || null;
+    } catch { /* ignora */ }
+  }));
+
+  const items = rawItems.map(r => ({
+    reportId: r.reportId,
+    messageId: r.messageId,
+    threadId: r.threadId,
+    reporterUid: r.reporterUid,
+    reporterRole: r.reporterRole,
+    reporterName: nameMap[r.reporterUid] || null,
+    reportedSenderUid: r.reportedSenderUid,
+    reportedSenderRole: r.reportedSenderRole,
+    reportedSenderName: nameMap[r.reportedSenderUid] || null,
+    reason: r.reason,
+    messageSnapshot: r.messageSnapshot || null,
+    status: r.status,
+    reviewedBy: r.reviewedBy || null,
+    createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
+  })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, items, count: items.length });
 }));
@@ -12739,6 +12754,11 @@ router.post("/therapy/chat/messages/:id/report", asyncHandler(async (req, res) =
   const t = threadSnap.data();
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  // Snapshot do plaintext que o reporter ja tem decifrado localmente.
+  // Armazena pra admin poder ler o conteudo reportado sem precisar da key
+  // E2EE da thread (admin nao eh participante, nao tem como decifrar).
+  const messageSnapshot = String(req.body?.messageSnapshot || "").trim().slice(0, 2000);
+
   const reportId = newId("rep");
   await db.collection("therapy_message_reports").doc(reportId).set({
     reportId,
@@ -12749,6 +12769,7 @@ router.post("/therapy/chat/messages/:id/report", asyncHandler(async (req, res) =
     reportedSenderUid: m.senderUid,
     reportedSenderRole: m.senderRole,
     reason,
+    messageSnapshot: messageSnapshot || null,
     status: "open",
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
