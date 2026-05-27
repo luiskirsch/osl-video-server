@@ -12750,7 +12750,10 @@ router.patch("/therapy/chat/threads/:id/patient-presence", asyncHandler(async (r
   if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
   const t = snap.data();
   if (t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
-  await getDb().collection("therapy_threads").doc(threadId).update({ lastSeenByPatient: Date.now() });
+  const offline = req.body?.offline === true;
+  await getDb().collection("therapy_threads").doc(threadId).update({
+    lastSeenByPatient: offline ? 0 : Date.now()
+  });
   return res.json({ ok: true });
 }));
 
