@@ -12287,6 +12287,12 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
     const lastReadField = me.role === "therapist" ? "lastReadByTherapist" : "lastReadByPatient";
     const lastReadMs = Number(t[lastReadField]) || 0;
     const lastMsgMs  = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : (Number(t.lastMessageAt) || 0);
+    // hasUnread: ultima msg veio do OUTRO lado E ainda nao li. Mensagem
+    // que EU mesmo mandei nao eh "nao lida". Antes o check era apenas
+    // lastMsgMs > lastReadMs — falso positivo no proprio sender por causa
+    // de drift entre serverTimestamp (lastMessageAt) e Date.now() local
+    // (lastReadByX) escritos no mesmo set().
+    const senderWasMe = t.lastMessageSenderRole === me.role;
     return {
       threadId: t.threadId,
       therapistUid: t.therapistUid,
@@ -12295,7 +12301,7 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
       patientDisplayName: t.patientDisplayName,
       lastMessageAt: lastMsgMs || null,
       lastMessageSenderRole: t.lastMessageSenderRole || null,
-      hasUnread: lastMsgMs > lastReadMs,
+      hasUnread: !senderWasMe && lastMsgMs > lastReadMs,
       createdAt: t.createdAt?.toMillis ? t.createdAt.toMillis() : null
     };
   }).sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0));
