@@ -1857,6 +1857,8 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         sessionId: data.sessionId,
         patientName: data.patientName,
         patientId: data.patientId || null,
+        patientEmail: data.patientEmail || null,
+        patientAccountUid: data.patientAccountUid || null,
         status: data.status,
         scheduledAt: data.scheduledAt || null,
         livekitRoom: data.livekitRoom,
@@ -2153,6 +2155,93 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
 
   return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /therapy/sessao/:sessionId/paciente — edita patientEmail/Phone de
+// uma sessão existente. Caso de uso principal: terapeuta criou a sessão
+// sem email (campo era opcional) e agora quer vincular pra abrir chat E2EE
+// com o paciente que ja tem conta criada.
+//
+// Após salvar o email, busca conta de paciente com mesmo auth email e, se
+// existir, vincula a sessão (patientAccountUid) + roda autoLink retroativo
+// pra cobrir outras sessões do mesmo paciente com email igual.
+// ─────────────────────────────────────────────────────────────────────────
+router.patch("/therapy/sessao/:sessionId/paciente", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const db = getDb();
+  const sessRef = db.collection("therapy_sessions").doc(sessionId);
+  const sessSnap = await sessRef.get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = sessSnap.data();
+  if (session.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+  if (req.body?.patientEmail !== undefined) {
+    const raw = String(req.body.patientEmail || "").trim().toLowerCase();
+    if (raw && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) {
+      return sendError(res, 400, "EMAIL_INVALIDO");
+    }
+    updates.patientEmail = raw || null;
+  }
+  if (req.body?.patientPhone !== undefined) {
+    const raw = String(req.body.patientPhone || "").trim();
+    const norm = raw ? normalizeWaPhone(raw) : "";
+    updates.patientPhone = norm.length >= 12 ? norm : null;
+  }
+
+  if (Object.keys(updates).length === 1) return sendError(res, 400, "NENHUMA_ACAO");
+
+  await sessRef.set(updates, { merge: true });
+
+  // Tenta vincular conta de paciente se email foi setado.
+  let linkedUid = null;
+  let autoLinkedCount = 0;
+  if (updates.patientEmail) {
+    try {
+      const fbUser = await admin.auth().getUserByEmail(updates.patientEmail);
+      if (fbUser?.uid) {
+        const patientAccount = await loadPatientAccount(fbUser.uid);
+        if (patientAccount) {
+          linkedUid = fbUser.uid;
+          await sessRef.set({ patientAccountUid: fbUser.uid }, { merge: true });
+          // Roda autoLink retroativo — outras sessões do mesmo email tambem
+          // ficam vinculadas em batch.
+          const r = await autoLinkPatientSessions(fbUser.uid, db);
+          autoLinkedCount = r.linked || 0;
+        }
+      }
+    } catch (e) {
+      // Email pode nao ter conta no Firebase Auth ainda — nao eh erro.
+      if (e?.code !== "auth/user-not-found") {
+        logError("session_patient_link_lookup_failed", e, { sessionId });
+      }
+    }
+  }
+
+  await logAudit({
+    type: "session_patient_edited",
+    sessionId,
+    therapistUid: uid,
+    emailSet: !!updates.patientEmail,
+    linkedAccount: !!linkedUid,
+    autoLinkedCount
+  });
+
+  return res.json({
+    ok: true,
+    patientEmail: updates.patientEmail || null,
+    patientPhone: updates.patientPhone || null,
+    patientAccountUid: linkedUid,
+    autoLinkedCount
+  });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
