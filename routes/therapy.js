@@ -7177,6 +7177,10 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
     const trialUntilMs = t.trialUntil?.toMillis?.() || (typeof t.trialUntil === "number" ? t.trialUntil : null);
     const studentUntilMs = t.studentVerifiedUntil?.toMillis?.() || (typeof t.studentVerifiedUntil === "number" ? t.studentVerifiedUntil : null);
     const adminGrantedUntilMs = t.adminGrantedUntil?.toMillis?.() || (typeof t.adminGrantedUntil === "number" ? t.adminGrantedUntil : null);
+    // "verificado" não é campo no doc — derivamos de verificationStatus
+    // (canonical: "none"|"pending"|"pending-review"|"verified"|"rejected").
+    // verifiedAt é setado junto com verificationStatus="verified".
+    const isVerified = t.verificationStatus === "verified";
     return {
       uid: t.uid || d.id,
       displayName: t.displayName || "",
@@ -7186,7 +7190,7 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       especialidade: t.especialidade || null,
       plano: t.plano || null,
       intendedTier: t.intendedTier || null,
-      verificado: !!t.verificado,
+      verificado: isVerified,
       verificationStatus: t.verificationStatus || null,
       verifiedAt: t.verifiedAt?.toMillis?.() || null,
       trialUntil: trialUntilMs,
@@ -7274,15 +7278,15 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
   }
 
   if (typeof body.toggleVerificado === "boolean") {
-    updates.verificado = body.toggleVerificado;
+    // Source of truth eh verificationStatus (NAO existe campo verificado boolean).
     if (body.toggleVerificado) {
-      updates.verifiedAt = admin.firestore.FieldValue.serverTimestamp();
       updates.verificationStatus = "verified";
+      updates.verifiedAt = admin.firestore.FieldValue.serverTimestamp();
     } else {
-      updates.verifiedAt = null;
       updates.verificationStatus = "pending-review";
+      updates.verifiedAt = null;
     }
-    auditDetail.push(`verificado → ${body.toggleVerificado}`);
+    auditDetail.push(`verificacao → ${body.toggleVerificado ? "verified" : "pending-review"}`);
   }
 
   if (Object.keys(updates).length === 0) {
@@ -7309,7 +7313,7 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
       trialUntil: fresh.trialUntil?.toMillis?.() || (typeof fresh.trialUntil === "number" ? fresh.trialUntil : null),
       adminGrantedUntil: fresh.adminGrantedUntil?.toMillis?.() || (typeof fresh.adminGrantedUntil === "number" ? fresh.adminGrantedUntil : null),
       adminNote: fresh.adminNote || null,
-      verificado: !!fresh.verificado,
+      verificado: fresh.verificationStatus === "verified",
       verificationStatus: fresh.verificationStatus || null,
       verifiedAt: fresh.verifiedAt?.toMillis?.() || null
     }
