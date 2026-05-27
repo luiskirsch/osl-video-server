@@ -7308,6 +7308,72 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items, count: items.length });
 }));
 
+// GET /therapy/admin/denuncias — lista denúncias de mensagens pendentes/todas.
+// Query: ?status=open|closed|all (default: open)
+router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "open").trim().toLowerCase();
+  const db = getDb();
+  let q = db.collection("therapy_message_reports");
+  if (wantStatus !== "all") {
+    q = q.where("status", "==", wantStatus);
+  }
+  const snap = await q.limit(200).get();
+  const items = snap.docs.map(d => {
+    const r = d.data();
+    return {
+      reportId: r.reportId || d.id,
+      messageId: r.messageId,
+      threadId: r.threadId,
+      reporterUid: r.reporterUid,
+      reporterRole: r.reporterRole,
+      reportedSenderUid: r.reportedSenderUid,
+      reportedSenderRole: r.reportedSenderRole,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
+    };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
+// PATCH /therapy/admin/denuncias/:id — fechar/resolver denuncia.
+router.patch("/therapy/admin/denuncias/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const reportId = String(req.params.id || "").trim();
+  if (!reportId) return sendError(res, 400, "REPORT_ID_OBRIGATORIO");
+
+  const newStatus = String(req.body?.status || "").trim();
+  if (!newStatus || !["closed", "open"].includes(newStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_message_reports").doc(reportId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "DENUNCIA_NAO_ENCONTRADA");
+
+  await ref.set({
+    status: newStatus,
+    reviewedBy: adminAuth.email,
+    reviewedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "chat_report_reviewed",
+    reportId,
+    newStatus,
+    reviewedBy: adminAuth.email
+  });
+
+  return res.json({ ok: true });
+}));
+
 // PATCH /therapy/admin/profissionais/:uid — ajusta plano/cortesias do prof
 // Body (todos campos opcionais — só aplica os presentes):
 //   extendTrialDays: number — +N dias no trialUntil (a partir do MAX entre
