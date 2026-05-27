@@ -12559,7 +12559,8 @@ router.get("/therapy/chat/threads/:id", asyncHandler(async (req, res) => {
       peerEcdhPublicJwk: isCreator ? null : t.creatorEcdhPublicJwkSnapshot,
       myRole: me.role,
       lastReadByTherapist: t.lastReadByTherapist || 0,
-      lastReadByPatient:   t.lastReadByPatient   || 0
+      lastReadByPatient:   t.lastReadByPatient   || 0,
+      lastSeenByPatient:   t.lastSeenByPatient   || null
     }
   });
 }));
@@ -12625,7 +12626,7 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
     .slice(0, limit)
     .sort((a, b) => a.createdAt - b.createdAt);
 
-  return res.json({ ok: true, messages });
+  return res.json({ ok: true, messages, lastSeenByPatient: t.lastSeenByPatient || null });
 }));
 
 // POST /therapy/chat/threads/:id/messages — envia mensagem.
@@ -12734,6 +12735,22 @@ router.patch("/therapy/chat/threads/:id/read", asyncHandler(async (req, res) => 
     ...(me.role === "therapist" ? { lastReadByTherapist: until, unreadCountForTherapist: 0 } : { lastReadByPatient: until, unreadCountForPatient: 0 })
   }, { merge: true });
 
+  return res.json({ ok: true });
+}));
+
+// PATCH /therapy/chat/threads/:id/patient-presence — paciente sinaliza atividade.
+// Atualiza lastSeenByPatient no doc da thread. Apenas o paciente da thread pode chamar.
+router.patch("/therapy/chat/threads/:id/patient-presence", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+  const snap = await getDb().collection("therapy_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  await getDb().collection("therapy_threads").doc(threadId).update({ lastSeenByPatient: Date.now() });
   return res.json({ ok: true });
 }));
 
