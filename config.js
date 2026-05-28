@@ -145,7 +145,7 @@ const PRODUCT_CATALOG = {
   "pacote-casais": {
     title: "O SextoLugar — Pacote Casais",
     description: "18 cartas nichadas para casais",
-    price: 19.90,
+    price: 300.00,
     type: "pack"
   },
   "tema-sala": {
