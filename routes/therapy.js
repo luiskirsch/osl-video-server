@@ -12626,7 +12626,7 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
     .slice(0, limit)
     .sort((a, b) => a.createdAt - b.createdAt);
 
-  return res.json({ ok: true, messages, lastSeenByPatient: t.lastSeenByPatient || null });
+  return res.json({ ok: true, messages, lastSeenByPatient: t.lastSeenByPatient || null, lastReadByPatient: t.lastReadByPatient || 0 });
 }));
 
 // POST /therapy/chat/threads/:id/messages — envia mensagem.
