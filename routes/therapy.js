@@ -13145,8 +13145,9 @@ router.get("/therapy/pro-chat/threads/:id", asyncHandler(async (req, res) => {
       myWrappedThreadKey: meIsA ? t.threadKeyForA : t.threadKeyForB,
       peerEcdhPublicJwkSnapshot: t.createdBy === uid ? null : t.creatorEcdhPublicJwkSnapshot,
       lastReadByMe:   meIsA ? t.lastReadByA : t.lastReadByB,
-      lastReadByPeer: meIsA ? t.lastReadByB : t.lastReadByA,
-      peerTypingAt:   meIsA ? (t.typingByB || 0) : (t.typingByA || 0)
+      lastReadByPeer:  meIsA ? t.lastReadByB : t.lastReadByA,
+      peerTypingAt:    meIsA ? (t.typingByB  || 0) : (t.typingByA  || 0),
+      lastSeenByPeer:  meIsA ? (t.lastSeenByB || 0) : (t.lastSeenByA || 0)
     }
   });
 }));
@@ -13265,6 +13266,27 @@ router.post("/therapy/pro-chat/threads/:id/marcar-lido", asyncHandler(async (req
   if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   const meIsA = t.participantA === uid;
   await tref.set(meIsA ? { lastReadByA: until } : { lastReadByB: until }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// PATCH /therapy/pro-chat/threads/:id/presence — sinaliza atividade do prof.
+// Espelha o patient-presence do chat terapeuta-paciente.
+router.patch("/therapy/pro-chat/threads/:id/presence", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+  const snap = await getDb().collection("therapy_pro_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.participantA !== uid && t.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const meIsA = t.participantA === uid;
+  const offline = req.body?.offline === true;
+  await getDb().collection("therapy_pro_threads").doc(threadId).update(
+    meIsA ? { lastSeenByA: offline ? 0 : Date.now() }
+           : { lastSeenByB: offline ? 0 : Date.now() }
+  );
   return res.json({ ok: true });
 }));
 
