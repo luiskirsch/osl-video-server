@@ -186,25 +186,4 @@ router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (r
   return res.json({ ok: true, env: status, nodeEnv: process.env.NODE_ENV, appEnv: process.env.APP_ENV });
 }));
 
-// GET /admin/therapist-profiles — lista todos os therapists com campos relevantes.
-// Endpoint temporário de diagnóstico — remover após uso.
-router.get("/therapist-profiles", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const snap = await getDb().collection("therapists").get();
-  const profiles = snap.docs.map(doc => {
-    const d = doc.data();
-    return {
-      uid: doc.id,
-      displayName: d.displayName,
-      email: d.email,
-      conselho: d.conselho,
-      crp: d.crp, crm: d.crm,
-      verificationStatus: d.verificationStatus,
-      tissEnabled: d.tissEnabled,
-      plano: d.plano,
-    };
-  });
-  return res.json({ ok: true, profiles });
-}));
-
 module.exports = router;
