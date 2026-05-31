@@ -7269,8 +7269,9 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
   if (!allowedStatus.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
 
   const db = getDb();
+  // Sem orderBy: Firestore exclui docs sem o campo ordenado.
+  // Profissionais antigos sem createdAt sumiram da lista — ordenamos em JS.
   const snap = await db.collection("therapists")
-    .orderBy("createdAt", "desc")
     .limit(500)
     .get();
 
@@ -7306,6 +7307,8 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       createdAt: t.createdAt?.toMillis?.() || null
     };
   });
+
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   if (wantStatus === "verified") items = items.filter(i => i.verificado);
   else if (wantStatus === "pending") items = items.filter(i => !i.verificado && i.verificationStatus !== "rejected");
