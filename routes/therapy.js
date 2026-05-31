@@ -7518,6 +7518,54 @@ router.patch("/therapy/notifications/read-all", asyncHandler(async (req, res) =>
   return res.json({ ok: true, marked: snap.size });
 }));
 
+// GET /therapy/admin/pacientes — lista todas as contas de pacientes.
+router.get("/therapy/admin/pacientes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const search = String(req.query?.search || "").trim().toLowerCase();
+  const snap = await getDb().collection("therapy_patient_accounts").limit(1000).get();
+
+  let items = snap.docs.map(d => {
+    const t = d.data();
+    return {
+      uid: t.uid || d.id,
+      displayName: t.displayName || "",
+      role: t.role || "patient",
+      consentAiSummary: !!t.consentAiSummary,
+      consentLgpd: !!t.consentLgpd,
+      createdAt: t.createdAt?.toMillis?.() || null,
+      updatedAt: t.updatedAt?.toMillis?.() || null,
+    };
+  });
+
+  // Busca email no Firebase Auth em lote (até 100 por vez) para exibição
+  try {
+    const uids = items.map(i => ({ uid: i.uid }));
+    const chunks = [];
+    for (let i = 0; i < uids.length; i += 100) chunks.push(uids.slice(i, i + 100));
+    const emailMap = {};
+    for (const chunk of chunks) {
+      const result = await admin.auth().getUsers(chunk);
+      result.users.forEach(u => { emailMap[u.uid] = u.email || null; });
+    }
+    items.forEach(i => { i.email = emailMap[i.uid] || null; });
+  } catch { items.forEach(i => { i.email = null; }); }
+
+  items = items.filter(i => i.displayName || i.email);
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  if (search) {
+    items = items.filter(i =>
+      (i.displayName || "").toLowerCase().includes(search) ||
+      (i.email || "").toLowerCase().includes(search)
+    );
+  }
+
+  return res.json({ ok: true, total: items.length, items });
+}));
+
 // DELETE /therapy/admin/profissionais/:uid — remove doc fantasma da coleção therapists.
 // Só permite se o doc não tiver displayName nem email (segurança: evita deletar prof real).
 router.delete("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) => {
