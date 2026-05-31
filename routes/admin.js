@@ -186,4 +186,17 @@ router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (r
   return res.json({ ok: true, env: status, nodeEnv: process.env.NODE_ENV, appEnv: process.env.APP_ENV });
 }));
 
+// POST /admin/tiss/enable-all — habilita tissEnabled para todos os therapists.
+// Endpoint temporário de migração — remover após uso.
+router.post("/tiss/enable-all", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const snap = await getDb().collection("therapists").get();
+  const batch = getDb().batch();
+  snap.docs.forEach(doc => {
+    batch.set(doc.ref, { tissEnabled: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+  await batch.commit();
+  return res.json({ ok: true, updated: snap.size });
+}));
+
 module.exports = router;
