@@ -7310,6 +7310,9 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
 
   items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
+  // Filtra fantasmas — docs sem displayName E sem email são cadastros incompletos.
+  items = items.filter(i => i.displayName || i.email);
+
   if (wantStatus === "verified") items = items.filter(i => i.verificado);
   else if (wantStatus === "pending") items = items.filter(i => !i.verificado && i.verificationStatus !== "rejected");
   else if (wantStatus === "rejected") items = items.filter(i => i.verificationStatus === "rejected");
@@ -7513,6 +7516,24 @@ router.patch("/therapy/notifications/read-all", asyncHandler(async (req, res) =>
   }
 
   return res.json({ ok: true, marked: snap.size });
+}));
+
+// DELETE /therapy/admin/profissionais/:uid — remove doc fantasma da coleção therapists.
+// Só permite se o doc não tiver displayName nem email (segurança: evita deletar prof real).
+router.delete("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+  const uid = String(req.params.uid || "").trim();
+  if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+  const ref = getDb().collection("therapists").doc(uid);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const d = snap.data();
+  if (d.displayName || d.email) return sendError(res, 403, "PROFISSIONAL_NAO_FANTASMA",
+    { hint: "Só documentos sem nome e sem email podem ser removidos por aqui." });
+  await ref.delete();
+  return res.json({ ok: true, deleted: uid });
 }));
 
 // PATCH /therapy/admin/profissionais/:uid — ajusta plano/cortesias do prof
