@@ -1927,10 +1927,37 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
   let aiSummaryReady = !!therapist?.aiSummaryEnabled;
   if (aiSummaryReady) {
     let patientConsent = !!session.consentAiSummary;
+
+    // Tenta via patientAccountUid (já linkado)
     if (!patientConsent && session.patientAccountUid) {
       const pa = await loadPatientAccount(session.patientAccountUid);
       patientConsent = !!pa?.consentAiSummary;
     }
+
+    // Fallback: link por email — a sessão tem patientEmail mas patientAccountUid
+    // nunca foi preenchido (criação de sessão não faz o lookup). Faz o link
+    // agora e persiste pra próximas verificações.
+    if (!patientConsent && !session.patientAccountUid && session.patientEmail) {
+      try {
+        const fbUser = await admin.auth().getUserByEmail(session.patientEmail);
+        if (fbUser?.uid) {
+          const pa = await loadPatientAccount(fbUser.uid);
+          if (pa) {
+            patientConsent = !!pa.consentAiSummary;
+            // Persiste o link pra não repetir o lookup em próximas entradas
+            await db.collection("therapy_sessions").doc(sessionId).set(
+              { patientAccountUid: fbUser.uid, autoLinkedAt: admin.firestore.FieldValue.serverTimestamp() },
+              { merge: true }
+            );
+          }
+        }
+      } catch (e) {
+        if (e?.code !== "auth/user-not-found") {
+          logError("livekit_token_patient_link_failed", e, { sessionId });
+        }
+      }
+    }
+
     aiSummaryReady = patientConsent;
   }
 
