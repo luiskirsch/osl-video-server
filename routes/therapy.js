@@ -3041,8 +3041,9 @@ router.get("/nps/info/:token", asyncHandler(async (req, res) => {
     if (!resolved || resolved.type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
     token = resolved.token;
   }
-  const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
-  if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  const npsVerif = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!npsVerif.valid || npsVerif.payload?.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  const payload = npsVerif.payload;
   if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
 
   const db = getDb();
@@ -3085,8 +3086,9 @@ router.post("/nps/:token", asyncHandler(async (req, res) => {
     if (!resolved || resolved.type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
     token = resolved.token;
   }
-  const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
-  if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  const npsVerif2 = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!npsVerif2.valid || npsVerif2.payload?.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+  const payload = npsVerif2.payload;
   if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
 
   const score = Number(req.body?.score);
