@@ -1,9 +1,11 @@
-FROM node:20-alpine
+FROM node:20-slim
 
-# wget pra HEALTHCHECK abaixo (alpine vem sem curl/wget por padrão)
-# ffmpeg pra converter webm/mp3 da sessao -> wav PCM 16kHz mono (input do Whisper local
-# via @huggingface/transformers, usado pro resumo IA de sessao)
-RUN apk add --no-cache wget ffmpeg
+# curl pra HEALTHCHECK + ffmpeg pra converter audio da sessao -> wav 16kHz (Whisper)
+# node:20-slim é Debian (glibc) — necessário pra onnxruntime-node que o
+# @huggingface/transformers usa. Alpine (musl) nao tem ld-linux-x86-64.so.2.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -16,6 +18,6 @@ EXPOSE 3000
 
 # H7: HEALTHCHECK pra container orchestrators detectarem hung process
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://localhost:3000/health || exit 1
+  CMD curl -f http://localhost:3000/health || exit 1
 
 CMD ["node", "server.js"]
