@@ -100,34 +100,27 @@ async function summarizeSession({ transcript, professionalName, patientName, dur
   const userMessage = `${contextBlock}Transcript da sessão:\n\n${transcript}`;
 
   try {
+    // tool_use é a forma correta de forçar structured output no Claude.
+    // output_config não é parâmetro válido da API e era silenciosamente ignorado.
     const response = await client.messages.create({
       model: "claude-haiku-4-5",
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
-      // Structured output: força resposta JSON validado contra schema
-      output_config: {
-        format: {
-          type: "json_schema",
-          schema: RESPONSE_SCHEMA
-        }
-      }
+      tools: [{
+        name: "session_summary",
+        description: "Retorna o resumo estruturado da sessão clínica.",
+        input_schema: RESPONSE_SCHEMA
+      }],
+      tool_choice: { type: "tool", name: "session_summary" }
     });
 
-    // Resposta vem como text block contendo JSON
-    const textBlock = response.content.find(b => b.type === "text");
-    if (!textBlock) return { ok: false, error: "RESPOSTA_SEM_TEXTO" };
-
-    let parsed;
-    try {
-      parsed = JSON.parse(textBlock.text);
-    } catch (e) {
-      return { ok: false, error: "JSON_PARSE_FALHOU", detail: textBlock.text.slice(0, 200) };
-    }
+    const toolBlock = response.content.find(b => b.type === "tool_use" && b.name === "session_summary");
+    if (!toolBlock) return { ok: false, error: "RESPOSTA_SEM_TOOL_USE" };
 
     return {
       ok: true,
-      summary: parsed,
+      summary: toolBlock.input,
       usage: {
         input: response.usage?.input_tokens || 0,
         output: response.usage?.output_tokens || 0
