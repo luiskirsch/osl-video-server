@@ -45,23 +45,26 @@ const DEFAULT_TEMPLATES = {
 `Olá, {{paciente}}! Sua consulta com {{profissional}} foi confirmada para {{data}} às {{hora}}.
 
 Confirmar presença: {{link_confirmar}}
+
 Não vou poder ir: {{link_cancelar}}
 
-Dúvidas? Ligue: {{telefone_clinica}}
+Dúvidas? Envie uma mensagem: {{telefone_clinica}}
 — {{nome_clinica}}`,
 
   lembrete:
 `Olá, {{paciente}}! Lembrete: sua consulta com {{profissional}} é amanhã, {{data}} às {{hora}}.
 
 Confirmar presença: {{link_confirmar}}
+
 Cancelar: {{link_cancelar}}
 
+Dúvidas? Envie uma mensagem: {{telefone_clinica}}
 — {{nome_clinica}}`,
 
   cancelamento:
 `Olá, {{paciente}}. Sua consulta com {{profissional}} agendada para {{data}} foi cancelada.
 
-Pra reagendar, fale conosco: {{telefone_clinica}}
+Pra reagendar, envie uma mensagem: {{telefone_clinica}}
 — {{nome_clinica}}`
 };
 
@@ -194,7 +197,7 @@ function buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
     link_confirmar: confirmUrl || joinUrl || "",
     link_cancelar:  cancelUrl || "",
     telefone_clinica: wa.phoneClinic || "",
-    nome_clinica:     wa.clinicName  || therapist?.displayName || ""
+    nome_clinica:     wa.clinicName  || "Espaço Prelúdio"
   };
 }
 
