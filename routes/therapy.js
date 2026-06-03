@@ -143,7 +143,7 @@ function newId(prefix) {
 
 // Short codes pra link de paciente — entrar.html?c=K9RTPX73 (~50 chars)
 // em vez de entrar.html?t=<jwt> (~500 chars). Ver services/join-codes.js.
-const { createJoinCode, resolveJoinCode } = require("../services/join-codes");
+const { createJoinCode, resolveJoinCode, createActionCode, resolveActionCode } = require("../services/join-codes");
 
 // ─── Slug público de agendamento ────────────────────────────────────────
 // Slug = identificador URL-friendly do terapeuta (ex.: "dr-roberto-fernandes").
@@ -1737,6 +1737,16 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   if (patientPhone && firstJoinToken && therapist?.whatsappConfig?.enabled) {
     const cancelTokenInfo  = buildCancelToken(created[0].sessionId);
     const confirmTokenInfo = buildConfirmToken(created[0].sessionId);
+    // Short codes pra cancel/confirm — URL curta no WhatsApp (?c=XXXXXXXX ~50 chars)
+    let cancelCode = null, confirmCode = null;
+    try {
+      [cancelCode, confirmCode] = await Promise.all([
+        createActionCode({ token: cancelTokenInfo.token,  type: "cancel"  }),
+        createActionCode({ token: confirmTokenInfo.token, type: "confirm" })
+      ]);
+    } catch (e) {
+      logWarn("action_code_wa_create_failed", { sessionId: created[0].sessionId, error: e.message });
+    }
     const sessionForWa = {
       sessionId: created[0].sessionId,
       patientName, patientPhone,
@@ -1745,8 +1755,8 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
     sendWaConfirmation({
       session: sessionForWa, therapist,
       joinUrl:    buildPatientJoinUrl(firstJoinCode || firstJoinToken),
-      cancelUrl:  buildPatientCancelUrl(cancelTokenInfo.token),
-      confirmUrl: buildPatientConfirmUrl(confirmTokenInfo.token)
+      cancelUrl:  buildPatientCancelUrl(cancelCode  || cancelTokenInfo.token),
+      confirmUrl: buildPatientConfirmUrl(confirmCode || confirmTokenInfo.token)
     }).then(r => {
       if (r.ok)        logInfo("therapy_confirmation_wa_sent",    { sessionId: created[0].sessionId, messageId: r.messageId });
       else if (r.skipped) logInfo("therapy_confirmation_wa_skipped", { sessionId: created[0].sessionId, reason: r.reason });
@@ -2668,7 +2678,13 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
 // (b) Paciente cancela via link público (token assinado)
 router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const token = String(req.body?.cancelToken || "").trim();
+  let token = String(req.body?.cancelToken || "").trim();
+  // Suporte a short code (?c=XXXXXXXX) — resolve pra JWT antes de validar
+  if (!token && req.body?.cancelCode) {
+    const resolved = await resolveActionCode(String(req.body.cancelCode).trim());
+    if (!resolved || resolved.type !== "cancel") return sendError(res, 401, "CODE_INVALIDO");
+    token = resolved.token;
+  }
   if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
 
   const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
@@ -2706,7 +2722,12 @@ router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) =>
 // terapeuta vê quem deu sinal de vida pré-consulta.
 router.post("/therapy/sessao/confirmar-publico", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const token = String(req.body?.confirmToken || "").trim();
+  let token = String(req.body?.confirmToken || "").trim();
+  if (!token && req.body?.confirmCode) {
+    const resolved = await resolveActionCode(String(req.body.confirmCode).trim());
+    if (!resolved || resolved.type !== "confirm") return sendError(res, 401, "CODE_INVALIDO");
+    token = resolved.token;
+  }
   if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
 
   const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);

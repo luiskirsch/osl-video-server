@@ -58,4 +58,41 @@ async function resolveJoinCode(code) {
   return data.joinToken || null;
 }
 
-module.exports = { createJoinCode, resolveJoinCode };
+// ─── Short codes genéricos para cancel/confirm tokens ───────────────────────
+// Mesma mecânica dos join codes mas coleção separada (therapy_session_action_codes)
+// pra evitar colisão e permitir TTL diferente (60 dias vs 2h).
+
+const ACTION_CODE_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60 dias (bate com CANCEL_TOKEN_VALIDITY_MS)
+
+async function createActionCode({ token, type }) {
+  const db = getDb();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateJoinCode(); // mesmo alfabeto/tamanho
+    const ref = db.collection("therapy_session_action_codes").doc(code);
+    try {
+      await ref.create({
+        token,
+        type,
+        expiresAt: Date.now() + ACTION_CODE_VALIDITY_MS,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return code;
+    } catch (e) {
+      if (e?.code !== 6 && !/already exists/i.test(e?.message || "")) throw e;
+    }
+  }
+  throw new Error("ACTION_CODE_GEN_FALHOU");
+}
+
+async function resolveActionCode(code) {
+  if (!code || typeof code !== "string") return null;
+  const clean = code.trim().toUpperCase();
+  if (!/^[A-Z0-9]{4,16}$/.test(clean)) return null;
+  const snap = await getDb().collection("therapy_session_action_codes").doc(clean).get();
+  if (!snap.exists) return null;
+  const data = snap.data();
+  if (data.expiresAt && data.expiresAt < Date.now()) return null;
+  return { token: data.token, type: data.type };
+}
+
+module.exports = { createJoinCode, resolveJoinCode, createActionCode, resolveActionCode };

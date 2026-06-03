@@ -427,11 +427,13 @@ function buildJoinUrl(codeOrToken) {
   const paramName = s.length <= 16 ? "c" : "t";
   return `${THERAPY_FRONTEND_BASE}/entrar.html?${paramName}=${encodeURIComponent(s)}`;
 }
-function buildCancelUrl(cancelToken) {
-  return `${THERAPY_FRONTEND_BASE}/cancelar.html?t=${encodeURIComponent(cancelToken)}`;
+function buildCancelUrl(codeOrToken) {
+  const param = String(codeOrToken).length <= 16 ? "c" : "t";
+  return `${THERAPY_FRONTEND_BASE}/cancelar.html?${param}=${encodeURIComponent(codeOrToken)}`;
 }
-function buildConfirmUrl(confirmToken) {
-  return `${THERAPY_FRONTEND_BASE}/confirmar.html?t=${encodeURIComponent(confirmToken)}`;
+function buildConfirmUrl(codeOrToken) {
+  const param = String(codeOrToken).length <= 16 ? "c" : "t";
+  return `${THERAPY_FRONTEND_BASE}/confirmar.html?${param}=${encodeURIComponent(codeOrToken)}`;
 }
 function buildReciboPublicoUrl(reciboToken) {
   return `${THERAPY_FRONTEND_BASE}/recibo-publico.html?t=${encodeURIComponent(reciboToken)}`;
