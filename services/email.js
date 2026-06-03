@@ -444,8 +444,9 @@ function buildAnamneseUrl(anamneseToken) {
 function buildEscalaUrl(escalaToken) {
   return `${THERAPY_FRONTEND_BASE}/escala.html?t=${encodeURIComponent(escalaToken)}`;
 }
-function buildNpsUrl(npsToken) {
-  return `${THERAPY_FRONTEND_BASE}/nps.html?t=${encodeURIComponent(npsToken)}`;
+function buildNpsUrl(codeOrToken) {
+  const param = String(codeOrToken).length <= 16 ? "c" : "t";
+  return `${THERAPY_FRONTEND_BASE}/nps.html?${param}=${encodeURIComponent(codeOrToken)}`;
 }
 
 function buildPainelUrl() {

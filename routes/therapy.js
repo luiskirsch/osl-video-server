@@ -122,6 +122,7 @@ const {
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl, buildConfirmUrl: buildPatientConfirmUrl,
+  buildNpsUrl: buildPatientNpsUrl,
   buildReciboPublicoUrl,
   buildAnamneseUrl,
   buildEscalaUrl,
@@ -2185,6 +2186,8 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  const sessData = sessSnap.data();
+
   await db.collection("therapy_sessions").doc(sessionId).set({
     status: "completed",
     completedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -2192,6 +2195,47 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   }, { merge: true });
 
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
+
+  // Disparo fire-and-forget: WhatsApp de avaliação pra o paciente.
+  // Gera NPS token + short code e envia imediatamente ao encerrar.
+  if (sessData.patientPhone) {
+    (async () => {
+      try {
+        const db2 = getDb();
+        const tSnap = await db2.collection("therapists").doc(uid).get();
+        const therapist = tSnap.exists ? tSnap.data() : null;
+        if (!therapist?.whatsappConfig?.enabled) return;
+
+        const npsToken = signPayload({
+          token_type: "nps",
+          sessionId,
+          therapistUid: uid,
+          patientEmail:    sessData.patientEmail    || "",
+          patientNameHint: sessData.patientName     || "",
+          iat: Date.now(),
+          exp: Date.now() + NPS_TOKEN_VALIDITY_MS
+        }, ACCESS_TOKEN_SECRET);
+
+        let npsUrl;
+        try {
+          const code = await createActionCode({ token: npsToken, type: "nps" });
+          npsUrl = buildPatientNpsUrl(code);
+        } catch {
+          npsUrl = buildPatientNpsUrl(npsToken);
+        }
+
+        const firstName      = String(sessData.patientName || "Paciente").split(/\s+/)[0];
+        const therapistName  = therapist.displayName || "seu profissional";
+        const clinicName     = therapist.whatsappConfig?.clinicName || therapistName;
+        const message = `Olá, ${firstName}! Sua consulta com ${therapistName} foi encerrada.\n\nComo foi o atendimento? Sua avaliação leva menos de 30 segundos e ajuda muito:\n${npsUrl}\n\n— ${clinicName}`;
+
+        await sendWaText({ to: sessData.patientPhone, message });
+        logInfo("nps_wa_sent", { sessionId, patientPhone: sessData.patientPhone });
+      } catch (e) {
+        logWarn("nps_wa_failed", { sessionId, error: e.message });
+      }
+    })();
+  }
 
   return res.json({ ok: true });
 }));
@@ -2989,9 +3033,14 @@ const NPS_COMMENT_MAX = 500;
 // GET /nps/info/:token — público. Devolve dados pra renderizar a página.
 router.get("/nps/info/:token", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const token = String(req.params.token || "").trim();
+  let token = String(req.params.token || "").trim();
   if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
-
+  // Suporte a short code (?c=XXXXXXXX)
+  if (token.length <= 16) {
+    const resolved = await resolveActionCode(token);
+    if (!resolved || resolved.type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+    token = resolved.token;
+  }
   const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
   if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
   if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
@@ -3029,9 +3078,13 @@ router.get("/nps/info/:token", asyncHandler(async (req, res) => {
 // POST /nps/:token — público. Submete resposta.
 router.post("/nps/:token", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const token = String(req.params.token || "").trim();
+  let token = String(req.params.token || "").trim();
   if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
-
+  if (token.length <= 16) {
+    const resolved = await resolveActionCode(token);
+    if (!resolved || resolved.type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
+    token = resolved.token;
+  }
   const payload = verifySignedToken(token, ACCESS_TOKEN_SECRET);
   if (!payload || payload.token_type !== "nps") return sendError(res, 401, "TOKEN_INVALIDO");
   if (payload.exp && payload.exp < Date.now()) return sendError(res, 410, "TOKEN_EXPIRADO");
