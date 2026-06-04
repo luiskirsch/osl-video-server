@@ -157,11 +157,39 @@ async function transcribe(audioBuffer, opts = {}) {
     return_timestamps: true
   });
 
+  const rawText = String(result.text || "").trim();
+
   return {
-    text: String(result.text || "").trim(),
+    text: isHallucinated(rawText) ? "" : rawText,
     chunks: Array.isArray(result.chunks) ? result.chunks : [],
-    durationSec
+    durationSec,
+    hallucinated: isHallucinated(rawText)
   };
+}
+
+// Detecta alucinação do Whisper: texto repetitivo gerado quando o áudio
+// tem pouca fala ou ruído excessivo ("que é que é que é..." etc).
+// Dois critérios independentes:
+//   1. Razão palavras-únicas / total < 8% (vocabulário muito restrito)
+//   2. Algum bigrama se repete em > 15% das posições do texto
+function isHallucinated(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length < 20) return false; // texto curto — não analisa
+
+  // Critério 1: unicidade de vocabulário
+  const unique = new Set(words.map(w => w.toLowerCase().replace(/[^a-záéíóúàãõâêôüç]/g, "")));
+  if (unique.size / words.length < 0.08) return true;
+
+  // Critério 2: bigrama dominante
+  const bigrams = {};
+  for (let i = 0; i < words.length - 1; i++) {
+    const bg = words[i].toLowerCase() + " " + words[i + 1].toLowerCase();
+    bigrams[bg] = (bigrams[bg] || 0) + 1;
+  }
+  const maxCount = Math.max(...Object.values(bigrams));
+  if (maxCount / words.length > 0.12) return true;
+
+  return false;
 }
 
 module.exports = { transcribe };

@@ -6328,8 +6328,25 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session }) 
       sessionId,
       durationSec: transcriptResult.durationSec,
       transcribeMs,
-      textChars: transcriptResult.text.length
+      textChars: transcriptResult.text.length,
+      hallucinated: transcriptResult.hallucinated || false
     });
+
+    // Alucinação detectada: Whisper gerou texto repetitivo (ruído/áudio curto).
+    // Salva como failed com mensagem amigável em vez de mandar lixo pro Claude.
+    if (transcriptResult.hallucinated) {
+      await summaryRef.set({
+        status: "failed",
+        error: "TRANSCRIPT_ALUCINADO",
+        transcript: "",
+        durationSec: transcriptResult.durationSec,
+        transcribeMs,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
+      return;
+    }
 
     // 2. Summarize via Claude Haiku 4.5
     const t1 = Date.now();
