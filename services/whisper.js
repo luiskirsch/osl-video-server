@@ -30,7 +30,9 @@ async function getPipeline() {
     const { pipeline } = await import("@huggingface/transformers");
     _pipelineFactory = pipeline;
     const wavefileMod = await import("wavefile");
-    _WaveFile = wavefileMod.WaveFile;
+    // wavefile exporta diferente dependendo da versao/ambiente (CJS vs ESM):
+    // v8+ usa ESM default export; versoes anteriores tem named export .WaveFile
+    _WaveFile = wavefileMod.WaveFile ?? wavefileMod.default?.WaveFile ?? wavefileMod.default;
     // Configuration:
     //   Xenova/whisper-base: ~150MB, multilingual, suporta PT-BR. Baseline de
     //   qualidade boa pra sessoes clinicas.
