@@ -435,8 +435,9 @@ function buildConfirmUrl(codeOrToken) {
   const param = String(codeOrToken).length <= 16 ? "c" : "t";
   return `${THERAPY_FRONTEND_BASE}/confirmar.html?${param}=${encodeURIComponent(codeOrToken)}`;
 }
-function buildReciboPublicoUrl(reciboToken) {
-  return `${THERAPY_FRONTEND_BASE}/recibo-publico.html?t=${encodeURIComponent(reciboToken)}`;
+function buildReciboPublicoUrl(codeOrToken) {
+  const param = String(codeOrToken).length <= 16 ? "c" : "t";
+  return `${THERAPY_FRONTEND_BASE}/recibo-publico.html?${param}=${encodeURIComponent(codeOrToken)}`;
 }
 function buildAnamneseUrl(anamneseToken) {
   return `${THERAPY_FRONTEND_BASE}/anamnese.html?t=${encodeURIComponent(anamneseToken)}`;

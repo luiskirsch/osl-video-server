@@ -10651,7 +10651,13 @@ router.post("/therapy/sessao/:sessionId/recibo/enviar", asyncHandler(async (req,
     iat: Date.now(),
     exp: Date.now() + RECIBO_PUBLIC_TOKEN_VALIDITY_MS
   }, ACCESS_TOKEN_SECRET);
-  const reciboUrl = buildReciboPublicoUrl(reciboToken);
+  let reciboCode = null;
+  try {
+    reciboCode = await createActionCode({ token: reciboToken, type: "recibo" });
+  } catch (e) {
+    logWarn("recibo_action_code_failed", { receiptId, error: e.message });
+  }
+  const reciboUrl = buildReciboPublicoUrl(reciboCode || reciboToken);
 
   // 4) Envio: e-mail + WhatsApp em paralelo, fire-and-forget pra sintática
   // de await — capturamos sucesso/falha pra responder ao frontend.
@@ -10720,9 +10726,13 @@ router.post("/therapy/sessao/:sessionId/recibo/enviar", asyncHandler(async (req,
 // Token validade 1 ano. Devolve dados pro recibo-publico.html renderizar.
 router.get("/therapy/recibo/publico", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const token = String(req.query?.t || "").trim();
+  let token = String(req.query?.t || req.query?.c || "").trim();
   if (!token) return sendError(res, 400, "TOKEN_OBRIGATORIO");
-
+  if (token.length <= 16) {
+    const resolved = await resolveActionCode(token);
+    if (!resolved || resolved.type !== "recibo") return sendError(res, 401, "TOKEN_INVALIDO");
+    token = resolved.token;
+  }
   const verification = verifySignedToken(token, ACCESS_TOKEN_SECRET);
   if (!verification.valid) return sendError(res, 401, verification.error || "TOKEN_INVALIDO");
   const payload = verification.payload;
