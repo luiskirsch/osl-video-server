@@ -2224,10 +2224,9 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
           npsUrl = buildPatientNpsUrl(npsToken);
         }
 
-        const firstName      = String(sessData.patientName || "Paciente").split(/\s+/)[0];
-        const therapistName  = therapist.displayName || "seu profissional";
-        const clinicName     = therapist.whatsappConfig?.clinicName || therapistName;
-        const message = `Olá, ${firstName}! Sua consulta com ${therapistName} foi encerrada.\n\nComo foi o atendimento? Sua avaliação leva menos de 30 segundos e ajuda muito:\n${npsUrl}\n\n— ${clinicName}`;
+        const firstName     = String(sessData.patientName || "Paciente").split(/\s+/)[0];
+        const therapistName = therapist.displayName || "seu profissional";
+        const message = `Olá, ${firstName}! Sua consulta com ${therapistName} foi encerrada.\n\nComo foi o atendimento? Sua avaliação leva menos de 30 segundos e ajuda muito:\n${npsUrl}\n\n— Equipe Espaço Prelúdio`;
 
         await sendWaText({ to: sessData.patientPhone, message });
         logInfo("nps_wa_sent", { sessionId, patientPhone: sessData.patientPhone });
