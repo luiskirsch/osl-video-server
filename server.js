@@ -50,6 +50,7 @@ const { createRequestId } = require("./utils");
 
 // --- Rotas ---
 const healthRouter    = require("./routes/health");
+const stripeRouter    = require("./routes/stripe");
 const gameRouter      = require("./routes/game");
 const recordingRouter = require("./routes/recording");
 const streamingRouter = require("./routes/streaming");
@@ -91,6 +92,10 @@ app.use(cors({
   },
   credentials: false
 }));
+// Stripe webhook ANTES do express.json() — precisa de raw body para validar HMAC.
+// express.raw() aplicado só na rota /stripe/webhook dentro do router.
+app.use(stripeRouter);
+
 // 6MB: permite upload de comprovante de matrícula (PDF/imagem em base64)
 // para validação automática do tier estudante. Outros endpoints continuam
 // validando tamanho específico no handler.
