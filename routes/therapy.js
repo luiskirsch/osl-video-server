@@ -23,6 +23,7 @@ const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
+const { getIo } = require("../services/socketio");
 const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
@@ -1776,6 +1777,7 @@ router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
   });
 
   const first = created[0];
+  getIo()?.to(uid).emit("sessoes:changed");
   return res.json({
     ok: true,
     session: {
@@ -2236,6 +2238,7 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
     })();
   }
 
+  getIo()?.to(uid).emit("sessoes:changed");
   return res.json({ ok: true });
 }));
 
@@ -2688,6 +2691,7 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   if (scope === "this") {
     if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
     await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    getIo()?.to(uid).emit("sessoes:changed");
     return res.json({ ok: true, canceledCount: 1 });
   }
 
@@ -2696,6 +2700,7 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   if (!sessData.recurrenceGroupId) {
     if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
     await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    getIo()?.to(uid).emit("sessoes:changed");
     return res.json({ ok: true, canceledCount: 1 });
   }
 
@@ -2715,6 +2720,7 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
     canceledCount++;
   }
 
+  getIo()?.to(uid).emit("sessoes:changed");
   return res.json({ ok: true, canceledCount, scope: "forward" });
 }));
 
@@ -2858,6 +2864,7 @@ router.post("/therapy/agenda/blackout", asyncHandler(async (req, res) => {
   });
 
   await logAudit({ type: "blackout_created", blackoutId, therapistUid: uid });
+  getIo()?.to(uid).emit("blackouts:changed");
   return res.json({ ok: true, blackoutId, from, to, reason: reason || null });
 }));
 
@@ -2877,6 +2884,7 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 
   await ref.delete();
   await logAudit({ type: "blackout_deleted", blackoutId, therapistUid: uid });
+  getIo()?.to(uid).emit("blackouts:changed");
   return res.json({ ok: true });
 }));
 

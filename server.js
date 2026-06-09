@@ -40,6 +40,7 @@ process.on("unhandledRejection", (reason) => {
   logError("unhandledRejection", err);
 });
 
+const http    = require("http");
 const express = require("express");
 const helmet  = require("helmet");
 const cors    = require("cors");
@@ -184,7 +185,11 @@ const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler"
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
-const server = app.listen(PORT, "0.0.0.0", () => {
+const { initSocketIo } = require("./services/socketio");
+const httpServer = http.createServer(app);
+initSocketIo(httpServer, ALLOWED_ORIGINS);
+
+const server = httpServer.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
   startCleanupLoop();
   startSchedulerLoop();
