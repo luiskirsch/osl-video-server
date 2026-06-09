@@ -3958,6 +3958,56 @@ router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res
   return res.json({ ok: true, sessions });
 }));
 
+// GET /therapy/pacientes/:patientId/sinais — sinais clínicos (humor, ansiedade,
+// sono, autoestima, risco, eventos marcantes, temas) extraídos por IA de cada
+// sessão com resumo concluído, em ordem cronológica. Base de dados pra timeline
+// visual, mapa emocional, radar de risco e memória clínica (gêmeo clínico).
+router.get("/therapy/pacientes/:patientId/sinais", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const db = getDb();
+  const patientSnap = await db.collection("therapy_patients").doc(patientId).get();
+  if (!patientSnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (patientSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  // Sessões do paciente (mesma query de /sessoes)
+  const sessSnap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("patientId", "==", patientId)
+    .limit(500)
+    .get();
+
+  const sessionIds = sessSnap.docs.map(d => d.data().sessionId).filter(Boolean);
+  if (sessionIds.length === 0) return res.json({ ok: true, entries: [] });
+
+  // Busca resumos individualmente — evita índice composto novo.
+  const summarySnaps = await Promise.all(
+    sessionIds.map(id => db.collection("therapy_session_summaries").doc(id).get())
+  );
+
+  const entries = summarySnaps
+    .filter(s => s.exists && s.data().status === "completed")
+    .map(s => {
+      const data = s.data();
+      return {
+        sessionId: data.sessionId || s.id,
+        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
+        durationSec: data.durationSec || null,
+        signals: data.signals || null,
+        topics: (data.summary?.topics || []).map(t => t.title)
+      };
+    })
+    .filter(e => e.completedAt)
+    .sort((a, b) => a.completedAt - b.completedAt);
+
+  return res.json({ ok: true, entries });
+}));
+
 // ─────────────────────────────────────────────────────────────────────────
 // CONTA DE PACIENTE — opcional. Pacientes podem criar conta para guardar
 // suas próprias anotações cifradas E2EE entre sessões. Mesmo padrão DEK/KEK
@@ -6383,11 +6433,14 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session }) 
     }
 
     // 3. Salva resultado
+    const { signals, ...summaryRest } = summaryResult.summary || {};
     await summaryRef.set({
       status: "completed",
+      patientId: session.patientId || null,
       transcript: transcriptResult.text,
       transcriptChunks: transcriptResult.chunks?.slice(0, 200) || [], // limit pra evitar doc gigante
-      summary: summaryResult.summary,
+      summary: summaryRest,
+      signals: signals || null,
       durationSec: transcriptResult.durationSec,
       transcribeMs,
       summarizeMs,
@@ -6436,6 +6489,7 @@ router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, re
     exists: true,
     status: data.status,
     summary: data.summary || null,
+    signals: data.signals || null,
     transcript: data.transcript || null,
     durationSec: data.durationSec || null,
     completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,

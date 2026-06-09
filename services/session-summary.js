@@ -23,7 +23,7 @@ function getClient() {
 
 const SYSTEM_PROMPT = `Você é um assistente clínico que ajuda profissionais de saúde mental a recuperar o contexto de sessões anteriores.
 
-Sua tarefa: a partir do transcript de uma sessão de telessaúde, gerar um resumo estruturado que o profissional vai ler ANTES da próxima sessão.
+Sua tarefa: a partir do transcript de uma sessão de telessaúde, gerar um resumo estruturado que o profissional vai ler ANTES da próxima sessão, além de sinais clínicos para acompanhamento longitudinal (timeline, gráficos de evolução, radar de risco).
 
 Princípios:
 - Foque em CONTEÚDO clínico relevante, não em filler verbal ("é", "tipo", "sabe", "uhum")
@@ -31,7 +31,14 @@ Princípios:
 - Marque TEMAS A RETOMAR — assuntos importantes que não foram totalmente resolvidos
 - Tom neutro e clínico, terceira pessoa, em português brasileiro
 - Se o transcript estiver muito curto, vazio ou ininteligível, retorne summary explicando isso
-- Aceite que o transcript pode ter erros de Whisper (palavras trocadas, nomes mal grafados) — use contexto pra interpretar`;
+- Aceite que o transcript pode ter erros de Whisper (palavras trocadas, nomes mal grafados) — use contexto pra interpretar
+
+Sobre os SINAIS (campo "signals"):
+- São inferências a partir do que foi dito NESTA sessão, não uma avaliação clínica validada — o profissional usa como apoio, não substitui julgamento clínico
+- Use null em qualquer escala (mood, anxiety, sleepQuality, selfEsteem) se o transcript não trouxer indício suficiente — NÃO invente valores
+- riskLevel reflete sinais de crise, ideação, autolesão ou recaída mencionados NESTA sessão — "none" é o padrão na ausência de qualquer sinal
+- notableEvents captura marcos/eventos de vida relevantes pra uma timeline (separação, troca de medicação, alta, nova crise, etc.) — só inclua o que for novidade nesta sessão
+- keyThemes são 1-4 temas centrais recorrentes (ex: "medo de abandono", "conflito com a mãe") — usados pra detectar padrões entre sessões ao longo do tempo`;
 
 const RESPONSE_SCHEMA = {
   type: "object",
@@ -68,9 +75,62 @@ const RESPONSE_SCHEMA = {
       type: "array",
       description: "Temas que ficaram em aberto e merecem ser retomados na próxima sessão.",
       items: { type: "string" }
+    },
+    signals: {
+      type: "object",
+      description: "Sinais clínicos extraídos desta sessão para acompanhamento longitudinal (timeline, gráficos, radar de risco).",
+      properties: {
+        mood: {
+          type: ["integer", "null"],
+          description: "Humor geral do paciente nesta sessão, escala 0 (muito deprimido/desanimado) a 10 (eufórico/muito bem). null se não há indício suficiente."
+        },
+        anxiety: {
+          type: ["integer", "null"],
+          description: "Nível de ansiedade expresso nesta sessão, escala 0 (calmo) a 10 (pânico/crise). null se não há indício suficiente."
+        },
+        sleepQuality: {
+          type: ["integer", "null"],
+          description: "Qualidade do sono relatada, escala 0 (insônia severa) a 10 (sono ótimo). null se não foi mencionado."
+        },
+        selfEsteem: {
+          type: ["integer", "null"],
+          description: "Autoestima/autoimagem expressa nesta sessão, escala 0 (muito negativa) a 10 (muito positiva). null se não há indício suficiente."
+        },
+        riskLevel: {
+          type: "string",
+          enum: ["none", "low", "moderate", "high"],
+          description: "Nível de risco de crise, ideação, autolesão ou recaída percebido nesta sessão. 'none' é o padrão."
+        },
+        riskFactors: {
+          type: "array",
+          items: { type: "string" },
+          description: "Fatores que motivaram o riskLevel informado. Vazio se riskLevel for 'none'."
+        },
+        notableEvents: {
+          type: "array",
+          description: "Eventos/marcos de vida mencionados NESTA sessão, relevantes para a timeline do paciente (ex: 'Separação conjugal', 'Troca de medicação', 'Alta parcial'). Vazio se nada novo.",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string", description: "Título curto do evento (3-6 palavras)" },
+              category: {
+                type: "string",
+                enum: ["marco_terapeutico", "evento_vida", "saude", "crise", "medicacao", "outro"]
+              }
+            },
+            required: ["title", "category"]
+          }
+        },
+        keyThemes: {
+          type: "array",
+          items: { type: "string" },
+          description: "1-4 temas clínicos centrais desta sessão (ex: 'medo de abandono', 'conflito familiar'), usados para detectar padrões recorrentes entre sessões."
+        }
+      },
+      required: ["mood", "anxiety", "sleepQuality", "selfEsteem", "riskLevel", "riskFactors", "notableEvents", "keyThemes"]
     }
   },
-  required: ["summary", "topics", "commitments", "followups"]
+  required: ["summary", "topics", "commitments", "followups", "signals"]
 };
 
 /**
