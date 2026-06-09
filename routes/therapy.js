@@ -1494,6 +1494,18 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     }
   }
 
+  // Tópicos personalizados da sessão.
+  if (Array.isArray(req.body?.sessionTopics)) {
+    updates.sessionTopics = req.body.sessionTopics
+      .filter(t => t && typeof t.text === "string" && t.text.trim())
+      .slice(0, 50)
+      .map(t => ({
+        id:    String(t.id   || "").slice(0, 40) || crypto.randomBytes(6).toString("hex"),
+        text:  String(t.text || "").trim().slice(0, 300),
+        abord: String(t.abord || "custom").slice(0, 30)
+      }));
+  }
+
   await getDb().collection("therapists").doc(uid).set(updates, { merge: true });
   await logAudit({ type: "therapist_perfil_updated", therapistUid: uid });
 
