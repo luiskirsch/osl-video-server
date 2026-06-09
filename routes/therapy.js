@@ -47,6 +47,7 @@ const pushService = require("../services/push");
 const { withRetry } = require("../services/retry");
 const whisperSvc = require("../services/whisper");
 const sessionSummarySvc = require("../services/session-summary");
+const clinicalTwinSvc = require("../services/clinical-twin");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
 const scales = require("../services/scales");
@@ -4006,6 +4007,62 @@ router.get("/therapy/pacientes/:patientId/sinais", asyncHandler(async (req, res)
     .sort((a, b) => a.completedAt - b.completedAt);
 
   return res.json({ ok: true, entries });
+}));
+
+// POST /therapy/pacientes/:patientId/gemeo-clinico — pergunta livre sobre o
+// histórico do paciente, respondida por IA (Claude Haiku) com base nos
+// resumos de sessão (summary + signals) já gerados. "Gêmeo Clínico" — Fase 5
+// da timeline viva do paciente.
+router.post("/therapy/pacientes/:patientId/gemeo-clinico", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const question = String(req.body?.question || "").trim();
+  if (!question) return sendError(res, 400, "PERGUNTA_OBRIGATORIA");
+  if (question.length > 500) return sendError(res, 400, "PERGUNTA_MUITO_LONGA");
+
+  const db = getDb();
+  const patientSnap = await db.collection("therapy_patients").doc(patientId).get();
+  if (!patientSnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (patientSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const sessSnap = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("patientId", "==", patientId)
+    .limit(500)
+    .get();
+
+  if (sessSnap.empty) return sendError(res, 404, "SEM_HISTORICO");
+  const patientName = sessSnap.docs[0].data().patientName || null;
+  const sessionIds = sessSnap.docs.map(d => d.data().sessionId).filter(Boolean);
+
+  const summarySnaps = await Promise.all(
+    sessionIds.map(id => db.collection("therapy_session_summaries").doc(id).get())
+  );
+
+  const entries = summarySnaps
+    .filter(s => s.exists && s.data().status === "completed")
+    .map(s => {
+      const data = s.data();
+      return {
+        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
+        summary: data.summary || null,
+        signals: data.signals || null
+      };
+    })
+    .filter(e => e.completedAt)
+    .sort((a, b) => a.completedAt - b.completedAt);
+
+  if (entries.length === 0) return sendError(res, 404, "SEM_HISTORICO");
+
+  const result = await clinicalTwinSvc.askClinicalTwin({ question, entries, patientName });
+  if (!result.ok) return sendError(res, 502, result.error || "GEMEO_FALHOU");
+
+  return res.json({ ok: true, answer: result.answer });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
