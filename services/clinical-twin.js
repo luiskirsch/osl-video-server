@@ -27,7 +27,8 @@ Princípios:
 - Ao citar uma sessão específica, mencione a data.
 - Ao identificar um padrão ou tema recorrente, diga em quantas sessões ou desde quando ele aparece.
 - Os "sinais clínicos" são inferências automáticas de IA sobre cada sessão, não uma avaliação validada — trate como apoio à memória, e deixe claro quando a resposta depende desses sinais.
-- Seja conciso: prefira 2-5 frases ou uma lista curta. Evite repetir o histórico inteiro.`;
+- Seja conciso: prefira 2-5 frases ou uma lista curta. Evite repetir o histórico inteiro.
+- Texto plano apenas — NÃO use Markdown (sem **negrito**, *itálico*, #títulos ou \`código\`). A interface não renderiza Markdown, exibe o texto literal. Para listas, use "- " no início da linha.`;
 
 const MAX_SESSIONS = 30;
 
