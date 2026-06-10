@@ -6,6 +6,7 @@
 
 const express  = require("express");
 const router   = express.Router();
+const webhookRouter = express.Router();
 const admin    = require("firebase-admin");
 const { verifyFirebaseToken } = require("../services/auth");
 const stripeSvc = require("../services/stripe");
@@ -53,7 +54,7 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
 // ─── POST /stripe/webhook ─────────────────────────────────────────────────────
 // Recebe eventos do Stripe (pagamento confirmado, cancelamento, etc).
 // Body DEVE ser raw (registrado antes do express.json() no server.js).
-router.post("/stripe/webhook",
+webhookRouter.post("/stripe/webhook",
   express.raw({ type: "application/json" }),
   asyncHandler(async (req, res) => {
     const sig = req.headers["stripe-signature"];
@@ -188,4 +189,4 @@ router.post("/stripe/portal", asyncHandler(async (req, res) => {
   return res.json({ ok: true, url });
 }));
 
-module.exports = router;
+module.exports = { router, webhookRouter };
