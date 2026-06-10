@@ -29,6 +29,7 @@ const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
+  THERAPY_PLAN_ANNUAL_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT,
   THERAPY_PLAN_NAME,
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
   THERAPY_FRONTEND_BASE,
@@ -6042,10 +6043,12 @@ router.get("/therapy/paciente/audit", asyncHandler(async (req, res) => {
 // POST /therapy/profissional/plano/iniciar
 // Cria preapproval no MP, salva mpPreapprovalId, retorna init_point pra redirect.
 //
-// Body opcional: { tier: "recem-formado" | "profissional" }
-//   - "recem-formado" → cobra R$ 99,50 (exige plano === "recem-formado-eligible")
-//   - "profissional"  → cobra R$ 199
+// Body opcional: { tier: "recem-formado" | "profissional", billingCycle: "month" | "year" }
+//   - "recem-formado" → cobra R$ 99,50/mês ou R$ 1.002,96/ano (exige plano === "recem-formado-eligible")
+//   - "profissional"  → cobra R$ 199/mês ou R$ 2.005,92/ano
 //   - sem tier (compat) → cobra THERAPY_PLAN_AMOUNT (default 99,50)
+//   - billingCycle "year" → preapproval com frequency: 12 / frequency_type: "months"
+//     (MP não suporta frequency_type "years"), valor anual = mensal x 12 x 0.84 (16% off)
 router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -6056,6 +6059,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
 
   // Determina tier + preço. Default mantém compat (sem flag = THERAPY_PLAN_AMOUNT).
   const tier = String(req.body?.tier || "").trim().toLowerCase();
+  const billingCycle = String(req.body?.billingCycle || "month").trim().toLowerCase() === "year" ? "year" : "month";
   let amount, planTier, planLabel;
   if (tier === "recem-formado") {
     if (therapist.plano !== "recem-formado-eligible") {
@@ -6063,19 +6067,20 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
         detail: "Envie o comprovante de inscrição CRP/CRM em /comprovante-recem-formado.html antes de assinar este tier."
       });
     }
-    amount = THERAPY_PLAN_RECEM_FORMADO_AMOUNT;
+    amount = billingCycle === "year" ? THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT : THERAPY_PLAN_RECEM_FORMADO_AMOUNT;
     planTier = "recem-formado";
     planLabel = `${THERAPY_PLAN_NAME} — Recém-formado`;
   } else if (tier === "profissional") {
-    amount = THERAPY_PLAN_PROFISSIONAL_AMOUNT;
+    amount = billingCycle === "year" ? THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT : THERAPY_PLAN_PROFISSIONAL_AMOUNT;
     planTier = "profissional";
     planLabel = `${THERAPY_PLAN_NAME} — Profissional`;
   } else {
     // Compat: chamadas antigas sem tier usam o default histórico
-    amount = THERAPY_PLAN_AMOUNT;
+    amount = billingCycle === "year" ? THERAPY_PLAN_ANNUAL_AMOUNT : THERAPY_PLAN_AMOUNT;
     planTier = "default";
     planLabel = THERAPY_PLAN_NAME;
   }
+  if (billingCycle === "year") planLabel += " — Anual";
 
   // Pega e-mail do Firebase Auth (preapproval exige payer_email)
   let payerEmail = "";
@@ -6090,7 +6095,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
   const body = {
     reason: planLabel,
     auto_recurring: {
-      frequency: 1,
+      frequency: billingCycle === "year" ? 12 : 1,
       frequency_type: "months",
       transaction_amount: amount,
       currency_id: "BRL"
@@ -6124,6 +6129,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     mpExternalRef:       externalRef,
     proTier:             planTier,
     proPriceCents:       Math.round(amount * 100),
+    proBillingCycle:     billingCycle,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -6132,6 +6138,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     therapistUid: uid,
     preapprovalId: data.id,
     tier: planTier,
+    billingCycle,
     amount
   });
 
@@ -6289,6 +6296,10 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   if (plano) update.plano = plano;
   if (plano === "pro") update.proSince = admin.firestore.FieldValue.serverTimestamp();
 
+  // Ciclo de cobrança vem direto do MP (source of truth): frequency 12 = anual.
+  const frequency = Number(preapproval?.auto_recurring?.frequency) || 1;
+  update.proBillingCycle = frequency >= 12 ? "year" : "month";
+
   // Reconcilia proPriceCents com o transaction_amount real do preapproval
   // (source of truth = MP). proTier so e derivado quando o valor cobrado
   // bate UNICAMENTE com um tier (sem ambiguidade) — quando dois tiers tem
@@ -6300,9 +6311,12 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     const matches = [];
     // Float compare tolerante (Math.abs < 0.005 = meio centavo)
     const eq = (a, b) => Math.abs(a - b) < 0.005;
-    if (eq(txAmount, THERAPY_PLAN_RECEM_FORMADO_AMOUNT))     matches.push("recem-formado");
-    if (eq(txAmount, THERAPY_PLAN_PROFISSIONAL_AMOUNT))      matches.push("profissional");
-    if (eq(txAmount, THERAPY_PLAN_AMOUNT))                   matches.push("default");
+    if (eq(txAmount, THERAPY_PLAN_RECEM_FORMADO_AMOUNT) || eq(txAmount, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT))
+      matches.push("recem-formado");
+    if (eq(txAmount, THERAPY_PLAN_PROFISSIONAL_AMOUNT) || eq(txAmount, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT))
+      matches.push("profissional");
+    if (eq(txAmount, THERAPY_PLAN_AMOUNT) || eq(txAmount, THERAPY_PLAN_ANNUAL_AMOUNT))
+      matches.push("default");
     if (matches.length === 1) {
       // Unico match — pode reconciliar com seguranca.
       update.proTier = matches[0];
@@ -6337,7 +6351,8 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     mpStatus: status,
     plano: plano || "unchanged",
     proTier: update.proTier || null,
-    proPriceCents: update.proPriceCents || null
+    proPriceCents: update.proPriceCents || null,
+    proBillingCycle: update.proBillingCycle || null
   });
 
   return res.status(200).json({ ok: true });
