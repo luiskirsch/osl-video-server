@@ -32,18 +32,27 @@ const STRIPE_PLANS = {
   },
 };
 
+// Mapeia o locale do site (i18n) para os códigos aceitos pelo Stripe Checkout.
+// https://stripe.com/docs/api/checkout/sessions/create#create_checkout_session-locale
+const STRIPE_LOCALES = {
+  "pt-BR": "pt-BR",
+  "en-US": "en",
+  "es-ES": "es",
+};
+
 /**
  * Cria sessão de Stripe Checkout (modo subscription).
  * @param {object} opts
  * @param {"profissional"|"recem_formado"} opts.tier
  * @param {"month"|"year"} [opts.billingCycle] - default "month"
+ * @param {string}  [opts.locale]      - locale do site (pt-BR/en-US/es-ES) → idioma do Checkout
  * @param {string}  opts.therapistUid  - UID Firebase do profissional
  * @param {string}  opts.successUrl    - URL após pagamento aprovado
  * @param {string}  opts.cancelUrl     - URL se o usuário cancelar
  * @param {string}  [opts.email]       - Preenche e-mail no checkout
  * @returns {Promise<{url: string, sessionId: string}>}
  */
-async function createCheckoutSession({ tier, billingCycle, therapistUid, successUrl, cancelUrl, email }) {
+async function createCheckoutSession({ tier, billingCycle, locale, therapistUid, successUrl, cancelUrl, email }) {
   const plan = STRIPE_PLANS[tier];
   if (!plan) throw new Error("TIER_INVALIDO");
 
@@ -53,6 +62,7 @@ async function createCheckoutSession({ tier, billingCycle, therapistUid, success
   const stripe = getStripe();
   const params = {
     mode: "subscription",
+    locale: STRIPE_LOCALES[locale] || "auto",
     line_items: [{
       price_data: {
         currency: "usd",

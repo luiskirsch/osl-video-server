@@ -30,6 +30,7 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
     return res.status(400).json({ ok: false, error: "TIER_INVALIDO" });
   }
   const billingCycle = String(req.body?.billingCycle || "month").trim().toLowerCase() === "year" ? "year" : "month";
+  const locale = req.body?.locale;
 
   // Pega e-mail do profissional pra preencher no checkout (melhor conversão)
   let email;
@@ -42,6 +43,7 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
   const { url } = await stripeSvc.createCheckoutSession({
     tier,
     billingCycle,
+    locale,
     therapistUid: uid,
     email,
     successUrl: `${origin}/planos.html?stripe=success&session_id={CHECKOUT_SESSION_ID}`,
