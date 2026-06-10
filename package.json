@@ -21,6 +21,7 @@
     "express": "^4.22.1",
     "express-rate-limit": "^8.4.1",
     "firebase-admin": "^12.7.0",
+    "geoip-country": "^5.0.202605270000",
     "helmet": "^8.0.0",
     "livekit-server-sdk": "^2.15.0",
     "morgan": "^1.10.0",

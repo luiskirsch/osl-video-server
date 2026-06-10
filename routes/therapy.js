@@ -17,6 +17,7 @@ const express = require("express");
 const rateLimit = require("express-rate-limit");
 const admin   = require("firebase-admin");
 const crypto  = require("crypto");
+const geoipCountry = require("geoip-country");
 const { AccessToken } = require("livekit-server-sdk");
 
 const { logError, logInfo, logWarn } = require("../logger");
@@ -144,6 +145,21 @@ const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
 }
+
+// ─── Geolocalização por IP (moeda padrão na página de planos: BR → BRL/Mercado
+// Pago, resto do mundo → USD/Stripe). O front ainda permite trocar manualmente. ───
+const geoLookupLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+router.get("/therapy/geo", geoLookupLimiter, (req, res) => {
+  const ip = String(req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+  const geo = geoipCountry.lookup(ip);
+  return res.json({ ok: true, country: geo?.country || null });
+});
 
 // Short codes pra link de paciente — entrar.html?c=K9RTPX73 (~50 chars)
 // em vez de entrar.html?t=<jwt> (~500 chars). Ver services/join-codes.js.
