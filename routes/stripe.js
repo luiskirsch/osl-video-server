@@ -18,7 +18,7 @@ function asyncHandler(fn) {
 
 // ─── POST /stripe/create-checkout ────────────────────────────────────────────
 // Profissional logado solicita sessão de Stripe Checkout.
-// Body: { tier: "profissional" | "recem_formado" }
+// Body: { tier: "profissional" | "recem_formado", billingCycle?: "month" | "year" }
 // Retorna: { ok, url } — frontend redireciona para url.
 router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
@@ -28,6 +28,7 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
   if (!["profissional", "recem_formado"].includes(tier)) {
     return res.status(400).json({ ok: false, error: "TIER_INVALIDO" });
   }
+  const billingCycle = String(req.body?.billingCycle || "month").trim().toLowerCase() === "year" ? "year" : "month";
 
   // Pega e-mail do profissional pra preencher no checkout (melhor conversão)
   let email;
@@ -39,6 +40,7 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
   const origin = (req.headers.origin || "https://espacopreludio.com.br").replace(/\/$/, "");
   const { url } = await stripeSvc.createCheckoutSession({
     tier,
+    billingCycle,
     therapistUid: uid,
     email,
     successUrl: `${origin}/planos.html?stripe=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -75,11 +77,19 @@ router.post("/stripe/webhook",
         case "checkout.session.completed": {
           const session = event.data.object;
           if (session.mode !== "subscription") break;
-          const { therapistUid, tier } = session.metadata || {};
+          const { therapistUid, tier, billingCycle } = session.metadata || {};
           if (!therapistUid || !tier) break;
 
+          const proTier = tier === "recem_formado" ? "recem-formado" : "profissional";
+          const cycle = billingCycle === "year" ? "year" : "month";
+          const plan = stripeSvc.STRIPE_PLANS[tier];
+          const proPriceCents = plan ? (cycle === "year" ? plan.amountAnnual : plan.amount) : null;
+
           await db.collection("therapists").doc(therapistUid).set({
-            plan:                   tier,
+            plano:                  "pro",
+            proTier,
+            proPriceCents,
+            proBillingCycle:        cycle,
             planSource:             "stripe",
             planActive:             true,
             stripeCustomerId:       session.customer,
@@ -88,7 +98,7 @@ router.post("/stripe/webhook",
             updatedAt:              admin.firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
 
-          logInfo("stripe_plan_activated", { therapistUid, tier, customerId: session.customer });
+          logInfo("stripe_plan_activated", { therapistUid, tier, billingCycle: cycle, customerId: session.customer });
           break;
         }
 
@@ -134,7 +144,7 @@ router.post("/stripe/webhook",
             .where("stripeCustomerId", "==", customerId).limit(1).get();
           if (!snap.empty) {
             await snap.docs[0].ref.set({
-              plan:          "expired",
+              plano:         "expired",
               planSource:    "stripe",
               planActive:    false,
               planExpiredAt: admin.firestore.FieldValue.serverTimestamp(),

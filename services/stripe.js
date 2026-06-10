@@ -16,16 +16,19 @@ function getStripe() {
 }
 
 // Planos USD — product IDs criados no Stripe Dashboard.
+// amountAnnual = amount x 12 x 0.84 (16% off), mesmo desconto do plano anual em BRL.
 const STRIPE_PLANS = {
   profissional: {
-    productId: process.env.STRIPE_PRODUCT_PROFISSIONAL || "prod_Ue5U9e3XuIPbk8",
-    amount:    4900,   // $49.00 USD em centavos
-    label:     "Espaço Prelúdio — Profissional",
+    productId:    process.env.STRIPE_PRODUCT_PROFISSIONAL || "prod_Ue5U9e3XuIPbk8",
+    amount:       4900,   // $49.00 USD/mês em centavos
+    amountAnnual: 49400,  // $494.00 USD/ano em centavos
+    label:        "Espaço Prelúdio — Profissional",
   },
   recem_formado: {
-    productId: process.env.STRIPE_PRODUCT_RECEM_FORMADO || "prod_Ue5VgWZSTEV1Aq",
-    amount:    2900,   // $29.00 USD em centavos
-    label:     "Espaço Prelúdio — Recém-formado",
+    productId:    process.env.STRIPE_PRODUCT_RECEM_FORMADO || "prod_Ue5VgWZSTEV1Aq",
+    amount:       2900,   // $29.00 USD/mês em centavos
+    amountAnnual: 29200,  // $292.00 USD/ano em centavos
+    label:        "Espaço Prelúdio — Recém-formado",
   },
 };
 
@@ -33,15 +36,19 @@ const STRIPE_PLANS = {
  * Cria sessão de Stripe Checkout (modo subscription).
  * @param {object} opts
  * @param {"profissional"|"recem_formado"} opts.tier
+ * @param {"month"|"year"} [opts.billingCycle] - default "month"
  * @param {string}  opts.therapistUid  - UID Firebase do profissional
  * @param {string}  opts.successUrl    - URL após pagamento aprovado
  * @param {string}  opts.cancelUrl     - URL se o usuário cancelar
  * @param {string}  [opts.email]       - Preenche e-mail no checkout
  * @returns {Promise<{url: string, sessionId: string}>}
  */
-async function createCheckoutSession({ tier, therapistUid, successUrl, cancelUrl, email }) {
+async function createCheckoutSession({ tier, billingCycle, therapistUid, successUrl, cancelUrl, email }) {
   const plan = STRIPE_PLANS[tier];
   if (!plan) throw new Error("TIER_INVALIDO");
+
+  const cycle = billingCycle === "year" ? "year" : "month";
+  const amount = cycle === "year" ? plan.amountAnnual : plan.amount;
 
   const stripe = getStripe();
   const params = {
@@ -50,24 +57,24 @@ async function createCheckoutSession({ tier, therapistUid, successUrl, cancelUrl
       price_data: {
         currency: "usd",
         product: plan.productId,
-        unit_amount: plan.amount,
-        recurring: { interval: "month" },
+        unit_amount: amount,
+        recurring: { interval: cycle },
       },
       quantity: 1,
     }],
-    metadata: { therapistUid, tier },
+    metadata: { therapistUid, tier, billingCycle: cycle },
     client_reference_id: therapistUid,
     success_url: successUrl,
     cancel_url:  cancelUrl,
     allow_promotion_codes: true,
     subscription_data: {
-      metadata: { therapistUid, tier },
+      metadata: { therapistUid, tier, billingCycle: cycle },
     },
   };
   if (email) params.customer_email = email;
 
   const session = await stripe.checkout.sessions.create(params);
-  logInfo("stripe_checkout_created", { sessionId: session.id, tier, therapistUid });
+  logInfo("stripe_checkout_created", { sessionId: session.id, tier, billingCycle: cycle, therapistUid });
   return { url: session.url, sessionId: session.id };
 }
 
