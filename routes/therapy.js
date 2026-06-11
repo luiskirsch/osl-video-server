@@ -123,6 +123,7 @@ const {
   templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateClinicInvite,
+  templateStudentLeadReceived,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl, buildConfirmUrl: buildPatientConfirmUrl,
@@ -8002,6 +8003,20 @@ const publicSchedulingLimiter = rateLimit({
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
 });
 
+const STUDENT_LEAD_NAME_MAX        = 80;
+const STUDENT_LEAD_EMAIL_MAX       = 120;
+const STUDENT_LEAD_INSTITUTION_MAX = 120;
+const STUDENT_LEAD_COURSE_MAX      = 60;
+const STUDENT_LEAD_MESSAGE_MAX     = 500;
+
+const publicStudentLeadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1h
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
+});
+
 function summarizeTherapistForPublicScheduling(therapist) {
   const c = therapist.consultorio || {};
   const conselhoSigla = resolveSiglaFromTherapist(therapist);
@@ -8382,6 +8397,49 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   }).catch(e => logError("push_scheduling_failed", e, { requestId }));
 
   return res.json({ ok: true, requestId });
+}));
+
+// POST /public/leads/estudante — landing page pública: interessado no tier
+// Estudante deixa contato (não exige conta). Salva em Firestore + notifica
+// admin por e-mail. Sem auth — protegido só por rate limit.
+router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const name = String(req.body?.name || "").trim().slice(0, STUDENT_LEAD_NAME_MAX);
+  if (!name) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const emailRaw = String(req.body?.email || "").trim().toLowerCase().slice(0, STUDENT_LEAD_EMAIL_MAX);
+  if (!emailRaw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailRaw)) {
+    return sendError(res, 400, "EMAIL_INVALIDO");
+  }
+
+  const institution = String(req.body?.institution || "").trim().slice(0, STUDENT_LEAD_INSTITUTION_MAX);
+  const course      = String(req.body?.course || "").trim().slice(0, STUDENT_LEAD_COURSE_MAX);
+  const message     = String(req.body?.message || "").trim().slice(0, STUDENT_LEAD_MESSAGE_MAX);
+
+  const leadId = newId("stlead");
+  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
+
+  await getDb().collection("therapy_student_leads").doc(leadId).set({
+    leadId,
+    name,
+    email: emailRaw,
+    institution,
+    course,
+    message,
+    ipHash,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  if (THERAPY_ADMIN_EMAILS.length) {
+    const tpl = templateStudentLeadReceived({ name, email: emailRaw, institution, course, message });
+    sendEmail({ to: THERAPY_ADMIN_EMAILS, ...tpl, replyTo: emailRaw }).catch(e =>
+      logError("student_lead_email_failed", e, { leadId })
+    );
+  }
+
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/agendamentos/solicitacoes — terapeuta lista solicitações
