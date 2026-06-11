@@ -6635,7 +6635,9 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     // (mesma fonte que admin-verificacoes.html consulta — evita badge fantasma)
     db.collection("therapy_verifications").where("status", "==", "pending").get(),
     // [8] therapy_patient_accounts — pacientes que se cadastraram (signup próprio)
-    db.collection("therapy_patient_accounts").get()
+    db.collection("therapy_patient_accounts").get(),
+    // [9] therapy_student_leads — interessados no plano Estudante (landing) ainda não contatados
+    db.collection("therapy_student_leads").where("status", "==", "new").get()
   ]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────
@@ -6796,6 +6798,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
   const pendEstudante = queries[4].status === "fulfilled" ? queries[4].value.size : 0;
   const pendRecemFormado = queries[5].status === "fulfilled" ? queries[5].value.size : 0;
   const pendSemConselho = queries[6].status === "fulfilled" ? queries[6].value.size : 0;
+  const pendLeadsEstudante = queries[9].status === "fulfilled" ? queries[9].value.size : 0;
 
   // ─── Integrações (configurado vs não) ───────────────────────────────
   // Só listamos integrações CRÍTICAS pro produto funcionar. Removidos:
@@ -6879,7 +6882,8 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       estudante: pendEstudante,
       recemFormado: pendRecemFormado,
       semConselho: pendSemConselho,
-      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho
+      leadsEstudante: pendLeadsEstudante,
+      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho + pendLeadsEstudante
     },
     eventos,
     sistema
@@ -8429,6 +8433,7 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
     course,
     message,
     ipHash,
+    status: "new",
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -8438,6 +8443,68 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
       logError("student_lead_email_failed", e, { leadId })
     );
   }
+
+  return res.json({ ok: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADMIN — Leads de interesse no plano Estudante (modal da landing page)
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /therapy/admin/leads-estudante?status=new|contacted|all (default: new)
+router.get("/therapy/admin/leads-estudante", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "new").trim().toLowerCase();
+  const db = getDb();
+  let q = db.collection("therapy_student_leads");
+  if (wantStatus !== "all") {
+    q = q.where("status", "==", wantStatus);
+  }
+  const snap = await q.limit(200).get();
+
+  const items = snap.docs.map(d => {
+    const r = d.data();
+    return {
+      leadId: r.leadId,
+      name: r.name,
+      email: r.email,
+      institution: r.institution || null,
+      course: r.course || null,
+      message: r.message || null,
+      status: r.status || "new",
+      contactedBy: r.contactedBy || null,
+      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
+    };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
+// PATCH /therapy/admin/leads-estudante/:id — marca lead como contatado/novo.
+router.patch("/therapy/admin/leads-estudante/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const leadId = String(req.params.id || "").trim();
+  if (!leadId) return sendError(res, 400, "LEAD_ID_OBRIGATORIO");
+
+  const newStatus = String(req.body?.status || "").trim();
+  if (!["new", "contacted"].includes(newStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_student_leads").doc(leadId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "LEAD_NAO_ENCONTRADO");
+
+  await ref.set({
+    status: newStatus,
+    contactedBy: newStatus === "contacted" ? adminAuth.email : null,
+    contactedAt: newStatus === "contacted" ? admin.firestore.FieldValue.serverTimestamp() : null
+  }, { merge: true });
 
   return res.json({ ok: true });
 }));
