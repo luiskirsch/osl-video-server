@@ -345,6 +345,24 @@ function rejectIfStudent(therapist, res) {
   return false;
 }
 
+// Bloqueia emissão de receitas e documentos clínicos até o profissional ter
+// o selo de verificado (CRP/CRM confirmado por revisão manual do admin via
+// /therapy/profissional/verificacao/submeter). Sem isso, qualquer registro
+// digitado no cadastro — mesmo inválido — liberaria documentos com validade
+// legal sem nenhuma checagem humana.
+//
+// Encadear DEPOIS de requirePaidPlan + rejectIfStudent + requireCapability.
+function rejectIfNotVerified(therapist, res) {
+  if (therapist?.verificationStatus !== "verified") {
+    sendError(res, 403, "VERIFICACAO_PENDENTE", {
+      verificationStatus: therapist?.verificationStatus || "none",
+      detail: "Receitas e documentos clínicos só ficam disponíveis após a verificação do seu registro profissional (selo de verificado). Envie seu comprovante na tela de Verificação."
+    });
+    return true;
+  }
+  return false;
+}
+
 // Resolve o e-mail do terapeuta. Prefere o snapshot salvo em
 // therapists/{uid}.email (gravado em /profissional/registrar). Se ausente
 // (terapeutas anteriores ao snapshot), faz lazy lookup via Firebase Admin
@@ -4556,6 +4574,7 @@ router.post("/therapy/receitas", asyncHandler(async (req, res) => {
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
+  if (rejectIfNotVerified(therapist, res)) return;
   if (!requireCapability(therapist, res, "receita",
     "Seu conselho não habilita emissão de receita.")) return;
 
@@ -4663,6 +4682,7 @@ router.patch("/therapy/receitas/:id", asyncHandler(async (req, res) => {
   // profissional não habilita "receita" (ex.: terapeuta trocou tipoConselho
   // de CRM pra CRESS depois de criar o draft).
   const therapistDoc = await loadTherapist(uid);
+  if (rejectIfNotVerified(therapistDoc, res)) return;
   if (!requireCapability(therapistDoc, res, "receita",
     "Apenas profissionais com CRM podem editar receitas.")) return;
 
@@ -4746,6 +4766,7 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   // (ato legal). Bloqueia se o profissional trocou pra um conselho que
   // não habilita receita depois de criar o draft.
   const therapistDoc = await loadTherapist(uid);
+  if (rejectIfNotVerified(therapistDoc, res)) return;
   if (!requireCapability(therapistDoc, res, "receita",
     "Seu conselho não habilita assinatura de receita.")) return;
 
@@ -5024,6 +5045,7 @@ router.post("/therapy/documentos", asyncHandler(async (req, res) => {
   const therapist = await requirePaidPlan(req, res, uid);
   if (!therapist) return;
   if (rejectIfStudent(therapist, res)) return;
+  if (rejectIfNotVerified(therapist, res)) return;
   if (!requireCapability(therapist, res, "documentos-clinicos",
     "Atestado, encaminhamento e relatório clínico podem ser emitidos por CRM, CRP, CREFITO, CRN e CRO dentro do escopo da profissão.")) return;
 
@@ -5093,6 +5115,7 @@ router.patch("/therapy/documentos/:id", asyncHandler(async (req, res) => {
   // Defesa em profundidade: revalida capability se o profissional trocou
   // de conselho depois de criar o draft.
   const therapistDoc = await loadTherapist(uid);
+  if (rejectIfNotVerified(therapistDoc, res)) return;
   if (!requireCapability(therapistDoc, res, "documentos-clinicos",
     "Apenas CRM, CRP, CREFITO, CRN e CRO podem editar documentos clínicos.")) return;
 
@@ -5165,6 +5188,7 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
 
   // Defesa em profundidade no momento da assinatura (ato legal).
   const therapistDoc = await loadTherapist(uid);
+  if (rejectIfNotVerified(therapistDoc, res)) return;
   if (!requireCapability(therapistDoc, res, "documentos-clinicos",
     "Apenas CRM, CRP, CREFITO, CRN e CRO podem assinar documentos clínicos.")) return;
 
