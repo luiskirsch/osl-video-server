@@ -146,6 +146,34 @@ const CONSELHOS = {
     isRegulamentado: false,
     requiresManualReview: true,
     acceptedPracticeTypes: ["psicoterapia", "psicanalise", "terapia-integrativa", "hipnoterapia"]
+  },
+  // Profissional regulamentado fora do Brasil — registro válido no órgão de
+  // classe do país de origem (ex.: Ordem dos Psicólogos Portugueses, CSP/EUA
+  // etc), mas sem registro em conselho brasileiro.
+  //
+  // Diferenças vs. conselhos brasileiros:
+  // - isRegulamentado: true (É regulamentado, só que no exterior — não confundir
+  //   com SEM_CONSELHO no badge público).
+  // - isInternacional: true → cadastro/perfil pedem país + órgão de registro;
+  //   PDF de documentos clínicos leva aviso de validade sujeita à legislação local.
+  // - requiresManualReview: true → admin confere o registro estrangeiro
+  //   manualmente (nenhum validador automático cobre registros fora do Brasil).
+  // - SEM "receita": prescrição medicamentosa no Brasil exige registro em
+  //   conselho brasileiro (CRM/CREFITO conforme o caso); não habilitamos pra
+  //   registros internacionais até existir suporte jurídico por país.
+  // - "documentos-clinicos" habilitado com título genérico (getDocumentoTitulo
+  //   cai no fallback "Profissional" — não reivindica nomenclatura de conselho
+  //   brasileiro) + aviso de jurisdição no corpo do PDF.
+  INTERNACIONAL: {
+    sigla: "INTERNACIONAL",
+    label: "Registro profissional no exterior (fora do Brasil)",
+    profissional: "Profissional de saúde/terapia",
+    numberFormat: "Número de registro no órgão de classe do seu país",
+    capabilities: ["consulta", "anotacoes", "atestado-comparecimento", "documentos-clinicos"],
+    eligibleTiers: ["profissional"],
+    isRegulamentado: true,
+    isInternacional: true,
+    requiresManualReview: true
   }
 };
 
@@ -346,11 +374,19 @@ function isRegulamentado(sigla) {
 }
 
 // True se este conselho exige revisão manual obrigatória (não aprova automático).
-// Hoje só SEM_CONSELHO; pode ser estendido pra qualquer conselho que vire
-// "alto risco" no futuro.
+// Hoje SEM_CONSELHO e INTERNACIONAL; pode ser estendido pra qualquer conselho
+// que vire "alto risco" no futuro.
 function requiresManualReview(sigla) {
   const c = getConselho(sigla);
   return !!(c && c.requiresManualReview);
+}
+
+// True se o profissional tem registro regulamentado, mas fora do Brasil
+// (sigla INTERNACIONAL). Usado pra pedir país/órgão de registro no cadastro
+// e incluir aviso de jurisdição nos documentos clínicos.
+function isInternacional(sigla) {
+  const c = getConselho(sigla);
+  return !!(c && c.isInternacional);
 }
 
 // Lista de tipos de prática aceitos pra um conselho. Hoje só faz sentido
@@ -382,6 +418,7 @@ module.exports = {
   therapistCan,
   isRegulamentado,
   requiresManualReview,
+  isInternacional,
   acceptedPracticeTypes,
   isValidPracticeType,
   requiresSubtipo,

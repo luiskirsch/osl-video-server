@@ -109,6 +109,7 @@ const {
   getConselho,
   isRegulamentado: isConselhoRegulamentado,
   requiresManualReview: conselhoRequiresManualReview,
+  isInternacional: isConselhoInternacional,
   isValidPracticeType,
   requiresSubtipo: conselhoRequiresSubtipo,
   isValidSubtipo: isValidConselhoSubtipo,
@@ -555,6 +556,19 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     };
   }
 
+  // Campos extras obrigatórios pra INTERNACIONAL — país + órgão de registro
+  // no exterior. Substituem o "selo do conselho brasileiro" como referência
+  // pro admin revisar manualmente (nenhum validador automático cobre
+  // registros fora do Brasil).
+  let registroInternacional = null;
+  if (tipoConselho === "INTERNACIONAL") {
+    const pais  = String(req.body?.paisRegistro  || "").trim().slice(0, 60);
+    const orgao = String(req.body?.orgaoRegistro || "").trim().slice(0, 120);
+    if (!pais)  return sendError(res, 400, "PAIS_REGISTRO_OBRIGATORIO");
+    if (!orgao) return sendError(res, 400, "ORGAO_REGISTRO_OBRIGATORIO");
+    registroInternacional = { pais, orgao };
+  }
+
   // Tier escolhido na landing — define duração do trial. Aceita: "estudante",
   // "recem-formado" (alias: "recem"), "profissional" (default).
   const intendedTierRaw = String(req.body?.intendedTier || "").trim().toLowerCase();
@@ -640,9 +654,16 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   };
   if (formacaoNaoRegulamentada) {
     therapistDoc.formacaoNaoRegulamentada = formacaoNaoRegulamentada;
-    // Marca verificação como pending-review já no cadastro — SEM_CONSELHO
-    // nunca passa por aprovação automática. Admin precisa revisar diploma
-    // (S22.1) antes de habilitar verificationStatus="verified".
+  }
+  if (registroInternacional) {
+    therapistDoc.paisRegistro = registroInternacional.pais;
+    therapistDoc.orgaoRegistro = registroInternacional.orgao;
+  }
+  // Marca verificação como pending-review já no cadastro pra conselhos que
+  // nunca passam por aprovação automática (SEM_CONSELHO: diploma; INTERNACIONAL:
+  // registro estrangeiro). Admin revisa manualmente antes de habilitar
+  // verificationStatus="verified" (selo azul).
+  if (conselhoRequiresManualReview(tipoConselho)) {
     therapistDoc.verificationStatus = existingData?.verificationStatus || "pending-review";
   }
   await ref.set(therapistDoc, { merge: true });
@@ -657,6 +678,8 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     ok: true,
     therapist: {
       uid, displayName, crp, crm, tipoConselho, numeroConselho, subtipoConselho,
+      paisRegistro: registroInternacional?.pais || "",
+      orgaoRegistro: registroInternacional?.orgao || "",
       especialidade, bio,
       e2eeSalt:     lockedSalt,
       wrappedDEK:   lockedWrappedDEK,
@@ -1283,6 +1306,19 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       } else {
         updates.subtipoConselho = "";
       }
+      // INTERNACIONAL exige país + órgão de registro estrangeiro (mesma
+      // validação do cadastro). Demais conselhos limpam esses campos.
+      if (tipo === "INTERNACIONAL") {
+        const pais  = String(req.body?.paisRegistro  || "").trim().slice(0, 60);
+        const orgao = String(req.body?.orgaoRegistro || "").trim().slice(0, 120);
+        if (!pais)  return sendError(res, 400, "PAIS_REGISTRO_OBRIGATORIO");
+        if (!orgao) return sendError(res, 400, "ORGAO_REGISTRO_OBRIGATORIO");
+        updates.paisRegistro = pais;
+        updates.orgaoRegistro = orgao;
+      } else {
+        updates.paisRegistro = "";
+        updates.orgaoRegistro = "";
+      }
     }
   } else if (req.body?.subtipoConselho !== undefined) {
     // PATCH só do subtipo (ex.: CREFITO mudou de TO pra fisio sem trocar conselho).
@@ -1613,6 +1649,7 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
       label: conselho?.label || null,
       profissional: conselho?.profissional || null,
       subtipo: therapist.subtipoConselho || null,
+      isInternacional: !!conselho?.isInternacional,
       capabilities,
       prescriptionTypes
     }
@@ -5418,6 +5455,9 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
       numeroConselho:  therapist.numeroConselho || therapist.crp || therapist.crm || "",
       conselhoLabel:   conselhoMeta?.label || "",
       isRegulamentado: regulamentado,
+      isInternacional: isConselhoInternacional(conselhoSigla),
+      paisRegistro:    therapist.paisRegistro || "",
+      orgaoRegistro:   therapist.orgaoRegistro || "",
       tipoPratica:     tipoPraticaPublica,
       especialidade:   therapist.especialidade || "",
       bio:             therapist.bio || "",
@@ -7601,6 +7641,8 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       email: t.email || null,
       tipoConselho: t.tipoConselho || null,
       numeroConselho: t.numeroConselho || t.crp || t.crm || "",
+      paisRegistro: t.paisRegistro || null,
+      orgaoRegistro: t.orgaoRegistro || null,
       especialidade: t.especialidade || null,
       plano: t.plano || null,
       intendedTier: t.intendedTier || null,
@@ -8057,6 +8099,9 @@ function summarizeTherapistForPublicScheduling(therapist) {
     photoMime:      therapist.photoMime || "",
     conselhoLabel:  conselhoMeta?.label || "",
     numeroConselho: therapist.numeroConselho || therapist.crp || therapist.crm || "",
+    isInternacional: isConselhoInternacional(conselhoSigla),
+    paisRegistro:   therapist.paisRegistro || "",
+    orgaoRegistro:  therapist.orgaoRegistro || "",
     cidade:         c.cidade || "",
     uf:             c.uf || ""
   };
@@ -8221,6 +8266,9 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
       photoMime:      t.photoMime || "",
       conselhoLabel:  conselhoMeta?.label || "",
       numeroConselho: t.numeroConselho || t.crp || t.crm || "",
+      isInternacional: isConselhoInternacional(conselhoSigla),
+      paisRegistro:   t.paisRegistro || "",
+      orgaoRegistro:  t.orgaoRegistro || "",
       cidade:         c.cidade || "",
       uf:             c.uf || "",
       bio:            (t.bio || "").slice(0, 180) // resumo
