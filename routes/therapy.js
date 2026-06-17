@@ -8075,6 +8075,7 @@ const publicSchedulingLimiter = rateLimit({
 
 const STUDENT_LEAD_NAME_MAX        = 80;
 const STUDENT_LEAD_EMAIL_MAX       = 120;
+const STUDENT_LEAD_PHONE_MAX       = 30;
 const STUDENT_LEAD_INSTITUTION_MAX = 120;
 const STUDENT_LEAD_COURSE_MAX      = 60;
 const STUDENT_LEAD_MESSAGE_MAX     = 500;
@@ -8489,6 +8490,9 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
     return sendError(res, 400, "EMAIL_INVALIDO");
   }
 
+  const phone = String(req.body?.phone || "").trim().slice(0, STUDENT_LEAD_PHONE_MAX);
+  if (!phone) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+
   const institution = String(req.body?.institution || "").trim().slice(0, STUDENT_LEAD_INSTITUTION_MAX);
   const course      = String(req.body?.course || "").trim().slice(0, STUDENT_LEAD_COURSE_MAX);
   const message     = String(req.body?.message || "").trim().slice(0, STUDENT_LEAD_MESSAGE_MAX);
@@ -8501,6 +8505,7 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
     leadId,
     name,
     email: emailRaw,
+    phone,
     institution,
     course,
     message,
@@ -8510,7 +8515,7 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
   });
 
   if (THERAPY_ADMIN_EMAILS.length) {
-    const tpl = templateStudentLeadReceived({ name, email: emailRaw, institution, course, message });
+    const tpl = templateStudentLeadReceived({ name, email: emailRaw, phone, institution, course, message });
     sendEmail({ to: THERAPY_ADMIN_EMAILS, ...tpl, replyTo: emailRaw }).catch(e =>
       logError("student_lead_email_failed", e, { leadId })
     );

@@ -420,7 +420,7 @@ function templateStudentRejected({ therapistName, reason, retryUrl }) {
 
 // Notifica admin sobre novo interessado no tier Estudante (modal da landing
 // page pública). reply_to = e-mail do interessado, pra responder direto.
-function templateStudentLeadReceived({ name, email, institution, course, message }) {
+function templateStudentLeadReceived({ name, email, phone, institution, course, message }) {
   const subject = `Novo interesse no plano Estudante: ${name}`;
   const html = renderShell({
     heading: "Novo interessado — Plano Estudante",
@@ -429,6 +429,7 @@ function templateStudentLeadReceived({ name, email, institution, course, message
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
         <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Nome</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(name)}</strong></td></tr>
         <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">E-mail</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(email)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Telefone</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(phone)}</strong></td></tr>
         ${institution ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Instituição</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(institution)}</strong></td></tr>` : ""}
         ${course ? `<tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Curso</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(course)}</strong></td></tr>` : ""}
       </table>
@@ -436,7 +437,7 @@ function templateStudentLeadReceived({ name, email, institution, course, message
     `,
     footer: "Notificação automática do Espaço Prelúdio."
   });
-  const text = `Novo interessado no plano Estudante:\n\nNome: ${name}\nE-mail: ${email}${institution ? `\nInstituição: ${institution}` : ""}${course ? `\nCurso: ${course}` : ""}${message ? `\n\nMensagem: ${message}` : ""}`;
+  const text = `Novo interessado no plano Estudante:\n\nNome: ${name}\nE-mail: ${email}\nTelefone: ${phone}${institution ? `\nInstituição: ${institution}` : ""}${course ? `\nCurso: ${course}` : ""}${message ? `\n\nMensagem: ${message}` : ""}`;
   return { subject, html, text };
 }
 
