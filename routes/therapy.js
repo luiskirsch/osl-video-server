@@ -576,6 +576,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     intendedTierRaw === "estudante"      ? "estudante"     :
     intendedTierRaw === "recem"          ? "recem-formado" :
     intendedTierRaw === "recem-formado"  ? "recem-formado" :
+    intendedTierRaw === "empresa"        ? "empresa"       :
     "profissional";
 
   if (!displayName) return sendError(res, 400, "NOME_OBRIGATORIO");
@@ -611,6 +612,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   // estudante 0 (vai virar student-active após validar doc).
   const trialDays =
     intendedTier === "estudante"      ? 0 :
+    intendedTier === "empresa"        ? 0 :
     intendedTier === "recem-formado"  ? THERAPY_TRIAL_DAYS_RECEM_FORMADO :
                                          THERAPY_TRIAL_DAYS_PROFISSIONAL;
   const trialUntil = existingData?.trialUntil
@@ -644,7 +646,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     wrappedDEK:    lockedWrappedDEK,
     wrappedDEKIv:  lockedWrappedDEKIv,
     role: "therapist",
-    plano: existingData?.plano || "trial",
+    plano: existingData?.plano || (intendedTier === "empresa" ? "empresa-pending-review" : "trial"),
     intendedTier: existingData?.intendedTier || intendedTier,
     trialUntil,
     consentLgpd: true,
@@ -6701,7 +6703,9 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     // [8] therapy_patient_accounts — pacientes que se cadastraram (signup próprio)
     db.collection("therapy_patient_accounts").get(),
     // [9] therapy_student_leads — interessados no plano Estudante (landing) ainda não contatados
-    db.collection("therapy_student_leads").where("status", "==", "new").get()
+    db.collection("therapy_student_leads").where("status", "==", "new").get(),
+    // [10] empresa-pending-review — profissionais do plano empresa aguardando aprovação manual
+    db.collection("therapists").where("plano", "==", "empresa-pending-review").get()
   ]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────
@@ -6863,6 +6867,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
   const pendRecemFormado = queries[5].status === "fulfilled" ? queries[5].value.size : 0;
   const pendSemConselho = queries[6].status === "fulfilled" ? queries[6].value.size : 0;
   const pendLeadsEstudante = queries[9].status === "fulfilled" ? queries[9].value.size : 0;
+  const pendEmpresa = queries[10].status === "fulfilled" ? queries[10].value.size : 0;
 
   // ─── Integrações (configurado vs não) ───────────────────────────────
   // Só listamos integrações CRÍTICAS pro produto funcionar. Removidos:
@@ -6947,7 +6952,8 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       recemFormado: pendRecemFormado,
       semConselho: pendSemConselho,
       leadsEstudante: pendLeadsEstudante,
-      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho + pendLeadsEstudante
+      empresa: pendEmpresa,
+      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho + pendLeadsEstudante + pendEmpresa
     },
     eventos,
     sistema
@@ -7386,6 +7392,189 @@ router.post("/therapy/admin/comprovantes-recem-formado/:uid/rejeitar", asyncHand
     }
   } catch (e) {
     logError("recem_formado_doc_reject_email_failed", e, { therapistUid: targetUid });
+  }
+
+  return res.json({ ok: true, plano: "trial", reason });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADMIN — plano Empresa (verificação manual sem documento)
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /therapy/admin/empresa-pendentes?status=pending-review|aprovado|all
+router.get("/therapy/admin/empresa-pendentes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending-review").trim().toLowerCase();
+  const db = getDb();
+  let q = db.collection("therapists");
+  if (wantStatus === "pending-review") {
+    q = q.where("plano", "==", "empresa-pending-review");
+  } else if (wantStatus === "aprovado") {
+    q = q.where("plano", "==", "empresa").where("intendedTier", "==", "empresa");
+  } else {
+    q = q.where("intendedTier", "==", "empresa");
+  }
+
+  const snap = await q.limit(200).get();
+  const items = snap.docs.map(d => {
+    const t = d.data();
+    return {
+      therapistUid: t.uid,
+      displayName: t.displayName || "",
+      email: t.email || null,
+      tipoConselho: t.tipoConselho || null,
+      numeroConselho: t.numeroConselho || null,
+      especialidade: t.especialidade || null,
+      bio: t.bio || null,
+      plano: t.plano || null,
+      empresaReviewedAt: t.empresaReviewedAt?.toMillis?.() || null,
+      empresaReviewedBy: t.empresaReviewedBy || null,
+      empresaRejectReason: t.empresaRejectReason || null,
+      createdAt: t.createdAt?.toMillis?.() || null
+    };
+  });
+
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+// GET /therapy/admin/empresa-pendentes/:uid
+router.get("/therapy/admin/empresa-pendentes/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const db = getDb();
+  const doc = await db.collection("therapists").doc(targetUid).get();
+  if (!doc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const t = doc.data();
+
+  return res.json({
+    ok: true,
+    therapistUid: t.uid,
+    displayName: t.displayName || "",
+    email: t.email || null,
+    tipoConselho: t.tipoConselho || null,
+    numeroConselho: t.numeroConselho || null,
+    especialidade: t.especialidade || null,
+    bio: t.bio || null,
+    plano: t.plano || null,
+    intendedTier: t.intendedTier || null,
+    empresaReviewedAt: t.empresaReviewedAt?.toMillis?.() || null,
+    empresaReviewedBy: t.empresaReviewedBy || null,
+    empresaRejectReason: t.empresaRejectReason || null,
+    createdAt: t.createdAt?.toMillis?.() || null
+  });
+}));
+
+// POST /therapy/admin/empresa-pendentes/:uid/aprovar
+router.post("/therapy/admin/empresa-pendentes/:uid/aprovar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+  const notes = String(req.body?.notes || "").trim();
+
+  const db = getDb();
+  const ref = db.collection("therapists").doc(targetUid);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  await ref.update({
+    plano: "empresa",
+    empresaReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    empresaReviewedBy: adminAuth.email || adminAuth.uid,
+    empresaRejectReason: null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  try {
+    await db.collection("therapy_audit").add({
+      action: "empresa_aprovado",
+      therapistUid: targetUid,
+      adminUid: adminAuth.uid,
+      adminEmail: adminAuth.email || null,
+      notes: notes || null,
+      at: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (_) {}
+
+  // Notifica profissional por e-mail
+  try {
+    const t = snap.data();
+    const email = await resolveTherapistEmail(targetUid, t);
+    if (email) {
+      await sendEmail({
+        to: email,
+        subject: "Sua conta no Espaço Prelúdio foi aprovada — Plano Empresas",
+        html: `<p>Olá, ${t.displayName || "profissional"}!</p>
+          <p>Sua conta no plano <strong>Atendimento a Empresas</strong> foi aprovada pela nossa equipe. Você já pode acessar a plataforma e começar a atender seus pacientes.</p>
+          <p><a href="${THERAPY_FRONTEND_BASE}/painel.html">Acessar meu painel →</a></p>
+          <p>Qualquer dúvida, responda este e-mail.</p>`
+      });
+    }
+  } catch (e) {
+    logError("empresa_aprovado_email_failed", e, { therapistUid: targetUid });
+  }
+
+  return res.json({ ok: true, plano: "empresa" });
+}));
+
+// POST /therapy/admin/empresa-pendentes/:uid/rejeitar
+router.post("/therapy/admin/empresa-pendentes/:uid/rejeitar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+  const reason = String(req.body?.reason || "").trim();
+
+  const db = getDb();
+  const ref = db.collection("therapists").doc(targetUid);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  await ref.update({
+    plano: "trial",
+    empresaReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    empresaReviewedBy: adminAuth.email || adminAuth.uid,
+    empresaRejectReason: reason || "Não aprovado pela equipe.",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  try {
+    await db.collection("therapy_audit").add({
+      action: "empresa_rejeitado",
+      therapistUid: targetUid,
+      adminUid: adminAuth.uid,
+      adminEmail: adminAuth.email || null,
+      reason: reason || null,
+      at: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (_) {}
+
+  try {
+    const t = snap.data();
+    const email = await resolveTherapistEmail(targetUid, t);
+    if (email) {
+      await sendEmail({
+        to: email,
+        subject: "Atualização sobre seu cadastro no Espaço Prelúdio",
+        html: `<p>Olá, ${t.displayName || "profissional"}!</p>
+          <p>Sua solicitação para o plano <strong>Atendimento a Empresas</strong> não pôde ser aprovada no momento${reason ? `: <em>${reason}</em>` : "."}.</p>
+          <p>Se tiver dúvidas ou quiser tentar novamente, responda este e-mail.</p>`
+      });
+    }
+  } catch (e) {
+    logError("empresa_rejeitado_email_failed", e, { therapistUid: targetUid });
   }
 
   return res.json({ ok: true, plano: "trial", reason });
