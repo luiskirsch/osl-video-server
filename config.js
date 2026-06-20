@@ -192,18 +192,20 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
   .filter(Boolean);
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
-// Existem 2 tiers que diferem só no preço:
-//   - "recem-formado" (R$ 99,50)  — válido só pra quem tem CRP/CRM <12 meses
-//   - "profissional"  (R$ 199,00) — qualquer profissional habilitado
-// THERAPY_PLAN_AMOUNT é mantido por compat (default tier sem flag explícita).
-const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 99.50);
-const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 99.50);
-const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 199.00);
+// Tiers ativos:
+//   - "profissional"  (R$ 99,00)  — profissional habilitado com mensalidade
+//   - "empresa"       (R$ 0,00)   — gratuito pro profissional; consultas a R$60 cobradas ao paciente
+// THERAPY_PLAN_AMOUNT mantido por compat (default sem flag explícita).
+const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 99.00);
+const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 99.00); // legado
+const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 99.00);
+const THERAPY_PLAN_EMPRESA_AMOUNT         = Number(process.env.THERAPY_PLAN_EMPRESA_AMOUNT        || 0.00);
+const THERAPY_PLAN_EMPRESA_SESSION_AMOUNT = Number(process.env.THERAPY_PLAN_EMPRESA_SESSION_AMOUNT || 60.00);
 // Cobrança anual = mensal x 12 x 0.84 (16% de desconto), preapproval com
 // frequency: 12 / frequency_type: "months" (MP não tem frequency_type "years").
-const THERAPY_PLAN_ANNUAL_AMOUNT               = Number(process.env.THERAPY_PLAN_ANNUAL_AMOUNT               || 1002.96);
-const THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT || 1002.96);
-const THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  = Number(process.env.THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  || 2005.92);
+const THERAPY_PLAN_ANNUAL_AMOUNT               = Number(process.env.THERAPY_PLAN_ANNUAL_AMOUNT               || 997.92);
+const THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT || 997.92); // legado
+const THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  = Number(process.env.THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  || 997.92);
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 
 // Trial diferenciado por plano intencionado no cadastro:
