@@ -8135,7 +8135,9 @@ router.delete("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res)
 //   toggleVerificado: bool   — força verificado=true/false + verifiedAt.
 const ALLOWED_PLANOS = new Set([
   "trial", "pro", "student-pending-review", "student-active",
-  "recem-formado-eligible", "recem-formado-active", "canceled"
+  "recem-formado-eligible", "recem-formado-active",
+  "empresa-pending-review", "empresa",
+  "canceled"
 ]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) => {
