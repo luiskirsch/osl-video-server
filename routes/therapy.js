@@ -14594,4 +14594,276 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
   return res.json({ ok: true });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// ESTUDANTES — cadastro de alunos via contratos municipais
+// Coleção: therapy_estudantes
+// ═════════════════════════════════════════════════════════════════════════
+
+function calcIdade(dataNascimento) {
+  if (!dataNascimento) return null;
+  const [ano, mes, dia] = String(dataNascimento).split("-").map(Number);
+  const hoje = new Date();
+  let idade = hoje.getFullYear() - ano;
+  if (hoje.getMonth() + 1 < mes || (hoje.getMonth() + 1 === mes && hoje.getDate() < dia)) idade--;
+  return idade;
+}
+
+// POST /public/aluno-cadastro — registro público (pais ou aluno maior)
+router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const {
+    nome, dataNascimento, escola, turma, cidade, municipio, estado,
+    email, telefone,
+    responsavelNome, responsavelEmail, responsavelTelefone, responsavelCpf,
+    consentimentoResponsavel
+  } = req.body || {};
+
+  if (!nome || String(nome).trim().length < 2) return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!dataNascimento) return sendError(res, 400, "DATA_NASCIMENTO_OBRIGATORIA");
+  if (!escola || String(escola).trim().length < 2) return sendError(res, 400, "ESCOLA_OBRIGATORIA");
+  if (!cidade || String(cidade).trim().length < 1) return sendError(res, 400, "CIDADE_OBRIGATORIA");
+  if (!estado || String(estado).trim().length !== 2) return sendError(res, 400, "ESTADO_OBRIGATORIO");
+
+  const idade = calcIdade(dataNascimento);
+  const isMenor = idade !== null && idade < 18;
+
+  if (isMenor) {
+    if (!responsavelNome || String(responsavelNome).trim().length < 2) return sendError(res, 400, "RESPONSAVEL_NOME_OBRIGATORIO");
+    if (!responsavelEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(responsavelEmail)) return sendError(res, 400, "RESPONSAVEL_EMAIL_INVALIDO");
+    if (!responsavelTelefone || String(responsavelTelefone).trim().length < 8) return sendError(res, 400, "RESPONSAVEL_TELEFONE_OBRIGATORIO");
+    if (!consentimentoResponsavel) return sendError(res, 400, "CONSENTIMENTO_OBRIGATORIO");
+  } else {
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
+    if (!telefone || String(telefone).trim().length < 8) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+  }
+
+  const db = getDb();
+  const token = isMenor ? (Date.now().toString(36) + randomSuffix(20)) : null;
+
+  const doc = {
+    nome: String(nome).trim(),
+    dataNascimento: String(dataNascimento).trim(),
+    idade: idade ?? null,
+    isMenor,
+    escola: String(escola).trim(),
+    turma: turma ? String(turma).trim() : null,
+    cidade: String(cidade).trim(),
+    municipio: municipio ? String(municipio).trim() : String(cidade).trim(),
+    estado: String(estado).trim().toUpperCase().slice(0, 2),
+    // Contato direto (maiores)
+    email: isMenor ? null : String(email).trim().toLowerCase(),
+    telefone: isMenor ? null : String(telefone).trim(),
+    // Responsável (menores)
+    responsavelNome: isMenor ? String(responsavelNome).trim() : null,
+    responsavelEmail: isMenor ? String(responsavelEmail).trim().toLowerCase() : null,
+    responsavelTelefone: isMenor ? String(responsavelTelefone).trim() : null,
+    responsavelCpf: responsavelCpf ? String(responsavelCpf).trim() : null,
+    consentimentoParental: !isMenor, // maiores já têm consentimento
+    consentimentoToken: token,
+    consentimentoAt: isMenor ? null : admin.firestore.FieldValue.serverTimestamp(),
+    profissionalUid: null,
+    status: isMenor ? "pendente-consentimento" : "ativo",
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  const ref = await db.collection("therapy_estudantes").add(doc);
+
+  // E-mail de consentimento para responsável (menor)
+  if (isMenor) {
+    try {
+      const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${token}`;
+      await sendEmail({
+        to: doc.responsavelEmail,
+        subject: `Confirmação de consentimento — ${doc.nome} no Espaço Prelúdio`,
+        html: `
+          <p>Olá, ${doc.responsavelNome}!</p>
+          <p>O cadastro de <strong>${doc.nome}</strong> no programa de saúde mental escolar do Espaço Prelúdio foi realizado.</p>
+          <p>Para ativar o acesso, confirme seu consentimento clicando no botão abaixo:</p>
+          <p style="margin:24px 0;">
+            <a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
+              Confirmar consentimento →
+            </a>
+          </p>
+          <p style="font-size:12px;color:#666;">Escola: ${doc.escola} · Turma: ${doc.turma || "—"} · ${doc.cidade}/${doc.estado}</p>
+          <p style="font-size:12px;color:#666;">Se não reconhece este cadastro, ignore este e-mail.</p>
+        `
+      });
+    } catch (e) {
+      logError("aluno_consent_email_failed", e, { estudanteId: ref.id });
+    }
+  }
+
+  return res.json({ ok: true, id: ref.id, isMenor, status: doc.status });
+}));
+
+// GET /public/aluno-consentimento/:token — confirma consentimento parental via link de e-mail
+router.get("/public/aluno-consentimento/:token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const token = String(req.params.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_INVALIDO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_estudantes")
+    .where("consentimentoToken", "==", token)
+    .limit(1).get();
+
+  if (snap.empty) return sendError(res, 404, "TOKEN_NAO_ENCONTRADO");
+
+  const doc = snap.docs[0];
+  const data = doc.data();
+
+  if (data.consentimentoParental) {
+    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome });
+  }
+
+  await doc.ref.update({
+    consentimentoParental: true,
+    consentimentoAt: admin.firestore.FieldValue.serverTimestamp(),
+    status: "ativo",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  return res.json({ ok: true, alreadyConfirmed: false, nome: data.nome, escola: data.escola });
+}));
+
+// POST /therapy/admin/estudantes/:id/reenviar-consentimento — reenvia e-mail
+router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const db = getDb();
+  const ref = db.collection("therapy_estudantes").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+
+  const data = snap.data();
+  if (!data.isMenor || data.consentimentoParental) return sendError(res, 400, "CONSENTIMENTO_NAO_NECESSARIO");
+
+  const token = data.consentimentoToken || (Date.now().toString(36) + randomSuffix(20));
+  await ref.update({ consentimentoToken: token });
+
+  const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${token}`;
+  await sendEmail({
+    to: data.responsavelEmail,
+    subject: `[Reenvio] Confirmação de consentimento — ${data.nome}`,
+    html: `<p>Olá, ${data.responsavelNome}!</p>
+      <p>Segue o link para confirmar o consentimento de <strong>${data.nome}</strong>:</p>
+      <p><a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Confirmar →</a></p>`
+  });
+
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/admin/estudantes — listagem com filtros
+router.get("/therapy/admin/estudantes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const status  = String(req.query?.status  || "all").trim();
+  const estado  = String(req.query?.estado  || "").trim().toUpperCase();
+  const cidade  = String(req.query?.cidade  || "").trim().toLowerCase();
+  const escola  = String(req.query?.escola  || "").trim().toLowerCase();
+  const isMenorFilter = req.query?.isMenor;
+  const q       = String(req.query?.q       || "").trim().toLowerCase();
+
+  let query = db.collection("therapy_estudantes");
+  if (status !== "all") query = query.where("status", "==", status);
+  if (estado) query = query.where("estado", "==", estado);
+
+  const snap = await query.limit(2000).get();
+
+  let items = snap.docs.map(d => {
+    const e = d.data();
+    return {
+      id: d.id,
+      nome: e.nome || "",
+      dataNascimento: e.dataNascimento || null,
+      idade: e.idade ?? null,
+      isMenor: !!e.isMenor,
+      escola: e.escola || "",
+      turma: e.turma || null,
+      cidade: e.cidade || "",
+      municipio: e.municipio || e.cidade || "",
+      estado: e.estado || "",
+      email: e.email || null,
+      telefone: e.telefone || null,
+      responsavelNome: e.responsavelNome || null,
+      responsavelEmail: e.responsavelEmail || null,
+      responsavelTelefone: e.responsavelTelefone || null,
+      consentimentoParental: !!e.consentimentoParental,
+      consentimentoAt: e.consentimentoAt?.toMillis?.() || null,
+      profissionalUid: e.profissionalUid || null,
+      status: e.status || "ativo",
+      createdAt: e.createdAt?.toMillis?.() || null
+    };
+  });
+
+  if (cidade)  items = items.filter(e => e.cidade.toLowerCase().includes(cidade) || e.municipio.toLowerCase().includes(cidade));
+  if (escola)  items = items.filter(e => e.escola.toLowerCase().includes(escola));
+  if (isMenorFilter === "true")  items = items.filter(e => e.isMenor);
+  if (isMenorFilter === "false") items = items.filter(e => !e.isMenor);
+  if (q) items = items.filter(e =>
+    e.nome.toLowerCase().includes(q) ||
+    (e.responsavelNome || "").toLowerCase().includes(q) ||
+    (e.responsavelEmail || "").toLowerCase().includes(q) ||
+    (e.email || "").toLowerCase().includes(q) ||
+    e.escola.toLowerCase().includes(q)
+  );
+
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+// GET /therapy/admin/estudantes/:id
+router.get("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const db = getDb();
+  const snap = await db.collection("therapy_estudantes").doc(id).get();
+  if (!snap.exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+
+  const e = snap.data();
+  return res.json({
+    ok: true,
+    id: snap.id,
+    ...e,
+    createdAt: e.createdAt?.toMillis?.() || null,
+    consentimentoAt: e.consentimentoAt?.toMillis?.() || null
+  });
+}));
+
+// PATCH /therapy/admin/estudantes/:id
+router.patch("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const db = getDb();
+  const ref = db.collection("therapy_estudantes").doc(id);
+  if (!(await ref.get()).exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+
+  const allowed = ["nome", "escola", "turma", "cidade", "municipio", "estado", "status",
+                   "responsavelNome", "responsavelEmail", "responsavelTelefone",
+                   "email", "telefone", "profissionalUid", "consentimentoParental"];
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  for (const k of allowed) {
+    if (req.body?.[k] !== undefined) updates[k] = req.body[k];
+  }
+  if (updates.consentimentoParental === true && !updates.consentimentoAt) {
+    updates.consentimentoAt = admin.firestore.FieldValue.serverTimestamp();
+    updates.status = "ativo";
+  }
+  await ref.update(updates);
+  return res.json({ ok: true });
+}));
+
 module.exports = router;
