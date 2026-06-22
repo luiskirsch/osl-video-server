@@ -14278,4 +14278,320 @@ function escHtmlSafe(s) {
   return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// EMPRESAS — gestão de empresas parceiras e colaboradores
+// Coleções: therapy_empresas, therapy_colaboradores
+// ═════════════════════════════════════════════════════════════════════════
+
+function slugify(str) {
+  return String(str || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 40);
+}
+function randomSuffix(len = 6) {
+  return Math.random().toString(36).slice(2, 2 + len);
+}
+
+// GET /therapy/admin/empresas?status=ativa|inativa|all&q=busca
+router.get("/therapy/admin/empresas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const status = String(req.query?.status || "all").trim();
+  const q = String(req.query?.q || "").trim().toLowerCase();
+
+  let snap;
+  if (status === "ativa" || status === "inativa") {
+    snap = await db.collection("therapy_empresas").where("status", "==", status).limit(500).get();
+  } else {
+    snap = await db.collection("therapy_empresas").limit(500).get();
+  }
+
+  let items = snap.docs.map(d => {
+    const e = d.data();
+    return {
+      id: d.id,
+      nome: e.nome || "",
+      cnpj: e.cnpj || null,
+      slug: e.slug || "",
+      segmento: e.segmento || null,
+      contatoNome: e.contatoNome || null,
+      contatoEmail: e.contatoEmail || null,
+      contatoPhone: e.contatoPhone || null,
+      status: e.status || "ativa",
+      totalColaboradores: e.totalColaboradores || 0,
+      limiteColaboradores: e.limiteColaboradores || null,
+      createdAt: e.createdAt?.toMillis?.() || null,
+      createdBy: e.createdBy || null,
+      obs: e.obs || null
+    };
+  });
+
+  if (q) {
+    items = items.filter(e =>
+      e.nome.toLowerCase().includes(q) ||
+      (e.cnpj || "").includes(q) ||
+      (e.contatoEmail || "").toLowerCase().includes(q)
+    );
+  }
+
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+// POST /therapy/admin/empresas — cria empresa
+router.post("/therapy/admin/empresas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const { nome, cnpj, segmento, contatoNome, contatoEmail, contatoPhone, limiteColaboradores, obs } = req.body || {};
+  if (!nome || String(nome).trim().length < 2) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const db = getDb();
+  const baseSlug = slugify(nome);
+
+  // Garante slug único
+  let slug = baseSlug + "-" + randomSuffix(6);
+  for (let i = 0; i < 5; i++) {
+    const existing = await db.collection("therapy_empresas").where("slug", "==", slug).limit(1).get();
+    if (existing.empty) break;
+    slug = baseSlug + "-" + randomSuffix(6);
+  }
+
+  const doc = {
+    nome: String(nome).trim(),
+    cnpj: cnpj ? String(cnpj).trim() : null,
+    slug,
+    segmento: segmento ? String(segmento).trim() : null,
+    contatoNome: contatoNome ? String(contatoNome).trim() : null,
+    contatoEmail: contatoEmail ? String(contatoEmail).trim().toLowerCase() : null,
+    contatoPhone: contatoPhone ? String(contatoPhone).trim() : null,
+    limiteColaboradores: limiteColaboradores ? Number(limiteColaboradores) : null,
+    obs: obs ? String(obs).trim() : null,
+    status: "ativa",
+    totalColaboradores: 0,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdBy: adminAuth.uid
+  };
+
+  const ref = await db.collection("therapy_empresas").add(doc);
+  const baseUrl = process.env.THERAPY_FRONTEND_BASE || "https://espacopreludio.com.br";
+  return res.json({
+    ok: true,
+    id: ref.id,
+    slug,
+    link: `${baseUrl}/colaborador-cadastro.html?empresa=${slug}`
+  });
+}));
+
+// PATCH /therapy/admin/empresas/:id
+router.patch("/therapy/admin/empresas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  if (!id) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const ref = db.collection("therapy_empresas").doc(id);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  const allowed = ["nome", "cnpj", "segmento", "contatoNome", "contatoEmail", "contatoPhone", "limiteColaboradores", "obs", "status"];
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  for (const k of allowed) {
+    if (req.body?.[k] !== undefined) {
+      updates[k] = req.body[k] === null ? null : String(req.body[k]).trim() || null;
+    }
+  }
+  if (req.body?.limiteColaboradores !== undefined) {
+    updates.limiteColaboradores = req.body.limiteColaboradores ? Number(req.body.limiteColaboradores) : null;
+  }
+
+  await ref.update(updates);
+  return res.json({ ok: true });
+}));
+
+// DELETE /therapy/admin/empresas/:id — desativa (não apaga)
+router.delete("/therapy/admin/empresas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const db = getDb();
+  const ref = db.collection("therapy_empresas").doc(id);
+  if (!(await ref.get()).exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  await ref.update({ status: "inativa", updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  return res.json({ ok: true });
+}));
+
+// GET /public/empresa/:slug — info pública para página de cadastro de colaborador
+router.get("/public/empresa/:slug", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  if (!slug) return sendError(res, 400, "SLUG_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_empresas").where("slug", "==", slug).limit(1).get();
+  if (snap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  const e = snap.docs[0].data();
+  if (e.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
+
+  return res.json({
+    ok: true,
+    id: snap.docs[0].id,
+    nome: e.nome,
+    segmento: e.segmento || null,
+    limiteColaboradores: e.limiteColaboradores || null,
+    totalColaboradores: e.totalColaboradores || 0
+  });
+}));
+
+// POST /public/colaborador-cadastro — auto-registro de funcionário
+router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const { empresaSlug, nome, email, telefone, cpf, departamento, cargo } = req.body || {};
+  if (!empresaSlug) return sendError(res, 400, "EMPRESA_SLUG_OBRIGATORIO");
+  if (!nome || String(nome).trim().length < 2) return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
+  if (!telefone || String(telefone).trim().length < 8) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+
+  const db = getDb();
+
+  // Busca empresa
+  const empSnap = await db.collection("therapy_empresas").where("slug", "==", String(empresaSlug).trim()).limit(1).get();
+  if (empSnap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+  const empDoc = empSnap.docs[0];
+  const empresa = empDoc.data();
+  if (empresa.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
+
+  // Verifica limite de colaboradores
+  if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
+    return sendError(res, 403, "LIMITE_COLABORADORES_ATINGIDO");
+  }
+
+  // Verifica se e-mail já cadastrado nesta empresa
+  const dupSnap = await db.collection("therapy_colaboradores")
+    .where("empresaId", "==", empDoc.id)
+    .where("email", "==", String(email).trim().toLowerCase())
+    .limit(1).get();
+  if (!dupSnap.empty) return sendError(res, 409, "EMAIL_JA_CADASTRADO");
+
+  const doc = {
+    nome: String(nome).trim(),
+    email: String(email).trim().toLowerCase(),
+    telefone: String(telefone).trim(),
+    cpf: cpf ? String(cpf).trim() : null,
+    departamento: departamento ? String(departamento).trim() : null,
+    cargo: cargo ? String(cargo).trim() : null,
+    empresaId: empDoc.id,
+    empresaNome: empresa.nome,
+    empresaSlug: empresa.slug,
+    status: "ativo",
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+
+  const colabRef = await db.collection("therapy_colaboradores").add(doc);
+
+  // Incrementa contador na empresa
+  await empDoc.ref.update({
+    totalColaboradores: admin.firestore.FieldValue.increment(1)
+  });
+
+  // E-mail de boas-vindas
+  try {
+    await sendEmail({
+      to: doc.email,
+      subject: `Bem-vindo ao Espaço Prelúdio via ${empresa.nome}`,
+      html: `<p>Olá, ${doc.nome}!</p>
+        <p>Seu cadastro no programa de saúde de <strong>${empresa.nome}</strong> foi confirmado.</p>
+        <p>Acesse <a href="${THERAPY_FRONTEND_BASE}/profissionais.html">nosso diretório</a> para escolher um profissional e agendar sua primeira consulta.</p>
+        <p>O valor da sessão é <strong>R$ 60,00</strong>, pago diretamente ao profissional no momento do agendamento.</p>`
+    });
+  } catch (e) {
+    logError("colaborador_welcome_email_failed", e, { colaboradorId: colabRef.id });
+  }
+
+  return res.json({ ok: true, id: colabRef.id, empresaNome: empresa.nome });
+}));
+
+// GET /therapy/admin/colaboradores?empresaId=&status=&q=
+router.get("/therapy/admin/colaboradores", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const empresaId = String(req.query?.empresaId || "").trim();
+  const status    = String(req.query?.status || "all").trim();
+  const q         = String(req.query?.q || "").trim().toLowerCase();
+
+  let query = db.collection("therapy_colaboradores");
+  if (empresaId) query = query.where("empresaId", "==", empresaId);
+  if (status === "ativo" || status === "inativo") query = query.where("status", "==", status);
+
+  const snap = await query.limit(1000).get();
+  let items = snap.docs.map(d => {
+    const c = d.data();
+    return {
+      id: d.id,
+      nome: c.nome || "",
+      email: c.email || "",
+      telefone: c.telefone || null,
+      cpf: c.cpf || null,
+      departamento: c.departamento || null,
+      cargo: c.cargo || null,
+      empresaId: c.empresaId || null,
+      empresaNome: c.empresaNome || null,
+      status: c.status || "ativo",
+      createdAt: c.createdAt?.toMillis?.() || null
+    };
+  });
+
+  if (q) {
+    items = items.filter(c =>
+      c.nome.toLowerCase().includes(q) ||
+      c.email.toLowerCase().includes(q) ||
+      (c.departamento || "").toLowerCase().includes(q) ||
+      (c.cargo || "").toLowerCase().includes(q)
+    );
+  }
+
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+// PATCH /therapy/admin/colaboradores/:id
+router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const db = getDb();
+  const ref = db.collection("therapy_colaboradores").doc(id);
+  if (!(await ref.get()).exists) return sendError(res, 404, "COLABORADOR_NAO_ENCONTRADO");
+
+  const allowed = ["nome", "telefone", "departamento", "cargo", "status", "obs"];
+  const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  for (const k of allowed) {
+    if (req.body?.[k] !== undefined) updates[k] = req.body[k];
+  }
+  await ref.update(updates);
+  return res.json({ ok: true });
+}));
+
 module.exports = router;
