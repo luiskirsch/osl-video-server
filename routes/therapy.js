@@ -1290,6 +1290,10 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
   if (req.body?.bio !== undefined) {
     updates.bio = String(req.body.bio || "").trim().slice(0, 500);
   }
+  if (req.body?.notifWhatsapp !== undefined) {
+    const raw = String(req.body.notifWhatsapp || "").replace(/\D/g, "");
+    updates.notifWhatsapp = raw.length >= 10 ? raw : "";
+  }
   // Conselho profissional: atualização atômica via { tipoConselho, numeroConselho, subtipoConselho? }.
   // Espelha em crp/crm pra manter retrocompat com leitores legados.
   if (req.body?.tipoConselho !== undefined || req.body?.numeroConselho !== undefined) {
@@ -8650,6 +8654,21 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     });
     sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
       logError("scheduling_request_email_failed", e, { requestId })
+    );
+  }
+
+  // WhatsApp pro terapeuta (se tiver notifWhatsapp configurado)
+  if (therapist.notifWhatsapp) {
+    const { sendText } = require("../services/whatsapp");
+    const slotDate = new Date(requestedSlot);
+    const slotFmt  = slotDate.toLocaleString("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      day: "2-digit", month: "2-digit", year: "numeric",
+      hour: "2-digit", minute: "2-digit"
+    });
+    const msg = `🔔 *Novo pedido de consulta!*\n\n👤 Paciente: ${patientName}\n📞 Telefone: ${patientPhone || "não informado"}\n🕐 Horário solicitado: ${slotFmt}${notes ? `\n📝 Obs.: ${notes}` : ""}\n\nAcesse o painel pra aprovar ou recusar:\n${buildPainelUrl()}`;
+    sendText({ to: therapist.notifWhatsapp, message: msg }).catch(e =>
+      logError("scheduling_request_whatsapp_failed", e, { requestId })
     );
   }
 
