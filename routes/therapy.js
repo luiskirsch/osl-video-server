@@ -251,6 +251,10 @@ function evaluatePlanAccess(therapist) {
   if (plano === "pro") {
     return { ok: true, plano };
   }
+  // empresa: plano gratuito aprovado pela equipe — sem data de expiração.
+  if (plano === "empresa") {
+    return { ok: true, plano };
+  }
   // student-active: cron runStudentExpirationTick deveria baixar pra trial
   // quando studentVerifiedUntil <= now, mas se cron falhar/atrasar, defesa em
   // profundidade aqui evita uso pos-expiracao.
