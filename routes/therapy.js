@@ -15339,6 +15339,50 @@ router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (re
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
+// DEPENDENTES — familiares do paciente no programa de saúde
+// Coleção: therapy_dependentes { uid, id, nome, parentesco, dataNascimento, email, createdAt }
+// ═════════════════════════════════════════════════════════════════════════
+
+router.get("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const snap = await db.collection("therapy_dependentes")
+    .where("uid", "==", uid).orderBy("createdAt", "asc").limit(20).get();
+  const dependentes = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt?.toMillis?.() || null }));
+  return res.json({ ok: true, dependentes });
+}));
+
+router.post("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { nome, parentesco, dataNascimento, email } = req.body || {};
+  if (!nome || !parentesco || !dataNascimento) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+  const db  = getDb();
+  const ref = await db.collection("therapy_dependentes").add({
+    uid, nome: String(nome).trim(), parentesco: String(parentesco).trim(),
+    dataNascimento: String(dataNascimento).trim(),
+    email: email ? String(email).trim().toLowerCase() : null,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  return res.json({ ok: true, id: ref.id });
+}));
+
+router.delete("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db  = getDb();
+  const ref = db.collection("therapy_dependentes").doc(req.params.id);
+  const doc = await ref.get();
+  if (!doc.exists || doc.data().uid !== uid) return sendError(res, 404, "NAO_ENCONTRADO");
+  await ref.delete();
+  return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
 // HUMOR — rastreador de bem-estar do paciente (app PWA)
 // Coleção: therapy_humor  { uid, date (YYYY-MM-DD), mood (1-5), at }
 // ═════════════════════════════════════════════════════════════════════════
