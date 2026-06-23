@@ -14933,15 +14933,16 @@ router.get("/therapy/notificacoes", asyncHandler(async (req, res) => {
   const limit = Math.min(Number(req.query?.limit || 50), 100);
   const onlyUnread = req.query?.onlyUnread === "true";
 
+  // Sem orderBy para evitar exigir índice composto no Firestore —
+  // ordenamos em memória após buscar.
   let q = db.collection("therapy_notifications")
     .where("therapistUid", "==", uid)
-    .orderBy("createdAt", "desc")
-    .limit(limit);
+    .limit(200); // busca mais e filtra/ordena em JS
 
   if (onlyUnread) q = q.where("readAt", "==", null);
 
   const snap = await q.get();
-  const items = snap.docs.map(d => {
+  let items = snap.docs.map(d => {
     const n = d.data();
     return {
       id: d.id,
@@ -14954,6 +14955,10 @@ router.get("/therapy/notificacoes", asyncHandler(async (req, res) => {
       createdAt: n.createdAt?.toMillis?.() || null
     };
   });
+
+  // Ordena por createdAt desc em JS
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  items = items.slice(0, limit);
 
   const unreadCount = onlyUnread
     ? items.length
