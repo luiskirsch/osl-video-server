@@ -266,6 +266,9 @@ const TWILIO_AUTH_TOKEN     = process.env.TWILIO_AUTH_TOKEN     || "";
 // Fica vazio até a aprovação chegar — o serviço vira no-op enquanto não estiver configurado.
 const TWILIO_WHATSAPP_FROM  = process.env.TWILIO_WHATSAPP_FROM  || "";
 
+// Painel corporativo — JWT secret para autenticação de empresas (separado do Firebase)
+const EMPRESA_JWT_SECRET = process.env.EMPRESA_JWT_SECRET || "ep-empresa-painel-2026-change-in-prod";
+
 module.exports = {
   PORT,
   APP_ENV, IS_STAGING, IS_PRODUCTION,
@@ -278,6 +281,7 @@ module.exports = {
   ASAAS_WEBHOOK_TOKEN,
   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM,
+  EMPRESA_JWT_SECRET,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
   ANTHROPIC_API_KEY,
   BACKEND_BASE_URL, FRONTEND_BASE_URL,

@@ -15124,4 +15124,212 @@ router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => 
   return res.json({ ok: true, marked: snap.size });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// PAINEL CORPORATIVO — autenticação e métricas de saúde da equipe
+// Dados sempre agregados/anônimos — LGPD compliant.
+// ═════════════════════════════════════════════════════════════════════════
+
+const { EMPRESA_JWT_SECRET } = require("../config");
+const crypto = require("crypto");
+
+function hashSenha(senha, salt) {
+  return crypto.createHmac("sha256", salt).update(senha).digest("hex");
+}
+function gerarSalt() { return crypto.randomBytes(16).toString("hex"); }
+
+function gerarEmpresaToken(empresaId) {
+  const payload = Buffer.from(JSON.stringify({ empresaId, iat: Date.now() })).toString("base64url");
+  const sig = crypto.createHmac("sha256", EMPRESA_JWT_SECRET).update(payload).digest("base64url");
+  return `${payload}.${sig}`;
+}
+function verificarEmpresaToken(token) {
+  try {
+    const [payload, sig] = (token || "").split(".");
+    const expected = crypto.createHmac("sha256", EMPRESA_JWT_SECRET).update(payload).digest("base64url");
+    if (sig !== expected) return null;
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    // Token válido por 7 dias
+    if (Date.now() - data.iat > 7 * 24 * 3600 * 1000) return null;
+    return data;
+  } catch { return null; }
+}
+
+// POST /empresa/login
+router.post("/empresa/login", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const senha = String(req.body?.senha || "").trim();
+  if (!email || !senha) return sendError(res, 400, "CREDENCIAIS_OBRIGATORIAS");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_empresas")
+    .where("loginEmail", "==", email)
+    .where("status", "==", "ativa")
+    .limit(1).get();
+
+  if (snap.empty) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
+  const empresa = snap.docs[0].data();
+  const empresaId = snap.docs[0].id;
+
+  if (!empresa.passwordHash || !empresa.passwordSalt) return sendError(res, 401, "SENHA_NAO_CONFIGURADA");
+
+  const hash = hashSenha(senha, empresa.passwordSalt);
+  if (hash !== empresa.passwordHash) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
+
+  // Atualiza lastLogin
+  snap.docs[0].ref.update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
+
+  const token = gerarEmpresaToken(empresaId);
+  return res.json({
+    ok: true,
+    token,
+    empresa: { id: empresaId, nome: empresa.nome, segmento: empresa.segmento || null }
+  });
+}));
+
+// PATCH /empresa/senha — empresa troca a própria senha
+router.patch("/empresa/senha", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const decoded = verificarEmpresaToken(token);
+  if (!decoded) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const senhaAtual = String(req.body?.senhaAtual || "").trim();
+  const novaSenha  = String(req.body?.novaSenha  || "").trim();
+  if (!senhaAtual || !novaSenha) return sendError(res, 400, "SENHAS_OBRIGATORIAS");
+  if (novaSenha.length < 8) return sendError(res, 400, "SENHA_MUITO_CURTA");
+
+  const db = getDb();
+  const ref = db.collection("therapy_empresas").doc(decoded.empresaId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  const empresa = snap.data();
+  const hashAtual = hashSenha(senhaAtual, empresa.passwordSalt);
+  if (hashAtual !== empresa.passwordHash) return sendError(res, 401, "SENHA_ATUAL_INCORRETA");
+
+  const novoSalt = gerarSalt();
+  const novoHash = hashSenha(novaSenha, novoSalt);
+  await ref.update({ passwordHash: novoHash, passwordSalt: novoSalt, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+  return res.json({ ok: true });
+}));
+
+// GET /empresa/dashboard — métricas agregadas e anônimas
+router.get("/empresa/dashboard", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const decoded = verificarEmpresaToken(token);
+  if (!decoded) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const db = getDb();
+  const empresaId = decoded.empresaId;
+
+  // Carrega dados básicos da empresa
+  const empresaSnap = await db.collection("therapy_empresas").doc(empresaId).get();
+  if (!empresaSnap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+  const empresa = empresaSnap.data();
+
+  // Colaboradores
+  const colabSnap = await db.collection("therapy_colaboradores")
+    .where("empresaId", "==", empresaId).limit(2000).get();
+  const colaboradores = colabSnap.docs.map(d => d.data());
+  const totalCadastrados = colaboradores.length;
+  const totalAtivos = colaboradores.filter(c => c.status === "ativo").length;
+
+  // E-mails dos colaboradores para cruzar com pacientes
+  const emails = new Set(colaboradores.map(c => (c.email || "").toLowerCase()).filter(Boolean));
+
+  // Pacientes vinculados (por e-mail)
+  let sessoesMes = 0, sessoesTotal = 0;
+  let especialidades = {};
+  let colaboradoresComSessao = new Set();
+
+  if (emails.size > 0) {
+    // Busca contas de pacientes pelos e-mails
+    const patSnap = await db.collection("therapy_patient_accounts")
+      .where("email", "in", [...emails].slice(0, 30)) // Firestore limit
+      .get().catch(() => null);
+
+    const patUids = new Set((patSnap?.docs || []).map(d => d.data().uid || d.id));
+
+    if (patUids.size > 0) {
+      const now = Date.now();
+      const mes30Start = now - 30 * 24 * 3600 * 1000;
+
+      const sesSnap = await db.collection("therapy_sessions")
+        .where("patientUid", "in", [...patUids].slice(0, 30))
+        .where("status", "==", "completed").get().catch(() => null);
+
+      (sesSnap?.docs || []).forEach(d => {
+        const s = d.data();
+        sessoesTotal++;
+        colaboradoresComSessao.add(s.patientUid);
+        if (Number(s.scheduledAt || 0) >= mes30Start) sessoesMes++;
+
+        // Especialidade do terapeuta (aproximação pelo tipoConselho)
+        const esp = s.therapistEspecialidade || s.especialidade || "Outros";
+        especialidades[esp] = (especialidades[esp] || 0) + 1;
+      });
+    }
+  }
+
+  const taxaAdesao = totalCadastrados > 0
+    ? Math.round((colaboradoresComSessao.size / totalCadastrados) * 100)
+    : 0;
+
+  // LGPD: mascara dados se amostra muito pequena (< 5)
+  const THRESHOLD = 5;
+  const mascarar = totalCadastrados < THRESHOLD;
+
+  return res.json({
+    ok: true,
+    empresa: { nome: empresa.nome, segmento: empresa.segmento || null },
+    kpis: {
+      totalCadastrados:  mascarar ? null : totalCadastrados,
+      totalAtivos:       mascarar ? null : totalAtivos,
+      sessoesMes:        mascarar ? null : sessoesMes,
+      sessoesTotal:      mascarar ? null : sessoesTotal,
+      taxaAdesao:        mascarar ? null : taxaAdesao,
+    },
+    especialidades: mascarar ? {} : especialidades,
+    mascarado: mascarar,
+    geradoEm: Date.now()
+  });
+}));
+
+// POST /therapy/admin/empresas/:id/definir-acesso — admin define email+senha inicial
+router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const id = String(req.params.id || "").trim();
+  const loginEmail = String(req.body?.loginEmail || "").trim().toLowerCase();
+  const senhaPadrao = String(req.body?.senhaPadrao || "").trim();
+
+  if (!loginEmail || !senhaPadrao) return sendError(res, 400, "EMAIL_E_SENHA_OBRIGATORIOS");
+  if (senhaPadrao.length < 6) return sendError(res, 400, "SENHA_MUITO_CURTA");
+
+  const db = getDb();
+  const ref = db.collection("therapy_empresas").doc(id);
+  if (!(await ref.get()).exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  const salt = gerarSalt();
+  const hash = hashSenha(senhaPadrao, salt);
+
+  await ref.update({
+    loginEmail,
+    passwordHash: hash,
+    passwordSalt: salt,
+    senhaDefinidaEm: admin.firestore.FieldValue.serverTimestamp(),
+    senhaDefinidaPor: adminAuth.email || adminAuth.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  return res.json({ ok: true, loginEmail });
+}));
+
 module.exports = router;
