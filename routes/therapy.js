@@ -1294,6 +1294,27 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     const raw = String(req.body.notifWhatsapp || "").replace(/\D/g, "");
     updates.notifWhatsapp = raw.length >= 10 ? raw : "";
   }
+  // Disponibilidade semanal para agendamento público.
+  // Formato: { "1": [8,9], "2": [19], ... } onde chave = dia da semana
+  // (0=Dom, 1=Seg..6=Sáb) e valores = array de horas inteiras disponíveis.
+  if (req.body?.weeklyAvailability !== undefined) {
+    const wa = req.body.weeklyAvailability;
+    if (wa === null) {
+      updates.weeklyAvailability = null;
+    } else if (typeof wa === "object" && !Array.isArray(wa)) {
+      const cleaned = {};
+      for (const [day, hours] of Object.entries(wa)) {
+        const d = Number(day);
+        if (d >= 0 && d <= 6 && Array.isArray(hours)) {
+          cleaned[String(d)] = hours
+            .map(h => Number(h))
+            .filter(h => Number.isInteger(h) && h >= 0 && h <= 23)
+            .sort((a, b) => a - b);
+        }
+      }
+      updates.weeklyAvailability = cleaned;
+    }
+  }
   // Conselho profissional: atualização atômica via { tipoConselho, numeroConselho, subtipoConselho? }.
   // Espelha em crp/crm pra manter retrocompat com leitores legados.
   if (req.body?.tipoConselho !== undefined || req.body?.numeroConselho !== undefined) {
@@ -8372,10 +8393,26 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   const TZ_OFFSET_MS = 3 * 60 * 60 * 1000; // UTC-3
   const slots = [];
   const dayMs = 24 * 60 * 60 * 1000;
+  const weeklyAvailability = therapist.weeklyAvailability || null; // null = sem grade configurada
   const startDayUtc = Math.floor((effectiveFrom + TZ_OFFSET_MS) / dayMs) * dayMs - TZ_OFFSET_MS;
   for (let dayStart = startDayUtc; dayStart <= effectiveTo; dayStart += dayMs) {
     const localDate = new Date(dayStart + TZ_OFFSET_MS);
     const dow = localDate.getUTCDay();
+
+    // Com grade configurada: usa os horários definidos pelo profissional.
+    // Sem grade: comportamento legado (Seg-Sex, startHour-endHour).
+    if (weeklyAvailability) {
+      const availHours = weeklyAvailability[String(dow)] || [];
+      if (availHours.length === 0) continue; // dia sem disponibilidade
+      for (const h of availHours) {
+        const slotStart = dayStart + h * 3600 * 1000;
+        const slotEnd   = slotStart + slotMs;
+        if (slotStart < effectiveFrom || slotStart > effectiveTo) continue;
+        slots.push({ start: slotStart, end: slotEnd, available: !isBusy(slotStart, slotEnd) });
+      }
+      continue; // pula o loop legado abaixo
+    }
+
     if (dow === 0 || dow === 6) continue;
     for (let h = startHour * 60; h + slotMinutes <= endHour * 60; h += slotMinutes) {
       const slotStart = dayStart + h * 60 * 1000;
@@ -8559,6 +8596,82 @@ router.get("/public/agendar/:slug/slots", asyncHandler(async (req, res) => {
   });
 
   return res.json({ ok: true, slots, slotMinutes });
+}));
+
+// GET /public/agendar/:slug/disponibilidade?date=YYYY-MM-DD
+// Retorna os slots disponíveis para a data informada, já descontando sessões
+// e bloqueios existentes naquele dia.
+router.get("/public/agendar/:slug/disponibilidade", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  const dateStr = String(req.query?.date || "").trim(); // YYYY-MM-DD
+
+  if (!slug) return sendError(res, 400, "SLUG_OBRIGATORIO");
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return sendError(res, 400, "DATE_INVALIDA");
+
+  const therapist = await loadBySlug(slug);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  if (!therapist.publicSchedulingEnabled) return sendError(res, 403, "AGENDAMENTO_DESABILITADO");
+
+  const weeklyAvailability = therapist.weeklyAvailability || null;
+  if (!weeklyAvailability) {
+    // Sem grade configurada — retorna vazio (profissional precisa configurar)
+    return res.json({ ok: true, slots: [], configured: false });
+  }
+
+  // Dia da semana da data solicitada (0=Dom ... 6=Sáb)
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const dateObj = new Date(year, month - 1, day);
+  const dow = dateObj.getDay(); // 0=Dom, 1=Seg ... 6=Sáb
+
+  const availableHours = (weeklyAvailability[String(dow)] || []).slice();
+  if (availableHours.length === 0) {
+    return res.json({ ok: true, slots: [], configured: true });
+  }
+
+  // Busca sessões já marcadas para o dia (para excluir horários ocupados)
+  const db = getDb();
+  const dayStart = new Date(year, month - 1, day, 0, 0, 0).getTime();
+  const dayEnd   = new Date(year, month - 1, day, 23, 59, 59).getTime();
+
+  const [sessionsSnap, blackoutsSnap] = await Promise.all([
+    db.collection("therapy_sessions")
+      .where("therapistUid", "==", therapist.uid)
+      .where("scheduledAt", ">=", dayStart)
+      .where("scheduledAt", "<=", dayEnd)
+      .where("status", "in", ["scheduled", "in_progress"])
+      .get().catch(() => null),
+    db.collection("therapy_blackouts")
+      .where("therapistUid", "==", therapist.uid)
+      .get().catch(() => null)
+  ]);
+
+  const occupiedHours = new Set();
+
+  (sessionsSnap?.docs || []).forEach(d => {
+    const s = d.data();
+    const h = new Date(Number(s.scheduledAt)).getHours();
+    occupiedHours.add(h);
+  });
+
+  (blackoutsSnap?.docs || []).forEach(d => {
+    const b = d.data();
+    const from = Number(b.from), to = Number(b.to);
+    if (from < dayEnd && to > dayStart) {
+      // Blackout intersecta o dia — bloqueia as horas afetadas
+      for (let h = 0; h < 24; h++) {
+        const slotStart = new Date(year, month - 1, day, h, 0, 0).getTime();
+        const slotEnd   = slotStart + 3600000;
+        if (from < slotEnd && to > slotStart) occupiedHours.add(h);
+      }
+    }
+  });
+
+  const slots = availableHours
+    .filter(h => !occupiedHours.has(h))
+    .map(h => ({ hour: h, label: `${String(h).padStart(2, "0")}:00` }));
+
+  return res.json({ ok: true, slots, configured: true });
 }));
 
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
