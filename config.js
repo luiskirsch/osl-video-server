@@ -259,6 +259,13 @@ const DISCORD_ROLE_BUYER_ID      = process.env.DISCORD_ROLE_BUYER_ID      || "";
 const DISCORD_ROLE_AFFILIATE_ID  = process.env.DISCORD_ROLE_AFFILIATE_ID  || "";
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 
+// Twilio — WhatsApp notifications para profissionais
+const TWILIO_ACCOUNT_SID    = process.env.TWILIO_ACCOUNT_SID    || "";
+const TWILIO_AUTH_TOKEN     = process.env.TWILIO_AUTH_TOKEN     || "";
+// Número WhatsApp Business aprovado pela Meta (ex: "whatsapp:+14155238886")
+// Fica vazio até a aprovação chegar — o serviço vira no-op enquanto não estiver configurado.
+const TWILIO_WHATSAPP_FROM  = process.env.TWILIO_WHATSAPP_FROM  || "";
+
 module.exports = {
   PORT,
   APP_ENV, IS_STAGING, IS_PRODUCTION,
@@ -270,6 +277,7 @@ module.exports = {
   MP_WEBHOOK_SECRET_JOGO, MP_WEBHOOK_SECRET_THERAPY,
   ASAAS_WEBHOOK_TOKEN,
   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
+  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
   ANTHROPIC_API_KEY,
   BACKEND_BASE_URL, FRONTEND_BASE_URL,

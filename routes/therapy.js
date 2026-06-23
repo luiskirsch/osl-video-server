@@ -8657,9 +8657,9 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     );
   }
 
-  // WhatsApp pro terapeuta (se tiver notifWhatsapp configurado)
+  // WhatsApp pro terapeuta via Twilio (se tiver notifWhatsapp configurado)
   if (therapist.notifWhatsapp) {
-    const { sendText } = require("../services/whatsapp");
+    const twilioWa = require("../services/twilio-whatsapp");
     const slotDate = new Date(requestedSlot);
     const slotFmt  = slotDate.toLocaleString("pt-BR", {
       timeZone: "America/Sao_Paulo",
@@ -8667,7 +8667,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
       hour: "2-digit", minute: "2-digit"
     });
     const msg = `🔔 *Novo pedido de consulta!*\n\n👤 Paciente: ${patientName}\n📞 Telefone: ${patientPhone || "não informado"}\n🕐 Horário solicitado: ${slotFmt}${notes ? `\n📝 Obs.: ${notes}` : ""}\n\nAcesse o painel pra aprovar ou recusar:\n${buildPainelUrl()}`;
-    sendText({ to: therapist.notifWhatsapp, message: msg }).catch(e =>
+    twilioWa.sendText({ to: therapist.notifWhatsapp, message: msg }).catch(e =>
       logError("scheduling_request_whatsapp_failed", e, { requestId })
     );
   }
