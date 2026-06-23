@@ -8209,6 +8209,13 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
     auditDetail.push(`plano → ${body.setPlano}`);
   }
 
+  const ALLOWED_INTENDED_TIERS = new Set(["profissional","empresa","estudante","recem-formado"]);
+  if (typeof body.setIntendedTier === "string" && body.setIntendedTier) {
+    if (!ALLOWED_INTENDED_TIERS.has(body.setIntendedTier)) return sendError(res, 400, "INTENDED_TIER_INVALIDO");
+    updates.intendedTier = body.setIntendedTier;
+    auditDetail.push(`intendedTier → ${body.setIntendedTier}`);
+  }
+
   if (typeof body.setAdminNote === "string") {
     updates.adminNote = body.setAdminNote.slice(0, 500);
     auditDetail.push(`nota atualizada`);
