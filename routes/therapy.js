@@ -15287,9 +15287,8 @@ router.get("/empresa/dashboard", asyncHandler(async (req, res) => {
     ? Math.round((colaboradoresComSessao.size / totalCadastrados) * 100)
     : 0;
 
-  // LGPD: mascara dados se amostra muito pequena (< 5)
-  const THRESHOLD = 5;
-  const mascarar = totalCadastrados < THRESHOLD;
+  // LGPD: threshold desabilitado temporariamente para visualização
+  const mascarar = false;
 
   return res.json({
     ok: true,
