@@ -15338,4 +15338,60 @@ router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (re
   return res.json({ ok: true, loginEmail });
 }));
 
+// ═════════════════════════════════════════════════════════════════════════
+// HUMOR — rastreador de bem-estar do paciente (app PWA)
+// Coleção: therapy_humor  { uid, date (YYYY-MM-DD), mood (1-5), at }
+// ═════════════════════════════════════════════════════════════════════════
+
+// POST /therapy/paciente/humor  { mood: 1-5, date?: "YYYY-MM-DD" }
+router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const mood = Number(req.body?.mood);
+  if (!Number.isInteger(mood) || mood < 1 || mood > 5) return sendError(res, 400, "MOOD_INVALIDO");
+
+  const date = String(req.body?.date || new Date().toISOString().slice(0, 10));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return sendError(res, 400, "DATE_INVALIDA");
+
+  const db  = getDb();
+  const docId = `${uid}_${date}`;
+  await db.collection("therapy_humor").doc(docId).set({
+    uid, date, mood,
+    at: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true, date, mood });
+}));
+
+// GET /therapy/paciente/humor?days=30
+router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const days = Math.min(Number(req.query?.days || 30), 365);
+  const db   = getDb();
+
+  // Datas dos últimos N dias
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  const snap = await db.collection("therapy_humor")
+    .where("uid", "==", uid)
+    .where("date", ">=", cutoffStr)
+    .orderBy("date", "desc")
+    .limit(365)
+    .get();
+
+  const items = snap.docs.map(d => {
+    const x = d.data();
+    return { date: x.date, mood: x.mood, at: x.at?.toMillis?.() || null };
+  });
+
+  return res.json({ ok: true, items });
+}));
+
 module.exports = router;
