@@ -15130,7 +15130,7 @@ router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => 
 // ═════════════════════════════════════════════════════════════════════════
 
 const { EMPRESA_JWT_SECRET } = require("../config");
-const crypto = require("crypto");
+// crypto já importado no topo do arquivo
 
 function hashSenha(senha, salt) {
   return crypto.createHmac("sha256", salt).update(senha).digest("hex");
