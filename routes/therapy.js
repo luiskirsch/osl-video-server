@@ -8672,6 +8672,16 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     );
   }
 
+  // Notificação in-app pro terapeuta
+  createNotification({
+    therapistUid,
+    type:  "scheduling_request",
+    title: `Novo pedido de consulta de ${patientName}`,
+    body:  `${patientName} solicitou um horário${requestedSlot ? " para " + new Date(requestedSlot).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""}.${notes ? " Obs.: " + notes.slice(0, 80) : ""}`,
+    link:  "/painel.html",
+    data:  { requestId, patientName, patientPhone, requestedSlot }
+  });
+
   await logAudit({
     type: "scheduling_request_created",
     requestId,
@@ -14887,6 +14897,105 @@ router.patch("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
   }
   await ref.update(updates);
   return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// NOTIFICAÇÕES IN-APP — coleção therapy_notifications
+// ═════════════════════════════════════════════════════════════════════════
+
+// Helper: cria uma notificação pra um terapeuta (fire-and-forget seguro)
+async function createNotification({ therapistUid, type, title, body, link, data }) {
+  try {
+    const db = getDb();
+    if (!db) return;
+    await db.collection("therapy_notifications").add({
+      therapistUid,
+      type:      type  || "info",
+      title:     title || "",
+      body:      body  || "",
+      link:      link  || null,
+      data:      data  || null,
+      readAt:    null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    logError("create_notification_failed", e, { therapistUid, type });
+  }
+}
+
+// GET /therapy/notificacoes?limit=50&onlyUnread=true
+router.get("/therapy/notificacoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const limit = Math.min(Number(req.query?.limit || 50), 100);
+  const onlyUnread = req.query?.onlyUnread === "true";
+
+  let q = db.collection("therapy_notifications")
+    .where("therapistUid", "==", uid)
+    .orderBy("createdAt", "desc")
+    .limit(limit);
+
+  if (onlyUnread) q = q.where("readAt", "==", null);
+
+  const snap = await q.get();
+  const items = snap.docs.map(d => {
+    const n = d.data();
+    return {
+      id: d.id,
+      type:      n.type,
+      title:     n.title,
+      body:      n.body,
+      link:      n.link || null,
+      data:      n.data || null,
+      readAt:    n.readAt?.toMillis?.() || null,
+      createdAt: n.createdAt?.toMillis?.() || null
+    };
+  });
+
+  const unreadCount = onlyUnread
+    ? items.length
+    : items.filter(n => !n.readAt).length;
+
+  return res.json({ ok: true, items, unreadCount });
+}));
+
+// POST /therapy/notificacoes/:id/ler — marca uma como lida
+router.post("/therapy/notificacoes/:id/ler", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const ref = db.collection("therapy_notifications").doc(req.params.id);
+  const snap = await ref.get();
+  if (!snap.exists || snap.data().therapistUid !== uid) return sendError(res, 404, "NOTIFICACAO_NAO_ENCONTRADA");
+
+  await ref.update({ readAt: admin.firestore.FieldValue.serverTimestamp() });
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/notificacoes/ler-todas — marca todas como lidas
+router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_notifications")
+    .where("therapistUid", "==", uid)
+    .where("readAt", "==", null)
+    .limit(100)
+    .get();
+
+  const batch = db.batch();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  snap.docs.forEach(d => batch.update(d.ref, { readAt: now }));
+  await batch.commit();
+
+  return res.json({ ok: true, marked: snap.size });
 }));
 
 module.exports = router;
