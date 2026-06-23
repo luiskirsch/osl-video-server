@@ -8404,8 +8404,16 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
     if (weeklyAvailability) {
       const availHours = weeklyAvailability[String(dow)] || [];
       if (availHours.length === 0) continue; // dia sem disponibilidade
+      // localDate representa meia-noite UTC do dia do calendário.
+      // Para converter hora local Brasil (UTC-3) em UTC: UTC = hora_local + 3h
+      const utcMidnight = Date.UTC(
+        localDate.getUTCFullYear(),
+        localDate.getUTCMonth(),
+        localDate.getUTCDate()
+      );
+      const TZ_H = TZ_OFFSET_MS / 3600000; // 3 (horas)
       for (const h of availHours) {
-        const slotStart = dayStart + h * 3600 * 1000;
+        const slotStart = utcMidnight + (h + TZ_H) * 3600 * 1000;
         const slotEnd   = slotStart + slotMs;
         if (slotStart < effectiveFrom || slotStart > effectiveTo) continue;
         slots.push({ start: slotStart, end: slotEnd, available: !isBusy(slotStart, slotEnd) });
