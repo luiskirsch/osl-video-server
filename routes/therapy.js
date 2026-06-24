@@ -15339,6 +15339,110 @@ router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (re
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
+// SESSÕES DO PACIENTE (app PWA) — busca por e-mail do paciente autenticado
+// ═════════════════════════════════════════════════════════════════════════
+
+router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  // Busca e-mail do paciente via Firebase Auth
+  const userRecord = await admin.auth().getUser(uid);
+  const email = userRecord.email?.toLowerCase();
+  if (!email) return res.json({ ok: true, sessions: [] });
+
+  const db  = getDb();
+  const now = Date.now();
+  const cutoff = now - 365 * 24 * 3600 * 1000; // últimos 365 dias
+
+  // Busca sessões onde patientEmail === email do paciente
+  const [byEmail, byUid] = await Promise.all([
+    db.collection("therapy_sessions")
+      .where("patientEmail", "==", email)
+      .where("scheduledAt", ">=", cutoff)
+      .orderBy("scheduledAt", "desc")
+      .limit(100)
+      .get().catch(() => null),
+    // Tenta também por patientUid se existir
+    db.collection("therapy_sessions")
+      .where("patientUid", "==", uid)
+      .where("scheduledAt", ">=", cutoff)
+      .orderBy("scheduledAt", "desc")
+      .limit(100)
+      .get().catch(() => null)
+  ]);
+
+  const seen = new Set();
+  const sessions = [];
+  for (const snap of [byEmail, byUid]) {
+    (snap?.docs || []).forEach(d => {
+      if (seen.has(d.id)) return;
+      seen.add(d.id);
+      const s = d.data();
+      sessions.push({
+        sessionId:     d.id,
+        scheduledAt:   s.scheduledAt?.toMillis?.() || Number(s.scheduledAt) || null,
+        status:        s.status || "scheduled",
+        therapistName: s.therapistName || s.displayName || null,
+        especialidade: s.especialidade || null,
+        therapistSlug: s.therapistSlug || s.publicSchedulingSlug || null,
+      });
+    });
+  }
+
+  sessions.sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
+  return res.json({ ok: true, sessions });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// DOCUMENTOS DO PACIENTE (app PWA) — recibos, receitas, atestados
+// ═════════════════════════════════════════════════════════════════════════
+
+router.get("/therapy/paciente/documentos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const userRecord = await admin.auth().getUser(uid);
+  const email = userRecord.email?.toLowerCase();
+  if (!email) return res.json({ ok: true, items: [] });
+
+  const db = getDb();
+  const cutoff = Date.now() - 730 * 24 * 3600 * 1000; // 2 anos
+
+  const snaps = await Promise.all([
+    // Recibos
+    db.collection("therapy_recibos")
+      .where("patientEmail", "==", email)
+      .orderBy("createdAt", "desc").limit(100).get().catch(() => null),
+    // Documentos clínicos (receitas, atestados, laudos)
+    db.collection("therapy_documentos")
+      .where("patientEmail", "==", email)
+      .orderBy("createdAt", "desc").limit(100).get().catch(() => null),
+  ]);
+
+  const items = [];
+  const typeMap = { receita:"receita", atestado:"atestado", laudo:"laudo", encaminhamento:"encaminhamento" };
+
+  snaps[0]?.docs?.forEach(d => {
+    const x = d.data();
+    items.push({ id: d.id, tipo: "recibo", titulo: "Recibo de consulta",
+      therapistName: x.therapistName || null, url: x.url || null,
+      createdAt: x.createdAt?.toMillis?.() || null });
+  });
+  snaps[1]?.docs?.forEach(d => {
+    const x = d.data();
+    items.push({ id: d.id, tipo: typeMap[x.tipo] || "documento", titulo: x.titulo || x.tipo || "Documento",
+      therapistName: x.therapistName || null, url: x.url || null,
+      createdAt: x.createdAt?.toMillis?.() || null });
+  });
+
+  items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
 // FOTO DE PERFIL DO PACIENTE (app PWA)
 // Coleção: therapy_app_profiles { uid, foto (data URL base64), updatedAt }
 // ═════════════════════════════════════════════════════════════════════════
