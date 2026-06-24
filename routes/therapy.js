@@ -15339,6 +15339,35 @@ router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (re
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
+// FOTO DE PERFIL DO PACIENTE (app PWA)
+// Coleção: therapy_app_profiles { uid, foto (data URL base64), updatedAt }
+// ═════════════════════════════════════════════════════════════════════════
+
+router.get("/therapy/paciente/foto", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db  = getDb();
+  const doc = await db.collection("therapy_app_profiles").doc(uid).get();
+  if (!doc.exists || !doc.data().foto) return res.json({ ok: true, foto: null });
+  return res.json({ ok: true, foto: doc.data().foto });
+}));
+
+router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const foto = String(req.body?.foto || "").trim();
+  if (!foto.startsWith("data:image/")) return sendError(res, 400, "FOTO_INVALIDA");
+  if (foto.length > 500_000) return sendError(res, 400, "FOTO_MUITO_GRANDE"); // ~375KB base64
+  const db = getDb();
+  await db.collection("therapy_app_profiles").doc(uid).set({
+    uid, foto, updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
 // DEPENDENTES — familiares do paciente no programa de saúde
 // Coleção: therapy_dependentes { uid, id, nome, parentesco, dataNascimento, email, createdAt }
 // ═════════════════════════════════════════════════════════════════════════
