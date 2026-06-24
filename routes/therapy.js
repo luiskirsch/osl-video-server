@@ -15357,19 +15357,15 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   const cutoff = now - 365 * 24 * 3600 * 1000; // últimos 365 dias
 
   // Busca sessões onde patientEmail === email do paciente
+  // Sem orderBy — evita índice composto; ordena em JS
   const [byEmail, byUid] = await Promise.all([
     db.collection("therapy_sessions")
       .where("patientEmail", "==", email)
-      .where("scheduledAt", ">=", cutoff)
-      .orderBy("scheduledAt", "desc")
-      .limit(100)
+      .limit(200)
       .get().catch(() => null),
-    // Tenta também por patientUid se existir
     db.collection("therapy_sessions")
       .where("patientUid", "==", uid)
-      .where("scheduledAt", ">=", cutoff)
-      .orderBy("scheduledAt", "desc")
-      .limit(100)
+      .limit(200)
       .get().catch(() => null)
   ]);
 
@@ -15411,15 +15407,14 @@ router.get("/therapy/paciente/documentos", asyncHandler(async (req, res) => {
   const db = getDb();
   const cutoff = Date.now() - 730 * 24 * 3600 * 1000; // 2 anos
 
+  // Sem orderBy — evita índice composto; ordena em JS
   const snaps = await Promise.all([
-    // Recibos
     db.collection("therapy_recibos")
       .where("patientEmail", "==", email)
-      .orderBy("createdAt", "desc").limit(100).get().catch(() => null),
-    // Documentos clínicos (receitas, atestados, laudos)
+      .limit(100).get().catch(() => null),
     db.collection("therapy_documentos")
       .where("patientEmail", "==", email)
-      .orderBy("createdAt", "desc").limit(100).get().catch(() => null),
+      .limit(100).get().catch(() => null),
   ]);
 
   const items = [];
@@ -15556,17 +15551,17 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   cutoff.setDate(cutoff.getDate() - days);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
 
+  // Sem orderBy para evitar índice composto — ordena em JS
   const snap = await db.collection("therapy_humor")
     .where("uid", "==", uid)
-    .where("date", ">=", cutoffStr)
-    .orderBy("date", "desc")
-    .limit(365)
+    .limit(400)
     .get();
 
-  const items = snap.docs.map(d => {
-    const x = d.data();
-    return { date: x.date, mood: x.mood, at: x.at?.toMillis?.() || null };
-  });
+  const items = snap.docs
+    .map(d => { const x = d.data(); return { date: x.date, mood: x.mood, at: x.at?.toMillis?.() || null }; })
+    .filter(i => i.date >= cutoffStr)
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, days);
 
   return res.json({ ok: true, items });
 }));
