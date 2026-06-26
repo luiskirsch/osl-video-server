@@ -8731,6 +8731,14 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
 
   const notes = String(req.body?.notes || "").trim().slice(0, SCHEDULING_REQUEST_NOTES_MAX);
 
+  // TCLE — obrigatório para consultas de telessaúde (Res. CFM 2.314/2022)
+  if (req.body?.tcleSigned !== true) {
+    return sendError(res, 400, "TCLE_OBRIGATORIO", {
+      hint: "O paciente deve aceitar o Termo de Consentimento Livre e Esclarecido antes de agendar."
+    });
+  }
+  const tcleSignedAt = Date.now();
+
   const requestedSlot = Number(req.body?.requestedSlot || 0);
   if (!Number.isFinite(requestedSlot) || requestedSlot <= Date.now()) {
     return sendError(res, 400, "HORARIO_INVALIDO");
@@ -8785,6 +8793,8 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     status: "pending",
     ipHash,
     expiresAt,
+    tcleSigned: true,
+    tcleSignedAt,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
