@@ -13458,7 +13458,178 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
     };
   }).sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0));
 
+  // Mescla support threads (admin → profissional, plaintext) na lista.
+  // Só para therapists; pacientes não recebem support threads aqui.
+  if (me.role === "therapist") {
+    const supSnap = await db.collection("therapy_support_threads")
+      .where("therapistUid", "==", uid)
+      .limit(50).get();
+    supSnap.docs.forEach(d => {
+      const s = d.data();
+      const lastMsgMs = s.lastMessageAt?.toMillis ? s.lastMessageAt.toMillis() : (Number(s.lastMessageAt) || 0);
+      threads.push({
+        threadId: s.threadId,
+        isSupportThread: true,
+        type: "support",
+        supportSubject: s.subject || "Mensagem do Espaço Prelúdio",
+        lastMessageAt: lastMsgMs || null,
+        lastMessageSenderRole: s.lastMessageSenderRole || "admin",
+        lastMessageText: s.lastMessageText || null,
+        unreadCount: Number(s.unreadByTherapist) || 0,
+        hasUnread: Number(s.unreadByTherapist) > 0,
+        createdAt: s.createdAt?.toMillis ? s.createdAt.toMillis() : null
+      });
+    });
+    threads.sort((a, b) => (b.lastMessageAt || b.createdAt || 0) - (a.lastMessageAt || a.createdAt || 0));
+  }
+
   return res.json({ ok: true, threads });
+}));
+
+// GET /therapy/support-threads/:id/messages — mensagens de uma thread de suporte
+router.get("/therapy/support-threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const db = getDb();
+  const threadId = req.params.id;
+  const threadDoc = await db.collection("therapy_support_threads").doc(threadId).get();
+  if (!threadDoc.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+
+  const thread = threadDoc.data();
+  if (thread.therapistUid !== uid) return sendError(res, 403, "SEM_PERMISSAO");
+
+  const snap = await db.collection("therapy_support_messages")
+    .where("threadId", "==", threadId)
+    .limit(100).get();
+
+  const messages = snap.docs.map(d => {
+    const m = d.data();
+    return {
+      messageId: d.id,
+      senderRole: m.senderRole,
+      senderName: m.senderName || (m.senderRole === "admin" ? "Espaço Prelúdio" : "Você"),
+      text: m.text,
+      createdAt: m.createdAt?.toMillis ? m.createdAt.toMillis() : null,
+      readAt: m.readAt?.toMillis ? m.readAt.toMillis() : null
+    };
+  }).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+  // Marca como lido
+  await db.collection("therapy_support_threads").doc(threadId).set(
+    { unreadByTherapist: 0, lastReadByTherapist: admin.firestore.FieldValue.serverTimestamp() },
+    { merge: true }
+  );
+
+  return res.json({ ok: true, messages, thread: {
+    threadId,
+    subject: thread.subject || "Mensagem do Espaço Prelúdio",
+    createdAt: thread.createdAt?.toMillis ? thread.createdAt.toMillis() : null
+  }});
+}));
+
+// POST /therapy/support-threads/:id/messages — profissional responde
+router.post("/therapy/support-threads/:id/messages", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 403, "PROFISSIONAL_NAO_REGISTRADO");
+
+  const db = getDb();
+  const threadId = req.params.id;
+  const threadDoc = await db.collection("therapy_support_threads").doc(threadId).get();
+  if (!threadDoc.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  if (threadDoc.data().therapistUid !== uid) return sendError(res, 403, "SEM_PERMISSAO");
+
+  const text = String(req.body?.text || "").trim().slice(0, 2000);
+  if (!text) return sendError(res, 400, "MENSAGEM_OBRIGATORIA");
+
+  const msgId = newId("smsg");
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  await db.collection("therapy_support_messages").doc(msgId).set({
+    messageId: msgId,
+    threadId,
+    therapistUid: uid,
+    senderRole: "therapist",
+    senderName: therapist.displayName || "Profissional",
+    text,
+    createdAt: now,
+    readAt: null
+  });
+
+  await db.collection("therapy_support_threads").doc(threadId).set({
+    lastMessageAt: now,
+    lastMessageText: text.slice(0, 100),
+    lastMessageSenderRole: "therapist",
+    unreadByAdmin: admin.firestore.FieldValue.increment(1)
+  }, { merge: true });
+
+  return res.json({ ok: true, messageId: msgId });
+}));
+
+// POST /therapy/admin/mensagem — admin envia mensagem a um profissional
+// Body: { recipientUid, text, subject? }
+router.post("/therapy/admin/mensagem", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const db = getDb();
+  const recipientUid = String(req.body?.recipientUid || "").trim();
+  const text         = String(req.body?.text    || "").trim().slice(0, 2000);
+  const subject      = String(req.body?.subject || "").trim().slice(0, 100) || "Mensagem do Espaço Prelúdio";
+
+  if (!recipientUid) return sendError(res, 400, "DESTINATARIO_OBRIGATORIO");
+  if (!text)         return sendError(res, 400, "MENSAGEM_OBRIGATORIA");
+
+  const therapist = await loadTherapist(recipientUid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  // Busca ou cria thread de suporte para este profissional
+  const existing = await db.collection("therapy_support_threads")
+    .where("therapistUid", "==", recipientUid)
+    .limit(1).get();
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  let threadId;
+  if (!existing.empty) {
+    threadId = existing.docs[0].id;
+  } else {
+    threadId = newId("sup");
+    await db.collection("therapy_support_threads").doc(threadId).set({
+      threadId,
+      therapistUid: recipientUid,
+      subject,
+      createdAt: now,
+      unreadByTherapist: 0,
+      unreadByAdmin: 0
+    });
+  }
+
+  const msgId = newId("smsg");
+  await db.collection("therapy_support_messages").doc(msgId).set({
+    messageId: msgId,
+    threadId,
+    therapistUid: recipientUid,
+    senderRole: "admin",
+    senderName: "Espaço Prelúdio",
+    text,
+    createdAt: now,
+    readAt: null
+  });
+
+  await db.collection("therapy_support_threads").doc(threadId).set({
+    lastMessageAt: now,
+    lastMessageText: text.slice(0, 100),
+    lastMessageSenderRole: "admin",
+    unreadByTherapist: admin.firestore.FieldValue.increment(1)
+  }, { merge: true });
+
+  await logAudit({ type: "support_message_sent", threadId, msgId, recipientUid, sentBy: adminAuth.email });
+  return res.json({ ok: true, threadId, messageId: msgId });
 }));
 
 // GET /therapy/chat/threads/:id — retorna doc completo da thread (com
