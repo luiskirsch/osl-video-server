@@ -7987,38 +7987,59 @@ router.patch("/therapy/admin/denuncias/:id", asyncHandler(async (req, res) => {
 
 // ─── NOTIFICAÇÕES ──────────────────────────────────────────────────────────
 
-// POST /therapy/admin/notificacoes — admin envia notificação a um usuário.
-// Body: { recipientUid, title, body, type?, reportId? }
+// POST /therapy/admin/notificacoes
+// Body: { recipientUid?, broadcast?: true, title, body, type?, link?, emoji? }
+// broadcast=true envia para todos os profissionais ativos.
 router.post("/therapy/admin/notificacoes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const adminAuth = await verifyAdminTherapy(req, res);
   if (!adminAuth) return;
 
-  const db = getDb();
+  const db        = getDb();
+  const broadcast = req.body?.broadcast === true;
   const recipientUid = String(req.body?.recipientUid || "").trim();
-  const title        = String(req.body?.title        || "").trim().slice(0, 200);
-  const body         = String(req.body?.body         || "").trim().slice(0, 2000);
-  const type         = String(req.body?.type         || "admin_message").trim();
-  const reportId     = String(req.body?.reportId     || "").trim() || null;
+  const title     = String(req.body?.title || "").trim().slice(0, 200);
+  const body      = String(req.body?.body  || "").trim().slice(0, 2000);
+  const type      = String(req.body?.type  || "admin_message").trim();
+  const link      = String(req.body?.link  || "").trim().slice(0, 500) || null;
+  const emoji     = String(req.body?.emoji || "").trim().slice(0, 10)  || null;
+  const reportId  = String(req.body?.reportId || "").trim() || null;
 
-  if (!recipientUid) return sendError(res, 400, "DESTINATARIO_OBRIGATORIO");
-  if (!title)        return sendError(res, 400, "TITULO_OBRIGATORIO");
-  if (!body)         return sendError(res, 400, "CORPO_OBRIGATORIO");
+  if (!title) return sendError(res, 400, "TITULO_OBRIGATORIO");
+  if (!body)  return sendError(res, 400, "CORPO_OBRIGATORIO");
+  if (!broadcast && !recipientUid) return sendError(res, 400, "DESTINATARIO_OBRIGATORIO");
 
-  const notifId = db.collection("therapy_notifications").doc().id;
-  await db.collection("therapy_notifications").doc(notifId).set({
-    notificationId: notifId,
-    recipientUid,
-    type,
-    title,
-    body,
-    read: false,
-    reportId,
-    sentBy: adminAuth.email,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  async function sendOne(uid) {
+    const notifId = db.collection("therapy_notifications").doc().id;
+    await db.collection("therapy_notifications").doc(notifId).set({
+      notificationId: notifId,
+      therapistUid: uid,
+      recipientUid: uid,
+      type, title, body, link, emoji,
+      readAt: null,
+      read: false,
+      reportId,
+      sentBy: adminAuth.email,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return notifId;
+  }
 
-  await logAudit({ type: "notification_sent", notificationId: notifId, recipientUid, sentBy: adminAuth.email, reportId });
+  if (broadcast) {
+    const snap = await db.collection("therapists").select("uid").get();
+    const uids = snap.docs.map(d => d.id).filter(Boolean);
+    const BATCH = 20;
+    let sent = 0;
+    for (let i = 0; i < uids.length; i += BATCH) {
+      await Promise.all(uids.slice(i, i + BATCH).map(uid => sendOne(uid)));
+      sent += Math.min(BATCH, uids.length - i);
+    }
+    await logAudit({ type: "notification_broadcast", sentBy: adminAuth.email, count: sent, title });
+    return res.json({ ok: true, broadcast: true, sent });
+  }
+
+  const notifId = await sendOne(recipientUid);
+  await logAudit({ type: "notification_sent", notificationId: notifId, recipientUid, sentBy: adminAuth.email });
   return res.json({ ok: true, notificationId: notifId });
 }));
 
