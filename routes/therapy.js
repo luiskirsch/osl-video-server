@@ -9181,6 +9181,96 @@ router.patch("/therapy/admin/leads-estudante/:id", asyncHandler(async (req, res)
   return res.json({ ok: true });
 }));
 
+// ─── REPASSES PIX ─────────────────────────────────────────────────────────
+
+// GET /therapy/admin/repasses?status=pending|completed|all&limit=100
+// Lista repasses de consultas para o painel admin. Enriquece com dados do
+// profissional (nome, pixKey, pixKeyType).
+router.get("/therapy/admin/repasses", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "pending").trim().toLowerCase();
+  const allowed    = new Set(["pending", "completed", "failed", "all"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+  const limitN = Math.min(500, Math.max(1, Number(req.query?.limit) || 100));
+
+  const db = getDb();
+  let q = db.collection("therapy_payouts");
+  if (wantStatus !== "all") q = q.where("status", "==", wantStatus);
+
+  const snap = await q.orderBy("createdAt", "desc").limit(limitN).get();
+
+  const items = await Promise.all(snap.docs.map(async d => {
+    const p = d.data();
+    const therapistDoc = await db.collection("therapists").doc(p.therapistUid).get();
+    const t = therapistDoc.exists ? therapistDoc.data() : null;
+    return {
+      id:            d.id,
+      requestId:     p.requestId || "",
+      therapistUid:  p.therapistUid,
+      therapistName: t?.displayName || p.therapistSlug || "",
+      pixKey:        t?.pixKey     || "",
+      pixKeyType:    t?.pixKeyType || "",
+      patientName:   p.patientName || "",
+      paymentId:     p.paymentId   || "",
+      valor:         p.valor       || 0,
+      status:        p.status      || "pending",
+      note:          p.note        || "",
+      completedAt:   p.completedAt || null,
+      completedBy:   p.completedBy || null,
+      createdAt:     p.createdAt?.toMillis ? p.createdAt.toMillis() : null
+    };
+  }));
+
+  return res.json({ ok: true, total: items.length, items });
+}));
+
+// POST /therapy/admin/repasses/:id/concluir
+// Marca o repasse como concluído. Body: { note?: string } (opcional: referência
+// do comprovante ou observação).
+router.post("/therapy/admin/repasses/:id/concluir", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const payoutId = String(req.params.id || "").trim();
+  if (!payoutId) return sendError(res, 400, "PAYOUT_ID_OBRIGATORIO");
+
+  const db   = getDb();
+  const ref  = db.collection("therapy_payouts").doc(payoutId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "REPASSE_NAO_ENCONTRADO");
+
+  const data = snap.data();
+  if (data.status === "completed") return sendError(res, 409, "REPASSE_JA_CONCLUIDO");
+
+  const note = String(req.body?.note || "").trim().slice(0, 300);
+
+  await ref.update({
+    status:      "completed",
+    note,
+    completedAt: Date.now(),
+    completedBy: adminAuth.email,
+    updatedAt:   admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({
+    type:          "payout_completed",
+    payoutId,
+    requestId:     data.requestId,
+    therapistUid:  data.therapistUid,
+    valor:         data.valor,
+    by:            adminAuth.email,
+    note
+  });
+
+  logInfo("repasse_concluido", { payoutId, therapistUid: data.therapistUid, valor: data.valor, by: adminAuth.email });
+
+  return res.json({ ok: true });
+}));
+
 // GET /therapy/agendamentos/solicitacoes — terapeuta lista solicitações
 // pendentes (e opcionalmente histórico recente).
 router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) => {
