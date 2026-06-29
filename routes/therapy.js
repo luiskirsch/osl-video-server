@@ -8448,7 +8448,7 @@ function summarizeTherapistForPublicScheduling(therapist) {
     cidade:         c.cidade || "",
     uf:             c.uf || "",
     pixConfigured:  !!(therapist.pixKey),
-    valorConsulta:  therapist.valorConsulta || 6000
+    valorConsulta:  6000
   };
 }
 
@@ -8983,8 +8983,8 @@ router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(as
   const therapist = therapistDoc.data();
   if (!therapist.pixKey) return sendError(res, 400, "PROFISSIONAL_SEM_PIX");
 
-  const valorCentavos = therapist.valorConsulta || 6000;
-  const valorReais    = valorCentavos / 100;
+  const valorCentavos = 6000; // R$60 fixo da plataforma
+  const valorReais    = 60;
 
   const expiration    = new Date(Date.now() + 30 * 60 * 1000);
   // MP exige ISO8601 com timezone explícito (rejeita "Z" pra PIX em produção)
