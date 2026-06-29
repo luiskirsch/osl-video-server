@@ -8440,6 +8440,8 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   pendingSnap.forEach(d => {
     const r = d.data();
     if (!r.requestedSlot) return;
+    // Solicitações expiradas não bloqueiam mais o slot.
+    if (r.expiresAt && r.expiresAt < Date.now()) return;
     busyRanges.push({ start: r.requestedSlot, end: (r.requestedSlotEnd || r.requestedSlot + slotMs) });
   });
 
