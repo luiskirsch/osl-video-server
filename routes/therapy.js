@@ -36,7 +36,8 @@ const {
   THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   MP_ACCESS_TOKEN_THERAPY, MP_WEBHOOK_SECRET_THERAPY,
-  ASAAS_WEBHOOK_TOKEN
+  ASAAS_WEBHOOK_TOKEN,
+  BACKEND_BASE_URL
 } = require("../config");
 const { mercadoPagoFetchTherapy } = require("../services/payments");
 const asaas = require("../services/asaas");
@@ -1596,6 +1597,39 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       updates.photoBase64 = admin.firestore.FieldValue.delete();
       updates.photoMime   = admin.firestore.FieldValue.delete();
     }
+  }
+
+  // PIX para recebimento de pagamentos no agendamento público.
+  // Profissional precisa configurar pixKey + pixKeyType para que o QR code
+  // seja exibido ao paciente. Sem PIX configurado, o agendamento funciona
+  // sem etapa de pagamento (modo legado).
+  if (req.body?.pixKey !== undefined) {
+    const key = String(req.body.pixKey || "").trim().slice(0, 150);
+    if (key) {
+      const validTypes = ["cpf", "cnpj", "email", "telefone", "aleatoria"];
+      const pixKeyType = String(req.body?.pixKeyType || "").trim().toLowerCase();
+      if (!validTypes.includes(pixKeyType)) {
+        return sendError(res, 400, "PIX_KEY_TYPE_INVALIDO", {
+          hint: "pixKeyType deve ser: cpf, cnpj, email, telefone ou aleatoria"
+        });
+      }
+      updates.pixKey     = key;
+      updates.pixKeyType = pixKeyType;
+    } else {
+      updates.pixKey     = admin.firestore.FieldValue.delete();
+      updates.pixKeyType = admin.firestore.FieldValue.delete();
+    }
+  }
+  // Valor da consulta em centavos. R$60 = 6000. Plano estudante mantém
+  // fixo em R$60; plano profissional é livre.
+  if (req.body?.valorConsulta !== undefined) {
+    const val = Math.round(Number(req.body.valorConsulta));
+    if (!Number.isFinite(val) || val < 1000 || val > 10000000) {
+      return sendError(res, 400, "VALOR_CONSULTA_INVALIDO", {
+        hint: "Valor em centavos. Mínimo R$10 (1000), máximo R$100.000 (10000000)."
+      });
+    }
+    updates.valorConsulta = val;
   }
 
   // Tópicos personalizados da sessão.
@@ -8352,7 +8386,9 @@ function summarizeTherapistForPublicScheduling(therapist) {
     paisRegistro:   therapist.paisRegistro || "",
     orgaoRegistro:  therapist.orgaoRegistro || "",
     cidade:         c.cidade || "",
-    uf:             c.uf || ""
+    uf:             c.uf || "",
+    pixConfigured:  !!(therapist.pixKey),
+    valorConsulta:  therapist.valorConsulta || 6000
   };
 }
 
@@ -8857,6 +8893,182 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   }).catch(e => logError("push_scheduling_failed", e, { requestId }));
 
   return res.json({ ok: true, requestId });
+}));
+
+// POST /public/agendar/:slug/criar-pix — gera cobrança PIX no MP Therapy e retorna QR.
+// Chamado pelo frontend logo após POST /solicitar. Idempotente: se já existe
+// um paymentId ativo (status pending não expirado), retorna novo QR pelo MP.
+const createPixLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO" }
+});
+router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug      = String(req.params.slug || "").trim().toLowerCase();
+  const requestId = String(req.body?.requestId || "").trim();
+  if (!requestId) return sendError(res, 400, "REQUEST_ID_OBRIGATORIO");
+
+  const reqSnap = await getDb().collection("therapy_scheduling_requests").doc(requestId).get();
+  if (!reqSnap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
+  const reqData = reqSnap.data();
+  if (reqData.therapistSlug !== slug) return sendError(res, 403, "SOLICITACAO_INCOMPATIVEL");
+  if (reqData.paymentStatus === "paid") return sendError(res, 409, "SOLICITACAO_JA_PAGA");
+
+  const therapistDoc = await getDb().collection("therapists").doc(reqData.therapistUid).get();
+  if (!therapistDoc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const therapist = therapistDoc.data();
+  if (!therapist.pixKey) return sendError(res, 400, "PROFISSIONAL_SEM_PIX");
+
+  const valorCentavos = therapist.valorConsulta || 6000;
+  const valorReais    = valorCentavos / 100;
+
+  const expiration    = new Date(Date.now() + 30 * 60 * 1000);
+  // MP exige ISO8601 com timezone explícito (rejeita "Z" pra PIX em produção)
+  const expirationStr = expiration.toISOString().replace("Z", "-03:00");
+
+  const nameParts = (reqData.patientName || "Paciente").split(" ");
+  const body = {
+    transaction_amount: valorReais,
+    payment_method_id:  "pix",
+    description:        `Consulta - ${therapist.displayName || "Profissional"}`,
+    payer: {
+      email:      reqData.patientEmail,
+      first_name: nameParts[0],
+      last_name:  nameParts.slice(1).join(" ") || nameParts[0]
+    },
+    external_reference:   requestId,
+    notification_url:     `${BACKEND_BASE_URL}/therapy/webhook/pagamento`,
+    date_of_expiration:   expirationStr
+  };
+
+  const { response, data: mpData } = await mercadoPagoFetchTherapy(
+    "https://api.mercadopago.com/v1/payments",
+    { method: "POST", body: JSON.stringify(body) }
+  );
+
+  if (!response.ok) {
+    logError("criar_pix_mp_error", new Error("MP rejeitou criação PIX"), { slug, requestId, mpData });
+    return sendError(res, 502, "ERRO_CRIAR_PIX", {
+      hint: mpData?.message || mpData?.cause?.[0]?.description || "Erro ao gerar QR code PIX"
+    });
+  }
+
+  const qrCode   = mpData.point_of_interaction?.transaction_data?.qr_code   || null;
+  const qrBase64 = mpData.point_of_interaction?.transaction_data?.qr_code_base64 || null;
+
+  await getDb().collection("therapy_scheduling_requests").doc(requestId).update({
+    paymentId:        String(mpData.id),
+    paymentStatus:    "pending",
+    paymentCreatedAt: Date.now(),
+    valorConsulta:    valorCentavos,
+    paymentExpiresAt: expiration.getTime(),
+    updatedAt:        admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  logInfo("pix_criado", { requestId, paymentId: String(mpData.id), valor: valorReais });
+
+  return res.json({
+    ok: true,
+    paymentId:  String(mpData.id),
+    qrCode,
+    qrBase64,
+    valor:      valorReais,
+    expiresAt:  expiration.getTime()
+  });
+}));
+
+// GET /public/agendar/:requestId/status-pagamento — polling do frontend pra saber
+// quando o webhook confirmou o pagamento. Retorna só o status, sem dados sensíveis.
+router.get("/public/agendar/:requestId/status-pagamento", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const requestId = String(req.params.requestId || "").trim();
+  if (!requestId.startsWith("scrq")) return sendError(res, 400, "SOLICITACAO_INVALIDA");
+
+  const snap = await getDb().collection("therapy_scheduling_requests").doc(requestId).get();
+  if (!snap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
+  const data = snap.data();
+
+  return res.json({
+    ok:            true,
+    paymentStatus: data.paymentStatus || "pending",
+    paid:          data.paymentStatus === "paid"
+  });
+}));
+
+// POST /therapy/webhook/pagamento — webhook Mercado Pago Therapy.
+// Configurar no painel MP Therapy: URL = ${BACKEND_BASE_URL}/therapy/webhook/pagamento.
+// Ao receber confirmação de pagamento, atualiza paymentStatus da solicitação
+// e cria registro de repasse pendente em therapy_payouts.
+router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
+  // Responde 200 antes de processar — MP retenta se demorar mais de 3s.
+  res.sendStatus(200);
+
+  const body      = req.body || {};
+  const type      = body.type || body.topic || null;
+  const paymentId = body.data?.id || body["data.id"] || body.id ||
+                    req.query["data.id"] || req.query.id || null;
+
+  if (type !== "payment" || !paymentId) return;
+
+  let payment;
+  try {
+    const { response, data } = await mercadoPagoFetchTherapy(
+      `https://api.mercadopago.com/v1/payments/${paymentId}`,
+      { method: "GET" }
+    );
+    if (!response.ok) {
+      logWarn("webhook_pagamento_mp_lookup_failed", { paymentId, status: response.status });
+      return;
+    }
+    payment = data;
+  } catch (err) {
+    logError("webhook_pagamento_fetch_error", err, { paymentId });
+    return;
+  }
+
+  if (payment.status !== "approved") {
+    logInfo("webhook_pagamento_nao_aprovado", { paymentId, status: payment.status });
+    return;
+  }
+
+  const requestId = String(payment.external_reference || "").trim();
+  if (!requestId) return;
+
+  const db = getDb();
+  const snap = await db.collection("therapy_scheduling_requests").doc(requestId).get();
+  if (!snap.exists) {
+    logWarn("webhook_pagamento_solicitacao_nao_encontrada", { requestId, paymentId });
+    return;
+  }
+  const reqData = snap.data();
+  if (reqData.paymentStatus === "paid") {
+    logInfo("webhook_pagamento_duplicado_ignorado", { requestId, paymentId });
+    return;
+  }
+
+  await db.collection("therapy_scheduling_requests").doc(requestId).update({
+    paymentStatus: "paid",
+    paymentId:     String(payment.id),
+    paymentPaidAt: Date.now(),
+    updatedAt:     admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // Repasse pendente — processado manualmente ou por automação futura.
+  const valorCentavos = reqData.valorConsulta || 6000;
+  await db.collection("therapy_payouts").doc(`pout_${requestId}`).set({
+    requestId,
+    therapistUid:   reqData.therapistUid,
+    therapistSlug:  reqData.therapistSlug,
+    patientName:    reqData.patientName,
+    paymentId:      String(payment.id),
+    valor:          valorCentavos,
+    status:         "pending",
+    createdAt:      admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  logInfo("pix_pagamento_confirmado", { requestId, paymentId: String(payment.id), valor: valorCentavos });
 }));
 
 // POST /public/leads/estudante — landing page pública: interessado no tier
