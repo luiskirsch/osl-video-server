@@ -2145,6 +2145,66 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
   });
 }));
 
+// GET /therapy/sessao/pre-join?c=CODE&t=TOKEN
+// Chamado pelo entrar.html antes de mostrar o botão "Entrar". Resolve o
+// código/token, verifica se a sessão tem pagamento pendente e retorna os
+// dados necessários para o modal PIX (sem expor dados sensíveis da sessão).
+router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  let joinToken = String(req.query?.t || "").trim();
+  const joinCode  = String(req.query?.c || "").trim();
+
+  if (!joinToken && joinCode) {
+    const resolved = await resolveJoinCode(joinCode);
+    if (!resolved) return sendError(res, 401, "JOIN_CODE_INVALIDO_OU_EXPIRADO");
+    joinToken = resolved;
+  }
+  if (!joinToken) return sendError(res, 400, "JOIN_TOKEN_OBRIGATORIO");
+
+  const verification = verifySignedToken(joinToken, ACCESS_TOKEN_SECRET);
+  if (!verification.valid) return sendError(res, 401, "JOIN_TOKEN_INVALIDO");
+  const payload = verification.payload;
+  if (payload.token_type !== "therapy_join") return sendError(res, 401, "JOIN_TOKEN_NAO_AUTORIZADO");
+
+  const db = getDb();
+  const sessionSnap = await db.collection("therapy_sessions").doc(payload.sessionId).get();
+  if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = sessionSnap.data();
+
+  // Sem scheduling request vinculado → sem cobrança (sessão criada manualmente)
+  if (!session.schedulingRequestId) {
+    return res.json({ ok: true, paymentRequired: false });
+  }
+
+  const reqSnap = await db.collection("therapy_scheduling_requests").doc(session.schedulingRequestId).get();
+  if (!reqSnap.exists) {
+    return res.json({ ok: true, paymentRequired: false });
+  }
+  const reqData = reqSnap.data();
+
+  // Sem paymentId → profissional não tem PIX configurado (fluxo legado)
+  if (!reqData.paymentId && reqData.paymentStatus !== "pending") {
+    return res.json({ ok: true, paymentRequired: false });
+  }
+
+  const paid = reqData.paymentStatus === "paid";
+
+  // Busca dados do profissional para o modal PIX
+  const therapistDoc = await db.collection("therapists").doc(session.therapistUid).get();
+  const therapist = therapistDoc.exists ? therapistDoc.data() : null;
+
+  return res.json({
+    ok: true,
+    paymentRequired: !paid,
+    paymentStatus:   reqData.paymentStatus || "pending",
+    requestId:       session.schedulingRequestId,
+    therapistSlug:   reqData.therapistSlug || "",
+    valor:           reqData.valorConsulta || 6000,
+    pixConfigured:   !!(therapist?.pixKey)
+  });
+}));
+
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/sessao/join
 // Paciente troca joinToken + nome por livekitToken. Sem auth Firebase.
