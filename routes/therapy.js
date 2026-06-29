@@ -9262,9 +9262,11 @@ router.get("/therapy/admin/repasses", asyncHandler(async (req, res) => {
   let q = db.collection("therapy_payouts");
   if (wantStatus !== "all") q = q.where("status", "==", wantStatus);
 
-  const snap = await q.orderBy("createdAt", "desc").limit(limitN).get();
+  // Sem orderBy no Firestore para evitar índice composto (status + createdAt).
+  // Ordenação feita em memória após fetch.
+  const snap = await q.limit(limitN).get();
 
-  const items = await Promise.all(snap.docs.map(async d => {
+  const items = (await Promise.all(snap.docs.map(async d => {
     const p = d.data();
     const therapistDoc = await db.collection("therapists").doc(p.therapistUid).get();
     const t = therapistDoc.exists ? therapistDoc.data() : null;
@@ -9284,7 +9286,7 @@ router.get("/therapy/admin/repasses", asyncHandler(async (req, res) => {
       completedBy:   p.completedBy || null,
       createdAt:     p.createdAt?.toMillis ? p.createdAt.toMillis() : null
     };
-  }));
+  }))).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   return res.json({ ok: true, total: items.length, items });
 }));
