@@ -5,19 +5,19 @@ const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
 const { ensureDb } = require("../services/firestore");
 const { mercadoPagoFetch } = require("../services/payments");
-const { generateExternalReference } = require("../services/auth");
+const { generateExternalReference, requireAdmin } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
-const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS } = require("../config");
+const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS, IS_PRODUCTION } = require("../config");
 const { t: i18nT, detectLocale } = require("../services/i18n");
 
 // Security #1: valida x-signature do Mercado Pago.
 // Template oficial: "id:<data.id>;request-id:<x-request-id>;ts:<ts>;"
 // HMAC-SHA256 com MP_WEBHOOK_SECRET (configurado no painel Mercado Pago).
-// Se secret não tiver sido configurado, NÃO bloqueia ainda — só loga warning.
-// Pra ativar enforcement: setar env MP_WEBHOOK_SECRET no Railway + flip
-// MP_WEBHOOK_REQUIRE_SIG=1.
-const MP_WEBHOOK_REQUIRE_SIG = String(process.env.MP_WEBHOOK_REQUIRE_SIG || "").trim() === "1";
+// Em produção, assinatura é sempre obrigatória — sem isso, qualquer um pode
+// forjar um webhook de "pagamento aprovado". Em staging fica opt-in via
+// MP_WEBHOOK_REQUIRE_SIG=1 pra não travar ambiente de teste sem o secret.
+const MP_WEBHOOK_REQUIRE_SIG = IS_PRODUCTION || String(process.env.MP_WEBHOOK_REQUIRE_SIG || "").trim() === "1";
 
 function verifyMercadoPagoSignature(req, paymentId) {
   if (!MP_WEBHOOK_SECRET) {
@@ -286,8 +286,8 @@ router.post("/webhook", asyncHandler(async (req, res) => {
   return res.sendStatus(200);
 }));
 
-// GET /teste-pagamento/:paymentId
-router.get("/teste-pagamento/:paymentId", asyncHandler(async (req, res) => {
+// GET /teste-pagamento/:paymentId — rota de debug, exige admin (vaza PII completa do MP)
+router.get("/teste-pagamento/:paymentId", requireAdmin, asyncHandler(async (req, res) => {
   const paymentId = String(req.params.paymentId || "").trim();
   if (!paymentId) return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");
 
@@ -296,8 +296,8 @@ router.get("/teste-pagamento/:paymentId", asyncHandler(async (req, res) => {
   return res.json({ ok: true, data });
 }));
 
-// GET /forcar-afiliado/:paymentId
-router.get("/forcar-afiliado/:paymentId", asyncHandler(async (req, res) => {
+// GET /forcar-afiliado/:paymentId — rota operacional, exige admin (aprova recompensa manualmente)
+router.get("/forcar-afiliado/:paymentId", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const paymentId = String(req.params.paymentId || "").trim();

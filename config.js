@@ -50,8 +50,11 @@ const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
 const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || "mailto:contato@espacopreludio.com.br";
 
-const LICENSE_SECRET      = process.env.LICENSE_SECRET      || "TROQUE_POR_UM_SEGREDO_FORTE_DA_LICENCA";
-const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "TROQUE_POR_UM_SEGREDO_FORTE_DE_ACESSO";
+// Sem default previsível: melhor recusar (fail-closed, ver signPayload/
+// verifySignedToken em services/auth.js) do que assinar tokens com um
+// segredo público no código-fonte.
+const LICENSE_SECRET      = process.env.LICENSE_SECRET      || "";
+const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
@@ -266,8 +269,10 @@ const TWILIO_AUTH_TOKEN     = process.env.TWILIO_AUTH_TOKEN     || "";
 // Fica vazio até a aprovação chegar — o serviço vira no-op enquanto não estiver configurado.
 const TWILIO_WHATSAPP_FROM  = process.env.TWILIO_WHATSAPP_FROM  || "";
 
-// Painel corporativo — JWT secret para autenticação de empresas (separado do Firebase)
-const EMPRESA_JWT_SECRET = process.env.EMPRESA_JWT_SECRET || "ep-empresa-painel-2026-change-in-prod";
+// Painel corporativo — JWT secret para autenticação de empresas (separado do
+// Firebase). Sem default previsível — ver fail-closed em gerarEmpresaToken/
+// verificarEmpresaToken (routes/therapy.js).
+const EMPRESA_JWT_SECRET = process.env.EMPRESA_JWT_SECRET || "";
 
 module.exports = {
   PORT,

@@ -21,6 +21,7 @@ function base64urlDecode(input) {
 }
 
 function signPayload(payload, secret) {
+  if (!secret) throw new Error("SECRET_NAO_CONFIGURADO");
   const encodedPayload = base64urlEncode(JSON.stringify(payload));
   const signature = crypto
     .createHmac("sha256", secret)
@@ -33,6 +34,7 @@ function signPayload(payload, secret) {
 }
 
 function verifySignedToken(token, secret) {
+  if (!secret) return { valid: false, error: "SECRET_NAO_CONFIGURADO" };
   if (!token || typeof token !== "string" || !token.includes(".")) {
     return { valid: false, error: "TOKEN_INVALIDO" };
   }
@@ -85,10 +87,21 @@ function getBearerToken(req) {
 
 // --- Middlewares ---
 
+function timingSafeStringEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  try {
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
 function requireGameAccess(req, res, next) {
   if (ADMIN_SECRET) {
     const adminKey = String(req.headers["x-admin-secret"] || "").trim();
-    if (adminKey && adminKey === ADMIN_SECRET) {
+    if (adminKey && timingSafeStringEqual(adminKey, ADMIN_SECRET)) {
       req.gameAccess = { token_type: "game_access", product: PRODUCT_ID, bypass: true };
       return next();
     }
@@ -113,8 +126,10 @@ function requireGameAccess(req, res, next) {
 
 function requireAdmin(req, res, next) {
   if (!ADMIN_SECRET) return sendError(res, 503, "ADMIN_NAO_CONFIGURADO");
-  const provided = String(req.body?.adminSecret || req.headers["x-admin-secret"] || "").trim();
-  if (!provided || provided !== ADMIN_SECRET) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
+  // Só header — secret em req.body fica sujeito a ferramentas de observabilidade
+  // (Sentry, APM) que costumam capturar o body em erros 4xx/5xx por padrão.
+  const provided = String(req.headers["x-admin-secret"] || "").trim();
+  if (!provided || !timingSafeStringEqual(provided, ADMIN_SECRET)) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
   next();
 }
 
@@ -145,7 +160,7 @@ function generateExternalReference() {
 module.exports = {
   base64urlEncode, base64urlDecode,
   signPayload, verifySignedToken,
-  getBearerToken,
+  getBearerToken, timingSafeStringEqual,
   requireGameAccess, requireAdmin, verifyFirebaseToken,
   generateLicenseCode, generateExternalReference
 };

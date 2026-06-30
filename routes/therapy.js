@@ -23,7 +23,7 @@ const { AccessToken } = require("livekit-server-sdk");
 const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
-const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken } = require("../services/auth");
+const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken, timingSafeStringEqual } = require("../services/auth");
 const { getIo } = require("../services/socketio");
 const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
 const {
@@ -37,7 +37,8 @@ const {
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
   MP_ACCESS_TOKEN_THERAPY, MP_WEBHOOK_SECRET_THERAPY,
   ASAAS_WEBHOOK_TOKEN,
-  BACKEND_BASE_URL
+  BACKEND_BASE_URL,
+  IS_PRODUCTION
 } = require("../config");
 const { mercadoPagoFetchTherapy } = require("../services/payments");
 const asaas = require("../services/asaas");
@@ -6395,6 +6396,31 @@ router.post("/therapy/profissional/plano/cancelar", asyncHandler(async (req, res
   return res.json({ ok: true });
 }));
 
+// Valida x-signature do Mercado Pago (mesmo template oficial usado em payments.js).
+// Em produção, exige secret configurado e assinatura válida — sem isso, qualquer
+// um conseguiria forjar/repetir um webhook de pagamento. Fora de produção, segue
+// best-effort (loga warning) pra não travar staging sem o secret configurado.
+function verifyTherapyMpSignature(req, dataId) {
+  if (!MP_WEBHOOK_SECRET_THERAPY) {
+    if (IS_PRODUCTION) return { ok: false, reason: "MP_WEBHOOK_SECRET_THERAPY_AUSENTE" };
+    logWarn("therapy_mp_webhook_secret_missing", { hint: "Setar MP_WEBHOOK_SECRET_THERAPY pra ativar verificação de assinatura" });
+    return { ok: true, verified: false };
+  }
+  const sigHeader = String(req.headers["x-signature"] || "");
+  const reqId     = String(req.headers["x-request-id"] || "");
+  if (!sigHeader || !reqId) return { ok: false, reason: "HEADERS_AUSENTES" };
+
+  const parts = Object.fromEntries(sigHeader.split(",").map(p => p.trim().split("=")));
+  const ts = parts.ts, v1 = parts.v1;
+  if (!ts || !v1) return { ok: false, reason: "SIG_FORMATO_INVALIDO" };
+
+  const template = `id:${dataId};request-id:${reqId};ts:${ts};`;
+  const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET_THERAPY).update(template).digest("hex");
+  let match = false;
+  try { match = crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v1, "hex")); } catch { match = false; }
+  return match ? { ok: true, verified: true } : { ok: false, reason: "SIG_INVALIDA" };
+}
+
 // POST /therapy/webhook/mp
 // MP avisa mudanças de preapproval/subscription. Buscamos detalhe na API
 // e atualizamos plano. Validação de assinatura conforme o Mercado Pago.
@@ -6407,26 +6433,12 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     req.query?.["data.id"] || req.body?.data?.id || req.query?.id || req.body?.id || ""
   ).trim();
 
-  // Validação de assinatura (best-effort — sem MP_WEBHOOK_SECRET_THERAPY, só loga warning)
-  if (MP_WEBHOOK_SECRET_THERAPY && dataId) {
-    try {
-      const sigHeader = String(req.headers["x-signature"] || "");
-      const reqId     = String(req.headers["x-request-id"] || "");
-      if (sigHeader && reqId) {
-        const parts = Object.fromEntries(sigHeader.split(",").map(p => p.trim().split("=")));
-        const ts = parts.ts, v1 = parts.v1;
-        if (ts && v1) {
-          const template = `id:${dataId};request-id:${reqId};ts:${ts};`;
-          const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET_THERAPY).update(template).digest("hex");
-          let match = false;
-          try { match = crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(v1, "hex")); } catch {}
-          if (!match) {
-            logError("therapy_mp_webhook_sig_invalid", new Error("SIG_INVALIDA"), { dataId });
-            return sendError(res, 401, "SIG_INVALIDA");
-          }
-        }
-      }
-    } catch (e) { logError("therapy_mp_webhook_sig_error", e); }
+  if (dataId) {
+    const sig = verifyTherapyMpSignature(req, dataId);
+    if (!sig.ok) {
+      logError("therapy_mp_webhook_sig_invalid", new Error(sig.reason || "SIG_INVALIDA"), { dataId });
+      return sendError(res, 401, "SIG_INVALIDA");
+    }
   }
 
   if (!topic.includes("preapproval")) {
@@ -9064,13 +9076,23 @@ router.get("/public/agendar/:requestId/status-pagamento", asyncHandler(async (re
 // Ao receber confirmação de pagamento, atualiza paymentStatus da solicitação
 // e cria registro de repasse pendente em therapy_payouts.
 router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
-  // Responde 200 antes de processar — MP retenta se demorar mais de 3s.
-  res.sendStatus(200);
-
   const body      = req.body || {};
   const type      = body.type || body.topic || null;
   const paymentId = body.data?.id || body["data.id"] || body.id ||
                     req.query["data.id"] || req.query.id || null;
+
+  // Valida assinatura ANTES de responder 200 — payload não confiável não deve
+  // nem disparar o lookup na API do MP.
+  if (paymentId) {
+    const sig = verifyTherapyMpSignature(req, String(paymentId).trim());
+    if (!sig.ok) {
+      logError("webhook_pagamento_sig_invalid", new Error(sig.reason || "SIG_INVALIDA"), { paymentId });
+      return res.status(401).json({ ok: false, error: "SIG_INVALIDA" });
+    }
+  }
+
+  // Responde 200 antes de processar — MP retenta se demorar mais de 3s.
+  res.sendStatus(200);
 
   if (type !== "payment" || !paymentId) return;
 
@@ -15707,21 +15729,34 @@ router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => 
 const { EMPRESA_JWT_SECRET } = require("../config");
 // crypto já importado no topo do arquivo
 
+// Sem isso, token de empresa fica não-configurado mas a rota seguiria assinando/
+// verificando com HMAC de chave vazia — fail-closed explícito.
+function ensureEmpresaAuthConfigured(res) {
+  if (!EMPRESA_JWT_SECRET) {
+    sendError(res, 503, "EMPRESA_AUTH_NAO_CONFIGURADO");
+    return false;
+  }
+  return true;
+}
+
 function hashSenha(senha, salt) {
   return crypto.createHmac("sha256", salt).update(senha).digest("hex");
 }
 function gerarSalt() { return crypto.randomBytes(16).toString("hex"); }
 
 function gerarEmpresaToken(empresaId) {
+  if (!EMPRESA_JWT_SECRET) throw new Error("SECRET_NAO_CONFIGURADO");
   const payload = Buffer.from(JSON.stringify({ empresaId, iat: Date.now() })).toString("base64url");
   const sig = crypto.createHmac("sha256", EMPRESA_JWT_SECRET).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
 function verificarEmpresaToken(token) {
+  if (!EMPRESA_JWT_SECRET) return null;
   try {
     const [payload, sig] = (token || "").split(".");
+    if (!payload || !sig) return null;
     const expected = crypto.createHmac("sha256", EMPRESA_JWT_SECRET).update(payload).digest("base64url");
-    if (sig !== expected) return null;
+    if (!timingSafeStringEqual(sig, expected)) return null;
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
     // Token válido por 7 dias
     if (Date.now() - data.iat > 7 * 24 * 3600 * 1000) return null;
@@ -15729,9 +15764,18 @@ function verificarEmpresaToken(token) {
   } catch { return null; }
 }
 
+// Security: 5 tentativas/15min/IP impede brute force da senha de empresa.
+const empresaLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true, legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EMPRESA_LOGIN", hint: "Aguarde 15 min antes de tentar de novo" }
+});
+
 // POST /empresa/login
-router.post("/empresa/login", asyncHandler(async (req, res) => {
+router.post("/empresa/login", empresaLoginLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  if (!ensureEmpresaAuthConfigured(res)) return;
   const email = String(req.body?.email || "").trim().toLowerCase();
   const senha = String(req.body?.senha || "").trim();
   if (!email || !senha) return sendError(res, 400, "CREDENCIAIS_OBRIGATORIAS");
@@ -15749,7 +15793,7 @@ router.post("/empresa/login", asyncHandler(async (req, res) => {
   if (!empresa.passwordHash || !empresa.passwordSalt) return sendError(res, 401, "SENHA_NAO_CONFIGURADA");
 
   const hash = hashSenha(senha, empresa.passwordSalt);
-  if (hash !== empresa.passwordHash) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
+  if (!timingSafeStringEqual(hash, empresa.passwordHash)) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
 
   // Atualiza lastLogin
   snap.docs[0].ref.update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
@@ -15765,6 +15809,7 @@ router.post("/empresa/login", asyncHandler(async (req, res) => {
 // PATCH /empresa/senha — empresa troca a própria senha
 router.patch("/empresa/senha", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  if (!ensureEmpresaAuthConfigured(res)) return;
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const decoded = verificarEmpresaToken(token);
@@ -15782,7 +15827,7 @@ router.patch("/empresa/senha", asyncHandler(async (req, res) => {
 
   const empresa = snap.data();
   const hashAtual = hashSenha(senhaAtual, empresa.passwordSalt);
-  if (hashAtual !== empresa.passwordHash) return sendError(res, 401, "SENHA_ATUAL_INCORRETA");
+  if (!timingSafeStringEqual(hashAtual, empresa.passwordHash)) return sendError(res, 401, "SENHA_ATUAL_INCORRETA");
 
   const novoSalt = gerarSalt();
   const novoHash = hashSenha(novaSenha, novoSalt);
@@ -15794,6 +15839,7 @@ router.patch("/empresa/senha", asyncHandler(async (req, res) => {
 // GET /empresa/dashboard — métricas agregadas e anônimas
 router.get("/empresa/dashboard", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  if (!ensureEmpresaAuthConfigured(res)) return;
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const decoded = verificarEmpresaToken(token);
