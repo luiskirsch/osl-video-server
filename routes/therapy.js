@@ -15727,6 +15727,7 @@ router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => 
 // ═════════════════════════════════════════════════════════════════════════
 
 const { EMPRESA_JWT_SECRET } = require("../config");
+const bcrypt = require("bcrypt");
 // crypto já importado no topo do arquivo
 
 // Sem isso, token de empresa fica não-configurado mas a rota seguiria assinando/
@@ -15739,10 +15740,20 @@ function ensureEmpresaAuthConfigured(res) {
   return true;
 }
 
-function hashSenha(senha, salt) {
-  return crypto.createHmac("sha256", salt).update(senha).digest("hex");
+// Hashing de senha: bcrypt (custo 12) — substitui HMAC-SHA256 legado.
+// Migração automática: hashes antigos (hex 64 chars) são re-hasheados no login.
+const BCRYPT_ROUNDS = 12;
+
+async function hashSenha(senha) {
+  return bcrypt.hash(senha, BCRYPT_ROUNDS);
 }
-function gerarSalt() { return crypto.randomBytes(16).toString("hex"); }
+
+async function verificarSenha(senha, hash) {
+  if (!hash) return false;
+  // Hash legado: HMAC-SHA256 produz hex de 64 chars; bcrypt começa com "$2"
+  if (!hash.startsWith("$2")) return false;
+  return bcrypt.compare(senha, hash);
+}
 
 function gerarEmpresaToken(empresaId) {
   if (!EMPRESA_JWT_SECRET) throw new Error("SECRET_NAO_CONFIGURADO");
@@ -15753,7 +15764,9 @@ function gerarEmpresaToken(empresaId) {
 function verificarEmpresaToken(token) {
   if (!EMPRESA_JWT_SECRET) return null;
   try {
-    const [payload, sig] = (token || "").split(".");
+    const parts = (token || "").split(".");
+    if (parts.length !== 2) return null;
+    const [payload, sig] = parts;
     if (!payload || !sig) return null;
     const expected = crypto.createHmac("sha256", EMPRESA_JWT_SECRET).update(payload).digest("base64url");
     if (!timingSafeStringEqual(sig, expected)) return null;
@@ -15790,10 +15803,26 @@ router.post("/empresa/login", empresaLoginLimiter, asyncHandler(async (req, res)
   const empresa = snap.docs[0].data();
   const empresaId = snap.docs[0].id;
 
-  if (!empresa.passwordHash || !empresa.passwordSalt) return sendError(res, 401, "SENHA_NAO_CONFIGURADA");
+  if (!empresa.passwordHash) return sendError(res, 401, "SENHA_NAO_CONFIGURADA");
 
-  const hash = hashSenha(senha, empresa.passwordSalt);
-  if (!timingSafeStringEqual(hash, empresa.passwordHash)) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
+  let senhaOk = false;
+  if (empresa.passwordHash.startsWith("$2")) {
+    // Hash bcrypt (padrão novo)
+    senhaOk = await bcrypt.compare(senha, empresa.passwordHash);
+  } else if (empresa.passwordSalt) {
+    // Hash HMAC-SHA256 legado: valida e migra pra bcrypt imediatamente
+    const legacyHash = crypto.createHmac("sha256", empresa.passwordSalt).update(senha).digest("hex");
+    if (timingSafeStringEqual(legacyHash, empresa.passwordHash)) {
+      senhaOk = true;
+      const novoHash = await bcrypt.hash(senha, BCRYPT_ROUNDS);
+      snap.docs[0].ref.update({
+        passwordHash: novoHash,
+        passwordSalt: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }).catch(() => {});
+    }
+  }
+  if (!senhaOk) return sendError(res, 401, "CREDENCIAIS_INVALIDAS");
 
   // Atualiza lastLogin
   snap.docs[0].ref.update({ lastLoginAt: admin.firestore.FieldValue.serverTimestamp() }).catch(() => {});
@@ -15826,12 +15855,25 @@ router.patch("/empresa/senha", asyncHandler(async (req, res) => {
   if (!snap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
 
   const empresa = snap.data();
-  const hashAtual = hashSenha(senhaAtual, empresa.passwordSalt);
-  if (!timingSafeStringEqual(hashAtual, empresa.passwordHash)) return sendError(res, 401, "SENHA_ATUAL_INCORRETA");
 
-  const novoSalt = gerarSalt();
-  const novoHash = hashSenha(novaSenha, novoSalt);
-  await ref.update({ passwordHash: novoHash, passwordSalt: novoSalt, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  // Verifica senha atual (suporta hash bcrypt e legado HMAC)
+  let senhaAtualOk = false;
+  if (empresa.passwordHash?.startsWith("$2")) {
+    senhaAtualOk = await bcrypt.compare(senhaAtual, empresa.passwordHash);
+  } else if (empresa.passwordSalt) {
+    const legacyHash = crypto.createHmac("sha256", empresa.passwordSalt).update(senhaAtual).digest("hex");
+    senhaAtualOk = timingSafeStringEqual(legacyHash, empresa.passwordHash);
+  }
+  if (!senhaAtualOk) return sendError(res, 401, "SENHA_ATUAL_INCORRETA");
+
+  const novoHash = await bcrypt.hash(novaSenha, BCRYPT_ROUNDS);
+  // passwordChangedAt invalida todos os tokens anteriores (fix 3)
+  await ref.update({
+    passwordHash: novoHash,
+    passwordSalt: admin.firestore.FieldValue.delete(),
+    passwordChangedAt: Date.now(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
 
   return res.json({ ok: true });
 }));
@@ -15852,6 +15894,11 @@ router.get("/empresa/dashboard", asyncHandler(async (req, res) => {
   const empresaSnap = await db.collection("therapy_empresas").doc(empresaId).get();
   if (!empresaSnap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
   const empresa = empresaSnap.data();
+
+  // Fix 3: invalida tokens emitidos antes da última troca de senha
+  if (empresa.passwordChangedAt && decoded.iat < empresa.passwordChangedAt) {
+    return sendError(res, 401, "TOKEN_INVALIDADO_TROCA_SENHA");
+  }
 
   // Colaboradores
   const colabSnap = await db.collection("therapy_colaboradores")
@@ -15938,13 +15985,13 @@ router.post("/therapy/admin/empresas/:id/definir-acesso", asyncHandler(async (re
   const ref = db.collection("therapy_empresas").doc(id);
   if (!(await ref.get()).exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
 
-  const salt = gerarSalt();
-  const hash = hashSenha(senhaPadrao, salt);
+  const hash = await bcrypt.hash(senhaPadrao, BCRYPT_ROUNDS);
 
   await ref.update({
     loginEmail,
     passwordHash: hash,
-    passwordSalt: salt,
+    passwordSalt: admin.firestore.FieldValue.delete(),
+    passwordChangedAt: Date.now(),
     senhaDefinidaEm: admin.firestore.FieldValue.serverTimestamp(),
     senhaDefinidaPor: adminAuth.email || adminAuth.uid,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()

@@ -22,17 +22,17 @@ curl https://osl-video-server-staging.up.railway.app/therapy/cid10?q=F32
 Os 4 secrets abaixo **já gerados** — só copiar/colar:
 
 ```
-ACCESS_TOKEN_SECRET=GERE_UM_SEGREDO_FORTE_E_UNICO
-LICENSE_SECRET=GERE_UM_SEGREDO_FORTE_E_UNICO
-ADMIN_SECRET=GERE_UM_SEGREDO_FORTE_E_UNICO
+ACCESS_TOKEN_SECRET=LeYLjDSPJE4LiG1RX2QsrdWnP9JBgaiX_F2MjvrH6wQNi47kaxquXGKt-OXrEXgC
+LICENSE_SECRET=vppbLu7IksNmbv3F_px3jauk-w8uSwK1FgGPT5_4LbrIoXunKPsj299qh97BBmiH
+ADMIN_SECRET=o4ESAyeYXJvW9PuQuD20nMtosb-9duZUypOEhgCKwHQ
 THERAPY_ADMIN_EMAILS=luishenriquekirsch@hotmail.com
 ```
 
 VAPID (push notifications) também já gerados:
 
 ```
-VAPID_PUBLIC_KEY=xxxxxxxx
-VAPID_PRIVATE_KEY=xxxxxxxxxx
+VAPID_PUBLIC_KEY=BF7kAGPLdTXbUCA8v9tNuv_JE9ONAOYIjr46YZWrEK7wUUKnNnMg-nnpo_CdFF3iSiAo2YTk2s67Rj7lKv79PHQ
+VAPID_PRIVATE_KEY=OTi5GyaszAWOEzVdcLXBuBMlBa2tkHNfuM7T6gNLpMA
 VAPID_SUBJECT=mailto:contato@espacopreludio.com.br
 ```
 
@@ -198,7 +198,7 @@ Depois de colar tudo no Railway, restart o serviço e roda:
 
 ```bash
 cd c:/Users/luish/osl-video-server
-export ADMIN_SECRET=GERE_UM_SEGREDO_FORTE_E_UNICO
+export ADMIN_SECRET=o4ESAyeYXJvW9PuQuD20nMtosb-9duZUypOEhgCKwHQ
 bash scripts/health-check.sh
 ```
 
