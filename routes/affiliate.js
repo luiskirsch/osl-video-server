@@ -4,6 +4,7 @@ const { logError } = require("../logger");
 const { asyncHandler, sendError, normalizeUid, normalizeEmail, formatFirestoreDate } = require("../utils");
 const { ensureDb, getDb } = require("../services/firestore");
 const { ensureAffiliateProfile } = require("../services/affiliate");
+const { verifyFirebaseToken } = require("../services/auth");
 const { FRONTEND_BASE_URL, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE } = require("../config");
 
 const router = express.Router();
@@ -29,13 +30,13 @@ function formatAffiliate(affiliate) {
 router.post("/afiliado/garantir", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
-  const uid   = normalizeUid(req.body?.uid);
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
+
   const email = normalizeEmail(req.body?.email);
   const nome  = String(req.body?.nome || "").trim().slice(0, 80);
 
-  if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
-
-  const affiliate = await ensureAffiliateProfile({ uid, email, nome });
+  const affiliate = await ensureAffiliateProfile({ uid: authUid, email, nome });
   return res.json({ ok: true, affiliate: formatAffiliate(affiliate) });
 }));
 
@@ -43,8 +44,12 @@ router.post("/afiliado/garantir", asyncHandler(async (req, res) => {
 router.get("/afiliado/perfil/:uid", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
+
   const uid = normalizeUid(req.params.uid);
   if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+  if (authUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   const db   = getDb();
   const snap = await db.collection("affiliates").doc(uid).get();
@@ -57,8 +62,12 @@ router.get("/afiliado/perfil/:uid", asyncHandler(async (req, res) => {
 router.get("/afiliado/historico/:uid", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
+
   const uid = normalizeUid(req.params.uid);
   if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+  if (authUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   const db = getDb();
 
@@ -109,8 +118,12 @@ router.get("/afiliado/historico/:uid", asyncHandler(async (req, res) => {
 router.get("/afiliado/saques/:uid", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
+
   const uid = normalizeUid(req.params.uid);
   if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+  if (authUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
   const db   = getDb();
   const snap = await db.collection("withdrawRequests").where("uid", "==", uid).orderBy("createdAt", "desc").limit(100).get();
@@ -132,14 +145,14 @@ router.get("/afiliado/saques/:uid", asyncHandler(async (req, res) => {
 router.post("/afiliado/pix", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
-  const uid    = normalizeUid(req.body?.uid);
-  const pixKey = String(req.body?.pixKey || "").trim().slice(0, 160);
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
 
-  if (!uid)    return sendError(res, 400, "UID_OBRIGATORIO");
+  const pixKey = String(req.body?.pixKey || "").trim().slice(0, 160);
   if (!pixKey) return sendError(res, 400, "PIX_OBRIGATORIO");
 
   const db = getDb();
-  await db.collection("affiliates").doc(uid).set({ pixKey, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await db.collection("affiliates").doc(authUid).set({ pixKey, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
   return res.json({ ok: true, pixKey });
 }));
 
@@ -147,8 +160,10 @@ router.post("/afiliado/pix", asyncHandler(async (req, res) => {
 router.post("/afiliado/solicitar-saque", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
-  const uid = normalizeUid(req.body?.uid);
-  if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
+  const authUid = await verifyFirebaseToken(req, res);
+  if (!authUid) return;
+
+  const uid = authUid;
 
   const db           = getDb();
   const affiliateRef = db.collection("affiliates").doc(uid);

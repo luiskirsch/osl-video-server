@@ -35,11 +35,14 @@ function signPayload(payload, secret) {
 
 function verifySignedToken(token, secret) {
   if (!secret) return { valid: false, error: "SECRET_NAO_CONFIGURADO" };
-  if (!token || typeof token !== "string" || !token.includes(".")) {
+  if (!token || typeof token !== "string") {
     return { valid: false, error: "TOKEN_INVALIDO" };
   }
-
-  const [encodedPayload, signature] = token.split(".");
+  const parts = token.split(".");
+  if (parts.length !== 2) {
+    return { valid: false, error: "TOKEN_INVALIDO" };
+  }
+  const [encodedPayload, signature] = parts;
 
   const expectedSignature = crypto
     .createHmac("sha256", secret)
@@ -70,7 +73,7 @@ function verifySignedToken(token, secret) {
     return { valid: false, error: "PAYLOAD_INVALIDO" };
   }
 
-  if (payload.exp && Date.now() > payload.exp) {
+  if (typeof payload.exp !== "number" || Date.now() > payload.exp) {
     return { valid: false, error: "TOKEN_EXPIRADO", payload };
   }
 
