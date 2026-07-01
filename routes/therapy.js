@@ -211,7 +211,7 @@ async function logAudit(event) {
     if (!db) return;
     await db.collection("therapy_audit").add({
       ...event,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      at: admin.firestore.FieldValue.serverTimestamp()
     });
   } catch (error) {
     logError("therapy_audit_failed", error, event);
@@ -6990,7 +6990,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
   // ─── Eventos recentes (audit) ───────────────────────────────────────
   const auditRaw = queries[3].status === "fulfilled" ? safeData(queries[3].value) : [];
   const eventos = auditRaw.slice(0, 20).map(e => ({
-    type: e.type || "?",
+    type: e.type || e.action || "?",
     at: toMs(e.at),
     therapistUid: e.therapistUid || null,
     detail: e.detail || e.preapprovalId || e.scheduledAt || null
@@ -7632,7 +7632,7 @@ router.post("/therapy/admin/empresa-pendentes/:uid/aprovar", asyncHandler(async 
 
   try {
     await db.collection("therapy_audit").add({
-      action: "empresa_aprovado",
+      type: "empresa_aprovado",
       therapistUid: targetUid,
       adminUid: adminAuth.uid,
       adminEmail: adminAuth.email || null,
@@ -7687,7 +7687,7 @@ router.post("/therapy/admin/empresa-pendentes/:uid/rejeitar", asyncHandler(async
 
   try {
     await db.collection("therapy_audit").add({
-      action: "empresa_rejeitado",
+      type: "empresa_rejeitado",
       therapistUid: targetUid,
       adminUid: adminAuth.uid,
       adminEmail: adminAuth.email || null,
