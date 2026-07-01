@@ -1,8 +1,9 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # curl pra HEALTHCHECK + ffmpeg pra converter audio da sessao -> wav 16kHz (Whisper)
-# node:20-slim é Debian (glibc) — necessário pra onnxruntime-node que o
+# node:22-slim é Debian (glibc) — necessário pra onnxruntime-node que o
 # @huggingface/transformers usa. Alpine (musl) nao tem ld-linux-x86-64.so.2.
+# node:22 também é requisito mínimo do firebase-admin >=14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ffmpeg \
   && rm -rf /var/lib/apt/lists/*

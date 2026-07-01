@@ -1,6 +1,22 @@
 const admin = require("firebase-admin");
+const { cert, getApps, initializeApp } = require("firebase-admin/app");
+const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getAuth } = require("firebase-admin/auth");
 const { logInfo, logWarn } = require("../logger");
 const { sendError, normalizeUid, normalizeEmail, buildDiscordAvatarUrl } = require("../utils");
+
+// Shim de compatibilidade: firebase-admin v14 removeu admin.firestore,
+// admin.credential e admin.auth. O código legado usa essas APIs em dezenas de
+// lugares — patcheamos o objeto admin para não precisar tocar em cada arquivo.
+if (!admin.firestore) {
+  admin.firestore = { FieldValue, Timestamp };
+}
+if (!admin.auth) {
+  admin.auth = () => getAuth();
+}
+if (!admin.credential) {
+  admin.credential = { cert };
+}
 
 // --- Inicialização do Firebase Admin ---
 
@@ -15,16 +31,16 @@ function parseServiceAccountFromEnv() {
 }
 
 function initFirebaseAdmin() {
-  if (admin.apps.length) return admin.firestore();
+  if (getApps().length) return getFirestore();
   const serviceAccount = parseServiceAccountFromEnv();
-  admin.initializeApp({
-    credential: admin.credential.cert({
+  const app = initializeApp({
+    credential: cert({
       projectId:   serviceAccount.project_id  || serviceAccount.projectId,
       clientEmail: serviceAccount.client_email || serviceAccount.clientEmail,
       privateKey:  serviceAccount.private_key
     })
   });
-  return admin.firestore();
+  return getFirestore(app);
 }
 
 let db = null;
@@ -175,7 +191,7 @@ async function isPassActive(collectionName, email) {
 // Aceita "Authorization: Bearer <token>"; verifica contra o projeto Firebase do server.
 async function requireFirebaseAuth(req, res, next) {
   try {
-    if (!admin.apps.length) {
+    if (!getApps().length) {
       return res.status(503).json({ ok: false, error: "FIREBASE_ADMIN_NAO_CONFIGURADO" });
     }
     const authHeader = String(req.headers.authorization || "");

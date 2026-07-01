@@ -5,7 +5,11 @@
   "main": "server.js",
   "type": "commonjs",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
+  },
+  "overrides": {
+    "ip-address": "^10.2.0",
+    "uuid": "^11.1.1"
   },
   "scripts": {
     "start": "node server.js",
@@ -15,12 +19,12 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
     "@huggingface/transformers": "^4.2.0",
-    "@sentry/node": "^8.45.0",
+    "@sentry/node": "^10.62.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.22.1",
     "express-rate-limit": "^8.4.1",
-    "firebase-admin": "^12.7.0",
+    "firebase-admin": "^14.1.0",
     "geoip-country": "^5.0.202605270000",
     "helmet": "^8.0.0",
     "livekit-server-sdk": "^2.15.0",
