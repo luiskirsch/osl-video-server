@@ -8004,6 +8004,77 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items, count: items.length });
 }));
 
+// GET /therapy/admin/sessoes — lista sessões com dados do profissional + duração
+// Query: ?status=all|completed|scheduled|in_progress|canceled  ?limit=50  ?search=nome
+router.get("/therapy/admin/sessoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "all").trim().toLowerCase();
+  const allowed = new Set(["all", "completed", "scheduled", "in_progress", "canceled"]);
+  if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
+
+  const search = String(req.query?.search || "").trim().toLowerCase();
+  const limitN = Math.min(parseInt(req.query?.limit || "100", 10) || 100, 500);
+
+  const db = getDb();
+  let q = db.collection("therapy_sessions").orderBy("scheduledAt", "desc").limit(limitN);
+  if (wantStatus !== "all") q = q.where("status", "==", wantStatus);
+
+  const snap = await q.get().catch(() => null);
+  if (!snap) return sendError(res, 500, "ERRO_BUSCA");
+
+  // Coleta UIDs únicos de terapeutas para lookup em batch
+  const therapistUids = [...new Set(snap.docs.map(d => d.data().therapistUid).filter(Boolean))];
+  const therapistMap = {};
+  if (therapistUids.length > 0) {
+    const chunks = [];
+    for (let i = 0; i < therapistUids.length; i += 30) chunks.push(therapistUids.slice(i, i + 30));
+    for (const chunk of chunks) {
+      const tSnap = await db.collection("therapists")
+        .where(admin.firestore.FieldPath.documentId(), "in", chunk).get().catch(() => null);
+      (tSnap?.docs || []).forEach(d => { therapistMap[d.id] = d.data(); });
+    }
+  }
+
+  let items = snap.docs.map(d => {
+    const s = d.data();
+    const t = therapistMap[s.therapistUid] || {};
+    const scheduledMs   = typeof s.scheduledAt === "number" ? s.scheduledAt : (s.scheduledAt?.toMillis?.() || null);
+    const joinedMs      = s.therapistJoinedAt?.toMillis?.() || null;
+    const completedMs   = s.completedAt?.toMillis?.() || null;
+    const duracaoMin    = (joinedMs && completedMs) ? Math.round((completedMs - joinedMs) / 60000) : null;
+
+    return {
+      id: d.id,
+      status: s.status || "unknown",
+      scheduledAt: scheduledMs,
+      duracaoMin,
+      therapistUid:         s.therapistUid || null,
+      therapistDisplayName: s.therapistDisplayName || t.displayName || "",
+      therapistEmail:       s.therapistEmail || t.email || null,
+      therapistEspecialidade: t.especialidade || null,
+      therapistConselho:    t.tipoConselho || null,
+      patientName:  s.patientName  || "",
+      patientEmail: s.patientEmail || null,
+      livekitRoom:  s.livekitRoom  || null,
+      demo: s.demo || false,
+    };
+  });
+
+  if (search) {
+    items = items.filter(i =>
+      (i.therapistDisplayName || "").toLowerCase().includes(search) ||
+      (i.patientName          || "").toLowerCase().includes(search) ||
+      (i.therapistEmail       || "").toLowerCase().includes(search) ||
+      (i.patientEmail         || "").toLowerCase().includes(search)
+    );
+  }
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
 // GET /therapy/admin/denuncias — lista denúncias de mensagens pendentes/todas.
 // Query: ?status=open|closed|all (default: open)
 router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
