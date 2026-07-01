@@ -1,4 +1,5 @@
 node_modules
+..bfg-report/
 .env
 .env.bak
 .env.bak*
