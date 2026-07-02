@@ -1,6 +1,6 @@
 const admin = require("firebase-admin");
 const { cert, getApps, initializeApp } = require("firebase-admin/app");
-const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue, Timestamp, FieldPath } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 const { logInfo, logWarn } = require("../logger");
 const { sendError, normalizeUid, normalizeEmail, buildDiscordAvatarUrl } = require("../utils");
@@ -9,7 +9,7 @@ const { sendError, normalizeUid, normalizeEmail, buildDiscordAvatarUrl } = requi
 // admin.credential e admin.auth. O código legado usa essas APIs em dezenas de
 // lugares — patcheamos o objeto admin para não precisar tocar em cada arquivo.
 if (!admin.firestore) {
-  admin.firestore = { FieldValue, Timestamp };
+  admin.firestore = { FieldValue, Timestamp, FieldPath };
 }
 if (!admin.auth) {
   admin.auth = () => getAuth();
