@@ -8075,6 +8075,30 @@ router.get("/therapy/admin/sessoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items, count: items.length });
 }));
 
+// DELETE /therapy/admin/sessoes — apaga sessões em lote
+// Body: { ids: ["id1","id2",...] }  (máx 100 por chamada)
+router.delete("/therapy/admin/sessoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const ids = req.body?.ids;
+  if (!Array.isArray(ids) || ids.length === 0) return sendError(res, 400, "IDS_OBRIGATORIO");
+  if (ids.length > 100) return sendError(res, 400, "LIMITE_100_POR_VEZ");
+
+  const db = getDb();
+  const batch = db.batch();
+  for (const id of ids) {
+    if (typeof id !== "string" || !id.trim()) continue;
+    batch.delete(db.collection("therapy_sessions").doc(id.trim()));
+  }
+  await batch.commit();
+
+  await logAudit({ type: "admin_delete_sessions", adminUid: adminAuth.uid, count: ids.length });
+
+  return res.json({ ok: true, deleted: ids.length });
+}));
+
 // POST /therapy/admin/sessoes/:id/encerrar — força encerramento de sessão órfã
 router.post("/therapy/admin/sessoes/:id/encerrar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
