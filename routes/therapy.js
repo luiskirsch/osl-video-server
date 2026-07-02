@@ -8075,6 +8075,34 @@ router.get("/therapy/admin/sessoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items, count: items.length });
 }));
 
+// POST /therapy/admin/sessoes/:id/encerrar — força encerramento de sessão órfã
+router.post("/therapy/admin/sessoes/:id/encerrar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const sessionId = String(req.params.id || "").trim();
+  if (!sessionId) return sendError(res, 400, "ID_OBRIGATORIO");
+
+  const db = getDb();
+  const snap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+
+  const s = snap.data();
+  if (s.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+
+  await snap.ref.update({
+    status: "completed",
+    completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    adminForceClosedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  await logAudit({ type: "admin_force_close_session", sessionId, adminUid: adminAuth.uid });
+
+  return res.json({ ok: true });
+}));
+
 // GET /therapy/admin/denuncias — lista denúncias de mensagens pendentes/todas.
 // Query: ?status=open|closed|all (default: open)
 router.get("/therapy/admin/denuncias", asyncHandler(async (req, res) => {
