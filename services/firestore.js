@@ -35,7 +35,7 @@ function initFirebaseAdmin() {
   if (getApps().length) return getFirestore();
   const serviceAccount = parseServiceAccountFromEnv();
   const projectId = serviceAccount.project_id || serviceAccount.projectId;
-  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.appspot.com`;
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`;
   const app = initializeApp({
     credential: cert({
       projectId,

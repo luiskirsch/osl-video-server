@@ -16254,7 +16254,7 @@ router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
     await admin.auth().updateUser(uid, { photoURL: url });
     return res.json({ ok: true, url });
   } catch (e) {
-    return sendError(res, 500, "ERRO_UPLOAD", e.message);
+    return sendError(res, 500, e.message || "ERRO_UPLOAD");
   }
 }));
 
