@@ -2,6 +2,7 @@ const admin = require("firebase-admin");
 const { cert, getApps, initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue, Timestamp, FieldPath } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
+const { getStorage } = require("firebase-admin/storage");
 const { logInfo, logWarn } = require("../logger");
 const { sendError, normalizeUid, normalizeEmail, buildDiscordAvatarUrl } = require("../utils");
 
@@ -33,12 +34,15 @@ function parseServiceAccountFromEnv() {
 function initFirebaseAdmin() {
   if (getApps().length) return getFirestore();
   const serviceAccount = parseServiceAccountFromEnv();
+  const projectId = serviceAccount.project_id || serviceAccount.projectId;
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.appspot.com`;
   const app = initializeApp({
     credential: cert({
-      projectId:   serviceAccount.project_id  || serviceAccount.projectId,
+      projectId,
       clientEmail: serviceAccount.client_email || serviceAccount.clientEmail,
       privateKey:  serviceAccount.private_key
-    })
+    }),
+    storageBucket,
   });
   return getFirestore(app);
 }
@@ -219,10 +223,15 @@ function requireEmailMatchesToken(req, res, next) {
   next();
 }
 
+function getStorageBucket() {
+  return getStorage().bucket();
+}
+
 module.exports = {
   getDb, ensureDb,
   saveDiscordLinkToUser, getUserProfileByUid, getAffiliateProfileByUid,
   saveLicenseRecord, claimOrValidateLicenseOwnership,
   requireFirebaseAuth, requireEmailMatchesToken,
-  isPrestige, isPassActive
+  isPrestige, isPassActive,
+  getStorageBucket,
 };

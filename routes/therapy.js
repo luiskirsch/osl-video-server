@@ -22,7 +22,7 @@ const { AccessToken } = require("livekit-server-sdk");
 
 const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
-const { ensureDb, getDb } = require("../services/firestore");
+const { ensureDb, getDb, getStorageBucket } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken, timingSafeStringEqual } = require("../services/auth");
 const { getIo } = require("../services/socketio");
 const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
@@ -16249,6 +16249,30 @@ router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
     uid, foto, updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
   return res.json({ ok: true });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// FOTO DE PERFIL
+// ═════════════════════════════════════════════════════════════════════════
+
+router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { base64, contentType } = req.body || {};
+  if (!base64 || !contentType) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+  if (!contentType.startsWith("image/")) return sendError(res, 400, "TIPO_INVALIDO");
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.length > 5 * 1024 * 1024) return sendError(res, 400, "IMAGEM_MUITO_GRANDE");
+  try {
+    const bucket = getStorageBucket();
+    const file = bucket.file(`profile_photos/${uid}`);
+    await file.save(buffer, { contentType, resumable: false });
+    await file.makePublic();
+    const url = `https://storage.googleapis.com/${bucket.name}/profile_photos/${uid}`;
+    return res.json({ ok: true, url });
+  } catch (e) {
+    return sendError(res, 500, "ERRO_UPLOAD", e.message);
+  }
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
