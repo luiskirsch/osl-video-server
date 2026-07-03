@@ -16262,8 +16262,10 @@ router.get("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
   if (!uid) return;
   const db = getDb();
   const snap = await db.collection("therapy_dependentes")
-    .where("uid", "==", uid).orderBy("createdAt", "asc").limit(20).get();
-  const dependentes = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt?.toMillis?.() || null }));
+    .where("uid", "==", uid).limit(20).get();
+  const dependentes = snap.docs
+    .map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt?.toMillis?.() || null }))
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   return res.json({ ok: true, dependentes });
 }));
 
