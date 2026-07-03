@@ -16288,6 +16288,24 @@ router.post("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, id: ref.id });
 }));
 
+router.put("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { nome, parentesco, dataNascimento, email } = req.body || {};
+  if (!nome || !parentesco || !dataNascimento) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+  const db  = getDb();
+  const ref = db.collection("therapy_dependentes").doc(req.params.id);
+  const doc = await ref.get();
+  if (!doc.exists || doc.data().uid !== uid) return sendError(res, 404, "NAO_ENCONTRADO");
+  await ref.update({
+    nome: String(nome).trim(), parentesco: String(parentesco).trim(),
+    dataNascimento: String(dataNascimento).trim(),
+    email: email ? String(email).trim().toLowerCase() : null,
+  });
+  return res.json({ ok: true });
+}));
+
 router.delete("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
