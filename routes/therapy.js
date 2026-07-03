@@ -16238,24 +16238,20 @@ router.get("/therapy/paciente/foto", asyncHandler(async (req, res) => {
 }));
 
 router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
   const { base64, contentType } = req.body || {};
   if (!base64 || !contentType) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
   if (!contentType.startsWith("image/")) return sendError(res, 400, "TIPO_INVALIDO");
-  const buffer = Buffer.from(base64, "base64");
-  if (buffer.length > 5 * 1024 * 1024) return sendError(res, 400, "IMAGEM_MUITO_GRANDE");
-  try {
-    const bucket = getStorageBucket();
-    const file = bucket.file(`profile_photos/${uid}`);
-    await file.save(buffer, { contentType, resumable: false });
-    await file.makePublic();
-    const url = `https://storage.googleapis.com/${bucket.name}/profile_photos/${uid}`;
-    await admin.auth().updateUser(uid, { photoURL: url });
-    return res.json({ ok: true, url });
-  } catch (e) {
-    return sendError(res, 500, e.message || "ERRO_UPLOAD");
-  }
+  const dataUrl = `data:${contentType};base64,${base64}`;
+  if (dataUrl.length > 700_000) return sendError(res, 400, "FOTO_MUITO_GRANDE");
+  const db = getDb();
+  await db.collection("therapy_app_profiles").doc(uid).set(
+    { uid, foto: dataUrl, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+    { merge: true }
+  );
+  return res.json({ ok: true, url: dataUrl });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
