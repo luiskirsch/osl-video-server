@@ -15402,6 +15402,112 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
   return res.json({ ok: true, id: colabRef.id, empresaNome: empresa.nome });
 }));
 
+// GET /public/empresa/verificar?codigo=slug — valida código de empresa (slug).
+// Público, sem auth. Usado pelo app mobile no cadastro de colaboradores.
+router.get("/public/empresa/verificar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const codigo = String(req.query?.codigo || "").trim().toLowerCase();
+  if (codigo.length < 4) return sendError(res, 400, "CODIGO_INVALIDO");
+
+  const snap = await getDb().collection("therapy_empresas")
+    .where("slug", "==", codigo)
+    .where("status", "==", "ativa")
+    .limit(1).get();
+
+  if (snap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+  const e = snap.docs[0].data();
+  return res.json({ ok: true, nome: e.nome, id: snap.docs[0].id });
+}));
+
+// POST /public/mobile/colaborador-registrar — registro de colaborador pelo app mobile.
+// Requer token Firebase no header Authorization.
+// Body: { codigoEmpresa, nome }
+// Cria/atualiza therapy_patient_accounts + therapy_colaboradores.
+router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const codigoEmpresa = String(req.body?.codigoEmpresa || "").trim().toLowerCase();
+  const nome          = String(req.body?.nome          || "").trim().slice(0, 80);
+
+  if (!codigoEmpresa) return sendError(res, 400, "CODIGO_EMPRESA_OBRIGATORIO");
+  if (!nome)          return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const db = getDb();
+
+  // Valida empresa
+  const empSnap = await db.collection("therapy_empresas")
+    .where("slug", "==", codigoEmpresa)
+    .where("status", "==", "ativa")
+    .limit(1).get();
+  if (empSnap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
+
+  const empresa   = empSnap.docs[0].data();
+  const empresaId = empSnap.docs[0].id;
+
+  if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
+    return sendError(res, 403, "LIMITE_COLABORADORES_ATINGIDO");
+  }
+
+  // Cria/atualiza patient account com info de empresa
+  const patRef = db.collection("therapy_patient_accounts").doc(uid);
+  const patDoc = await patRef.get();
+  const existingPat = patDoc.exists ? patDoc.data() : null;
+
+  const userRecord = await admin.auth().getUser(uid);
+  const email = (userRecord.email || "").toLowerCase();
+
+  await patRef.set({
+    uid,
+    displayName:  existingPat?.displayName  || nome,
+    role:         "patient",
+    consentLgpd:  true,
+    consentLgpdAt: existingPat?.consentLgpdAt || admin.firestore.FieldValue.serverTimestamp(),
+    empresaId,
+    empresaNome:  empresa.nome,
+    codigoEmpresa,
+    origem:       "mobile-colaborador",
+    e2eeSalt:     existingPat?.e2eeSalt     || null,
+    wrappedDEK:   existingPat?.wrappedDEK   || null,
+    wrappedDEKIv: existingPat?.wrappedDEKIv || null,
+    createdAt:    existingPat?.createdAt    || admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt:    admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  // Cria ou vincula registro de colaborador
+  const colabSnap = await db.collection("therapy_colaboradores")
+    .where("empresaId", "==", empresaId)
+    .where("email", "==", email)
+    .limit(1).get();
+
+  if (colabSnap.empty) {
+    await db.collection("therapy_colaboradores").add({
+      nome,
+      email,
+      empresaId,
+      empresaNome:        empresa.nome,
+      empresaSlug:        codigoEmpresa,
+      patientAccountUid:  uid,
+      status:             "ativo",
+      createdAt:          admin.firestore.FieldValue.serverTimestamp()
+    });
+    await empSnap.docs[0].ref.update({
+      totalColaboradores: admin.firestore.FieldValue.increment(1)
+    });
+  } else {
+    await colabSnap.docs[0].ref.update({
+      patientAccountUid: uid,
+      nome,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+
+  await logAudit({ type: "colaborador_registrado_mobile", uid, empresaId, empresaNome: empresa.nome });
+
+  return res.json({ ok: true, empresaNome: empresa.nome });
+}));
+
 // GET /therapy/admin/colaboradores?empresaId=&status=&q=
 router.get("/therapy/admin/colaboradores", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
