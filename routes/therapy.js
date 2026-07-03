@@ -16238,24 +16238,6 @@ router.get("/therapy/paciente/foto", asyncHandler(async (req, res) => {
 }));
 
 router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-  const foto = String(req.body?.foto || "").trim();
-  if (!foto.startsWith("data:image/")) return sendError(res, 400, "FOTO_INVALIDA");
-  if (foto.length > 500_000) return sendError(res, 400, "FOTO_MUITO_GRANDE"); // ~375KB base64
-  const db = getDb();
-  await db.collection("therapy_app_profiles").doc(uid).set({
-    uid, foto, updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-  return res.json({ ok: true });
-}));
-
-// ═════════════════════════════════════════════════════════════════════════
-// FOTO DE PERFIL
-// ═════════════════════════════════════════════════════════════════════════
-
-router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
   const { base64, contentType } = req.body || {};
@@ -16269,6 +16251,7 @@ router.post("/therapy/paciente/foto", asyncHandler(async (req, res) => {
     await file.save(buffer, { contentType, resumable: false });
     await file.makePublic();
     const url = `https://storage.googleapis.com/${bucket.name}/profile_photos/${uid}`;
+    await admin.auth().updateUser(uid, { photoURL: url });
     return res.json({ ok: true, url });
   } catch (e) {
     return sendError(res, 500, "ERRO_UPLOAD", e.message);
