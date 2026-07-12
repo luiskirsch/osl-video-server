@@ -4505,37 +4505,9 @@ router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
   return res.json({ ok: true, account: fresh });
 }));
 
-// GET /therapy/paciente/sessoes — sessões em que esta conta participou
-router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const account = await loadPatientAccount(uid);
-  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
-
-  const db = getDb();
-  const snap = await db.collection("therapy_sessions")
-    .where("patientAccountUid", "==", uid)
-    .limit(500)
-    .get();
-
-  const sessions = snap.docs
-    .map(d => {
-      const data = d.data();
-      return {
-        sessionId: data.sessionId,
-        therapistDisplayName: data.therapistDisplayName || "",
-        status: data.status,
-        scheduledAt: data.scheduledAt || null,
-        createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
-        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
-      };
-    })
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-
-  return res.json({ ok: true, sessions });
-}));
+// GET /therapy/paciente/sessoes — REMOVIDO (rota duplicada; implementação correta
+// está na seção "SESSÕES DO PACIENTE (app PWA)" abaixo, que busca por email/uid
+// e inclui scheduling_requests pendentes). Mantido como comentário pra rastreio.
 
 // POST /therapy/paciente/notas — salva nota cifrada do paciente
 router.post("/therapy/paciente/notas", asyncHandler(async (req, res) => {
@@ -16274,6 +16246,44 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
         therapistName: s.therapistName || s.displayName || null,
         especialidade: s.especialidade || null,
         therapistSlug: s.therapistSlug || s.publicSchedulingSlug || null,
+      });
+    });
+  }
+
+  // Inclui solicitações pendentes (therapy_scheduling_requests) que ainda não
+  // viraram sessão. Só status "pending" — aprovadas já geram therapy_sessions.
+  const reqSnap = await db.collection("therapy_scheduling_requests")
+    .where("patientEmail", "==", email)
+    .where("status", "==", "pending")
+    .limit(20)
+    .get().catch(() => null);
+
+  const pendingRequests = reqSnap?.docs || [];
+  if (pendingRequests.length > 0) {
+    // Busca nomes dos terapeutas em batch
+    const therapistUids = [...new Set(pendingRequests.map(d => d.data().therapistUid).filter(Boolean))];
+    const therapistMap = {};
+    if (therapistUids.length > 0) {
+      const tdocs = await Promise.all(therapistUids.map(u => db.collection("therapists").doc(u).get()));
+      tdocs.forEach(td => {
+        if (td.exists) therapistMap[td.id] = {
+          name: td.data().displayName || "",
+          especialidade: td.data().especialidade || ""
+        };
+      });
+    }
+    pendingRequests.forEach(d => {
+      if (seen.has(d.id)) return;
+      seen.add(d.id);
+      const r = d.data();
+      const tinfo = therapistMap[r.therapistUid] || {};
+      sessions.push({
+        sessionId:     d.id,
+        scheduledAt:   r.requestedSlot || null,
+        status:        "pending",
+        therapistName: tinfo.name || null,
+        especialidade: tinfo.especialidade || null,
+        therapistSlug: r.therapistSlug || null,
       });
     });
   }
