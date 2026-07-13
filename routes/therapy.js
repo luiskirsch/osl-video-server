@@ -16246,7 +16246,25 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
         therapistName: s.therapistName || s.displayName || null,
         especialidade: s.especialidade || null,
         therapistSlug: s.therapistSlug || s.publicSchedulingSlug || null,
+        therapistUid:  s.therapistUid || null,
       });
+    });
+  }
+
+  // Enriquece sessões sem nome do terapeuta buscando da coleção therapists
+  const missingName = sessions.filter(s => !s.therapistName && s.therapistUid);
+  if (missingName.length > 0) {
+    const uids = [...new Set(missingName.map(s => s.therapistUid))];
+    const tdocs = await Promise.all(uids.map(u => db.collection("therapists").doc(u).get()));
+    const tmap = {};
+    tdocs.forEach(td => {
+      if (td.exists) tmap[td.id] = { name: td.data().displayName || "", especialidade: td.data().especialidade || "" };
+    });
+    sessions.forEach(s => {
+      if (!s.therapistName && s.therapistUid && tmap[s.therapistUid]) {
+        s.therapistName = tmap[s.therapistUid].name || null;
+        if (!s.especialidade) s.especialidade = tmap[s.therapistUid].especialidade || null;
+      }
     });
   }
 
