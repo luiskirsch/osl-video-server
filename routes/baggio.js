@@ -147,28 +147,30 @@ tr:hover td{background:var(--bg)}
   <div class="view" id="v-compras">
     <div class="tb"><div><h2>Lista de Compras</h2><small id="csub"></small></div>
       <button class="btn btnp" onclick="printC()">&#9998; Imprimir lista</button></div>
+    <div class="cr2" id="achips"></div>
     <div class="card"><div class="tw"><table><thead><tr><th>Produto</th><th>Grupo</th><th style="text-align:right">Atual</th><th style="text-align:right">Mínimo</th><th style="text-align:right">Comprar</th><th>Urgência</th><th>Nível</th></tr></thead><tbody id="ctb"></tbody></table></div></div>
   </div>
 </main>
 <script>
 const API='/baggio';
-let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[];
+let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[],alertMode='all';
+var AMODES=['all','zerado','minimo'];
 function selectCat(i){cat=_CATS[i];renderE();}
 const M=v=>'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const H=h=>h?String(h).substring(0,5):'--';
-function st(p){if(p.pr_estoqueminimo>0){if(p.pr_estoqueatual<=0)return'cr';const r=p.pr_estoqueatual/p.pr_estoqueminimo;return r<=0.5?'cr':r<=1?'wn':'ok';}return p.pr_estoqueatual<=0?'wn':'ok';}
+function st(p){if(p.pr_estoqueminimo>0){if(p.pr_estoqueatual<=0)return'cr';const r=p.pr_estoqueatual/p.pr_estoqueminimo;return r<=0.5?'cr':r<=1?'wn':'ok';}return p.pr_estoqueatual<=0?'cr':'ok';}
 function bk(s){return '<span class="bk '+s+'">'+(s==='cr'?'CRÍTICO':s==='wn'?'ATENÇÃO':'OK')+'</span>';}
+function computeAlertas(estoque){return estoque.filter(function(p){if(alertMode==='zerado')return p.pr_estoqueatual<=0;if(alertMode==='minimo')return p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo;return p.pr_estoqueatual<=0||(p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo);});}
+function setAlertMode(i){alertMode=AMODES[i];D.alertas=computeAlertas(D.estoque);updateBadge();renderCur();}
 async function load(){
   try{
-    const[s,a,e,v]=await Promise.allSettled([
+    const[s,e,v]=await Promise.allSettled([
       fetch(API+'/api/stats').then(r=>r.json()),
-      fetch(API+'/api/alertas').then(r=>r.json()),
       fetch(API+'/api/estoque').then(r=>r.json()),
       fetch(API+'/api/vendas-hoje').then(r=>r.json()),
     ]);
     if(s.status==='fulfilled'&&!s.value.error)D.stats=s.value;
-    if(a.status==='fulfilled'&&Array.isArray(a.value))D.alertas=a.value;
-    if(e.status==='fulfilled'&&Array.isArray(e.value))D.estoque=e.value;
+    if(e.status==='fulfilled'&&Array.isArray(e.value)){D.estoque=e.value;D.alertas=computeAlertas(e.value);}
     if(v.status==='fulfilled'&&Array.isArray(v.value))D.vendas=v.value;
     document.getElementById('cdot').className='dot';
     document.getElementById('upd').textContent='Atualizado '+new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
@@ -209,7 +211,10 @@ function renderV(){
   document.getElementById('vtb').innerHTML=vs.map(function(v){return'<tr><td style="font-weight:600;color:var(--i3)">'+H(v.mg_hora)+'</td><td>'+(v.pr_descricao||v.mg_codebar||'—')+'</td><td style="color:var(--i3)">'+(v.pr_unidade||'—')+'</td><td class="nr">'+(+v.mg_quantidade||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--ok)">'+M(v.mg_valor)+'</td></tr>';}).join('')||'<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--i3)">Sem vendas hoje</td></tr>';
 }
 function renderC(){
-  document.getElementById('csub').textContent=D.alertas.length+' produto'+(D.alertas.length!==1?'s':'')+' abaixo do mínimo';
+  var _modes=[['all','Todos'],['zerado','Zerado/Negativo'],['minimo','Abaixo do mínimo']];
+  document.getElementById('achips').innerHTML=_modes.map(function(m,i){return'<button class="ck'+(alertMode===m[0]?' on':'')+'" onclick="setAlertMode('+i+')">'+ m[1]+'</button>';}).join('');
+  var _lbl=alertMode==='zerado'?'zerados/negativos':alertMode==='minimo'?'abaixo do mínimo':'em alerta';
+  document.getElementById('csub').textContent=D.alertas.length+' produto'+(D.alertas.length!==1?'s':'')+' '+_lbl;
   document.getElementById('ctb').innerHTML=D.alertas.map(function(p){var s=st(p);var pct=p.pr_estoqueminimo>0?Math.min(100,Math.max(0,Math.round(p.pr_estoqueatual/p.pr_estoqueminimo*100))):0;var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3)-p.pr_estoqueatual);return'<tr><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td class="nr" style="color:'+(s==='cr'?'var(--cr)':'var(--wn)')+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+p.pr_estoqueminimo+'</td><td class="nr" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</td><td>'+bk(s)+'</td><td><div style="display:flex;align-items:center;gap:6px"><div class="pb"><div class="pbf'+(s==='wn'?' w':'')+'" style="width:'+pct+'%"></div></div><span style="font-size:11px;color:var(--i3)">'+pct+'%</span></div></td></tr>';}).join('')||'<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--ok);font-weight:600">✓ Sem alertas</td></tr>';
 }
 function printC(){
