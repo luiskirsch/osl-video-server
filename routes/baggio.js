@@ -188,7 +188,7 @@ function computeAlertas(estoque){return estoque.filter(function(p){if(alertMode=
 function setAlertMode(i){alertMode=AMODES[i];alertCat='Todos';D.alertas=computeAlertas(D.estoque);updateBadge();renderCur();}
 function setAlertCat(i){alertCat=_ACATS[i];renderC();}
 function closeModal(){document.getElementById('prodModal').classList.remove('on');}
-function openProdIdx(i){var p=_CPRODS[i];openProd(p.pr_codigo,p.pr_descricao,p.pr_grupo||'',p);}
+function openProdIdx(i){var p=_CPRODS[i];openProd(p.pr_codebar,p.pr_descricao,p.pr_grupo||'',p);}
 async function openProd(cod,nome,grp,p){
   document.getElementById('mProd').textContent=nome;
   document.getElementById('mGrp').textContent=grp?'Gr.'+grp:'';
@@ -204,6 +204,8 @@ async function openProd(cod,nome,grp,p){
     document.getElementById('mBody').innerHTML=
       '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+d.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</b> '+d.pr_unidade+' · mín '+(d.pr_estoqueminimo||0)+'</span></div>'+
       '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug2.toFixed(0)+' '+d.pr_unidade+'</span></div>'+
+      (d.pr_precovenda?'<div class="mrow"><span class="mk">Preço venda</span><span class="mv">'+M(d.pr_precovenda)+'</span></div>':'')+
+      ((d.pr_vda7||d.pr_vda30)?'<div class="mrow"><span class="mk">Giro</span><span class="mv" style="color:var(--i3)">'+(d.pr_vda7?d.pr_vda7.toFixed(1)+' un/7d':'')+' '+(d.pr_vda30?' · '+d.pr_vda30.toFixed(1)+' un/30d':'')+'</span></div>':'')+
       '<hr class="msep">'+
       (d.fo_razaosocial?'<div class="mrow"><span class="mk">Fornecedor</span><span class="mv" style="font-weight:600">'+d.fo_razaosocial+'</span></div>':'')+
       (d.fo_contato?'<div class="mrow"><span class="mk">Contato</span><span class="mv">'+d.fo_contato+'</span></div>':'')+
