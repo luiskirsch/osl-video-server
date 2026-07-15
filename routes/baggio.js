@@ -200,19 +200,19 @@ async function openProd(cod,nome,grp,p){
     var d=await r.json();
     if(!d||d.error)throw new Error(d&&d.error||'resposta vazia');
     var sug2=Math.max(0,(d.pr_estoquemaximo||d.pr_estoqueminimo*3||10)-(+d.pr_estoqueatual||0));
-    var temFor=d.fo_razaosocial||d.fo_telefone||d.fo_email;
+    var nomeFor=d.fo_razaosocial||d.pr_nomefornecedor||'';
+    var temFor=nomeFor||d.fo_telefone||d.fo_email;
     document.getElementById('mBody').innerHTML=
       '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+d.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</b> '+d.pr_unidade+' · mín '+(d.pr_estoqueminimo||0)+'</span></div>'+
       '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug2.toFixed(0)+' '+d.pr_unidade+'</span></div>'+
       (d.pr_precovenda?'<div class="mrow"><span class="mk">Preço venda</span><span class="mv">'+M(d.pr_precovenda)+'</span></div>':'')+
       ((d.pr_vda7||d.pr_vda30)?'<div class="mrow"><span class="mk">Giro</span><span class="mv" style="color:var(--i3)">'+(d.pr_vda7?d.pr_vda7.toFixed(1)+' un/7d':'')+' '+(d.pr_vda30?' · '+d.pr_vda30.toFixed(1)+' un/30d':'')+'</span></div>':'')+
       '<hr class="msep">'+
-      (d.fo_razaosocial?'<div class="mrow"><span class="mk">Fornecedor</span><span class="mv" style="font-weight:600">'+d.fo_razaosocial+'</span></div>':'')+
+      (nomeFor?'<div class="mrow"><span class="mk">Fornecedor</span><span class="mv" style="font-weight:600">'+nomeFor+'</span></div>':'')+
       (d.fo_contato?'<div class="mrow"><span class="mk">Contato</span><span class="mv">'+d.fo_contato+'</span></div>':'')+
       (d.fo_telefone?'<div class="mrow"><span class="mk">Telefone</span><span class="mv"><a href="tel:'+d.fo_telefone+'" style="color:var(--nv);text-decoration:none;font-weight:600">'+d.fo_telefone+'</a></span></div>':'')+
-      (d.fo_fax?'<div class="mrow"><span class="mk">Fax</span><span class="mv">'+d.fo_fax+'</span></div>':'')+
       (d.fo_email?'<div class="mrow"><span class="mk">E-mail</span><span class="mv"><a href="mailto:'+d.fo_email+'" style="color:var(--nv);text-decoration:none">'+d.fo_email+'</a></span></div>':'')+
-      (!temFor?'<div style="padding:10px;text-align:center;color:var(--i3);font-size:12px">Fornecedor não cadastrado no sistema</div>':'');
+      (!temFor?'<div style="padding:10px;text-align:center;color:var(--i3);font-size:12px">Fornecedor não cadastrado</div>':'');
   }catch(e){
     document.getElementById('mBody').innerHTML=
       '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+p.pr_estoqueatual||0)+'</b> '+p.pr_unidade+'</span></div>'+
