@@ -198,7 +198,7 @@ async function openProd(cod,nome,grp,p){
   try{
     var r=await fetch(API+'/api/produto/'+encodeURIComponent(cod));
     var d=await r.json();
-    if(!d||d.error)throw new Error('sem dados');
+    if(!d||d.error)throw new Error(d&&d.error||'resposta vazia');
     var sug2=Math.max(0,(d.pr_estoquemaximo||d.pr_estoqueminimo*3||10)-(+d.pr_estoqueatual||0));
     var temFor=d.fo_razaosocial||d.fo_telefone||d.fo_email;
     document.getElementById('mBody').innerHTML=
@@ -217,7 +217,7 @@ async function openProd(cod,nome,grp,p){
     document.getElementById('mBody').innerHTML=
       '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+p.pr_estoqueatual||0)+'</b> '+p.pr_unidade+'</span></div>'+
       '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</span></div>'+
-      '<hr class="msep"><div class="mwarn">Endpoint <b>/api/produto</b> não encontrado no servidor Baggio.<br>Adicione o trecho de código no C:\\baggio-api\\server.js para ver o fornecedor.</div>';
+      '<hr class="msep"><div class="mwarn"><b>Erro:</b> '+e.message+'</div>';
   }
 }
 async function load(){
