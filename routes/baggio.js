@@ -98,6 +98,20 @@ tr:hover td{background:var(--bg)}
 .btnp{background:var(--nv);color:#fff}.btnp:hover{background:#223F72}
 .g2{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px}
 @media(prefers-color-scheme:dark){:root{--bg:#0D1520;--sf:#13202F;--ink:#E8EFF6;--i3:#4E6880;--ln:rgba(232,239,246,.08)}}
+.overlay{position:fixed;inset:0;background:rgba(13,27,42,.55);z-index:100;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity 160ms}
+.overlay.on{opacity:1;pointer-events:auto}
+.mbox{background:var(--sf);border-radius:14px;width:min(500px,92vw);box-shadow:0 12px 48px rgba(13,27,42,.25);padding:24px;max-height:90vh;overflow-y:auto}
+.mh{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;gap:12px}
+.mh h3{font-size:14px;font-weight:700;line-height:1.3}
+.mh small{font-size:11px;color:var(--i3);margin-top:3px;display:block}
+.mx{border:none;background:none;cursor:pointer;color:var(--i3);font-size:18px;padding:2px 4px;line-height:1;flex-shrink:0}
+.mx:hover{color:var(--ink)}
+.mf{display:flex;flex-direction:column;gap:9px}
+.mrow{display:flex;gap:10px;align-items:baseline}
+.mk{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--i3);font-weight:600;width:74px;flex-shrink:0}
+.mv{font-size:13px;flex:1}
+.msep{border:none;border-top:1px solid var(--ln);margin:6px 0}
+.mwarn{padding:10px 14px;background:#FEF3C7;border-radius:8px;font-size:12px;color:var(--wn);line-height:1.5}
 </style>
 </head>
 <body>
@@ -152,10 +166,19 @@ tr:hover td{background:var(--bg)}
     <div class="card"><div class="tw"><table><thead><tr><th>Produto</th><th>Grupo</th><th style="text-align:right">Atual</th><th style="text-align:right">Mínimo</th><th style="text-align:right">Comprar</th><th>Urgência</th><th>Nível</th></tr></thead><tbody id="ctb"></tbody></table></div></div>
   </div>
 </main>
+<div class="overlay" id="prodModal" onclick="if(event.target===this)closeModal()">
+  <div class="mbox">
+    <div class="mh">
+      <div><h3 id="mProd"></h3><small id="mGrp"></small></div>
+      <button class="mx" onclick="closeModal()">&#10005;</button>
+    </div>
+    <div class="mf" id="mBody"></div>
+  </div>
+</div>
 <script>
 const API='/baggio';
 let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[],alertMode='all',alertCat='Todos';
-var AMODES=['all','zerado','minimo'],_ACATS=[];
+var AMODES=['all','zerado','minimo'],_ACATS=[],_CPRODS=[];
 function selectCat(i){cat=_CATS[i];renderE();}
 const M=v=>'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const H=h=>h?String(h).substring(0,5):'--';
@@ -164,6 +187,37 @@ function bk(s){return '<span class="bk '+s+'">'+(s==='cr'?'CRÍTICO':s==='wn'?'A
 function computeAlertas(estoque){return estoque.filter(function(p){if(alertMode==='zerado')return p.pr_estoqueatual<=0;if(alertMode==='minimo')return p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo;return p.pr_estoqueatual<=0||(p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo);});}
 function setAlertMode(i){alertMode=AMODES[i];alertCat='Todos';D.alertas=computeAlertas(D.estoque);updateBadge();renderCur();}
 function setAlertCat(i){alertCat=_ACATS[i];renderC();}
+function closeModal(){document.getElementById('prodModal').classList.remove('on');}
+function openProdIdx(i){var p=_CPRODS[i];openProd(p.pr_codigo,p.pr_descricao,p.pr_grupo||'',p);}
+async function openProd(cod,nome,grp,p){
+  document.getElementById('mProd').textContent=nome;
+  document.getElementById('mGrp').textContent=grp?'Gr.'+grp:'';
+  document.getElementById('mBody').innerHTML='<div style="text-align:center;padding:16px;color:var(--i3);font-size:13px">Buscando fornecedor…</div>';
+  document.getElementById('prodModal').classList.add('on');
+  var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3||10)-(+p.pr_estoqueatual||0));
+  try{
+    var r=await fetch(API+'/api/produto/'+encodeURIComponent(cod));
+    var d=await r.json();
+    if(!d||d.error)throw new Error('sem dados');
+    var sug2=Math.max(0,(d.pr_estoquemaximo||d.pr_estoqueminimo*3||10)-(+d.pr_estoqueatual||0));
+    var temFor=d.fo_razaosocial||d.fo_telefone||d.fo_email;
+    document.getElementById('mBody').innerHTML=
+      '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+d.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</b> '+d.pr_unidade+' · mín '+(d.pr_estoqueminimo||0)+'</span></div>'+
+      '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug2.toFixed(0)+' '+d.pr_unidade+'</span></div>'+
+      '<hr class="msep">'+
+      (d.fo_razaosocial?'<div class="mrow"><span class="mk">Fornecedor</span><span class="mv" style="font-weight:600">'+d.fo_razaosocial+'</span></div>':'')+
+      (d.fo_contato?'<div class="mrow"><span class="mk">Contato</span><span class="mv">'+d.fo_contato+'</span></div>':'')+
+      (d.fo_telefone?'<div class="mrow"><span class="mk">Telefone</span><span class="mv"><a href="tel:'+d.fo_telefone+'" style="color:var(--nv);text-decoration:none;font-weight:600">'+d.fo_telefone+'</a></span></div>':'')+
+      (d.fo_fax?'<div class="mrow"><span class="mk">Fax</span><span class="mv">'+d.fo_fax+'</span></div>':'')+
+      (d.fo_email?'<div class="mrow"><span class="mk">E-mail</span><span class="mv"><a href="mailto:'+d.fo_email+'" style="color:var(--nv);text-decoration:none">'+d.fo_email+'</a></span></div>':'')+
+      (!temFor?'<div style="padding:10px;text-align:center;color:var(--i3);font-size:12px">Fornecedor não cadastrado no sistema</div>':'');
+  }catch(e){
+    document.getElementById('mBody').innerHTML=
+      '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+p.pr_estoqueatual||0)+'</b> '+p.pr_unidade+'</span></div>'+
+      '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</span></div>'+
+      '<hr class="msep"><div class="mwarn">Endpoint <b>/api/produto</b> não encontrado no servidor Baggio.<br>Adicione o trecho de código no C:\\baggio-api\\server.js para ver o fornecedor.</div>';
+  }
+}
 async function load(){
   try{
     const[s,e,v]=await Promise.allSettled([
@@ -220,7 +274,8 @@ function renderC(){
   var ps=alertCat==='Todos'?D.alertas:D.alertas.filter(function(p){return String(p.pr_grupo||'')===alertCat;});
   var _lbl=alertMode==='zerado'?'zerados/negativos':alertMode==='minimo'?'abaixo do mínimo':'em alerta';
   document.getElementById('csub').textContent=ps.length+' produto'+(ps.length!==1?'s':'')+' '+_lbl;
-  document.getElementById('ctb').innerHTML=ps.map(function(p){var s=st(p);var pct=p.pr_estoqueminimo>0?Math.min(100,Math.max(0,Math.round(p.pr_estoqueatual/p.pr_estoqueminimo*100))):0;var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3)-p.pr_estoqueatual);return'<tr><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td class="nr" style="color:'+(s==='cr'?'var(--cr)':'var(--wn)')+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+p.pr_estoqueminimo+'</td><td class="nr" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</td><td>'+bk(s)+'</td><td><div style="display:flex;align-items:center;gap:6px"><div class="pb"><div class="pbf'+(s==='wn'?' w':'')+'" style="width:'+pct+'%"></div></div><span style="font-size:11px;color:var(--i3)">'+pct+'%</span></div></td></tr>';}).join('')||'<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--ok);font-weight:600">✓ Sem alertas</td></tr>';
+  _CPRODS=ps;
+  document.getElementById('ctb').innerHTML=ps.map(function(p,i){var s=st(p);var pct=p.pr_estoqueminimo>0?Math.min(100,Math.max(0,Math.round(p.pr_estoqueatual/p.pr_estoqueminimo*100))):0;var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3)-p.pr_estoqueatual);return'<tr style="cursor:pointer" onclick="openProdIdx('+i+')"><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td class="nr" style="color:'+(s==='cr'?'var(--cr)':'var(--wn)')+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+p.pr_estoqueminimo+'</td><td class="nr" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</td><td>'+bk(s)+'</td><td><div style="display:flex;align-items:center;gap:6px"><div class="pb"><div class="pbf'+(s==='wn'?' w':'')+'" style="width:'+pct+'%"></div></div><span style="font-size:11px;color:var(--i3)">'+pct+'%</span></div></td></tr>';}).join('')||'<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--ok);font-weight:600">✓ Sem alertas</td></tr>';
 }
 function printC(){
   var html='<html><head><title>Lista Compras Baggio</title><style>body{font-family:system-ui;padding:20px;color:#111}h1{font-size:16px;margin-bottom:4px}p{color:#666;font-size:12px;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#888;padding:7px 10px;border-bottom:2px solid #eee;text-align:left}td{padding:8px 10px;border-bottom:1px solid #eee;font-size:12px}.c{padding:2px 7px;border-radius:99px;font-size:10px;font-weight:700}.cr{background:#fee2e2;color:#b91c1c}.wn{background:#fef3c7;color:#b45309}</style></head><body><h1>Lista de Compras — Supermercados Baggio</h1><p>'+new Date().toLocaleString('pt-BR')+' · '+D.alertas.length+' itens</p><table><thead><tr><th>Produto</th><th>Gr.</th><th>Atual</th><th>Mínimo</th><th>Comprar</th><th>Urgência</th></tr></thead><tbody>'+
