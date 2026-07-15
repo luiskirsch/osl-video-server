@@ -29,7 +29,8 @@ const HTML = `<!DOCTYPE html>
 <style>
 :root{--nv:#1A3B6E;--gd:#C4991F;--bg:#EEF1F6;--sf:#fff;--ink:#0D1B2A;--i3:#7A8EA3;--ln:rgba(13,27,42,.1);--ok:#0C7A45;--wn:#B45309;--cr:#B91C1C;--r:10px}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--ink);display:flex}
+html{height:100%;overflow:hidden}
+body{height:100%;width:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--ink);display:flex}
 #sb{width:212px;background:#0F2347;display:flex;flex-direction:column;flex-shrink:0}
 .brand{padding:20px 18px;border-bottom:1px solid rgba(255,255,255,.07)}
 .brand h1{font-size:21px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:-.01em}
