@@ -148,20 +148,22 @@ tr:hover td{background:var(--bg)}
     <div class="tb"><div><h2>Lista de Compras</h2><small id="csub"></small></div>
       <button class="btn btnp" onclick="printC()">&#9998; Imprimir lista</button></div>
     <div class="cr2" id="achips"></div>
+    <div class="cr2" id="agchips"></div>
     <div class="card"><div class="tw"><table><thead><tr><th>Produto</th><th>Grupo</th><th style="text-align:right">Atual</th><th style="text-align:right">Mínimo</th><th style="text-align:right">Comprar</th><th>Urgência</th><th>Nível</th></tr></thead><tbody id="ctb"></tbody></table></div></div>
   </div>
 </main>
 <script>
 const API='/baggio';
-let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[],alertMode='all';
-var AMODES=['all','zerado','minimo'];
+let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[],alertMode='all',alertCat='Todos';
+var AMODES=['all','zerado','minimo'],_ACATS=[];
 function selectCat(i){cat=_CATS[i];renderE();}
 const M=v=>'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const H=h=>h?String(h).substring(0,5):'--';
 function st(p){if(p.pr_estoqueminimo>0){if(p.pr_estoqueatual<=0)return'cr';const r=p.pr_estoqueatual/p.pr_estoqueminimo;return r<=0.5?'cr':r<=1?'wn':'ok';}return p.pr_estoqueatual<=0?'cr':'ok';}
 function bk(s){return '<span class="bk '+s+'">'+(s==='cr'?'CRÍTICO':s==='wn'?'ATENÇÃO':'OK')+'</span>';}
 function computeAlertas(estoque){return estoque.filter(function(p){if(alertMode==='zerado')return p.pr_estoqueatual<=0;if(alertMode==='minimo')return p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo;return p.pr_estoqueatual<=0||(p.pr_estoqueminimo>0&&p.pr_estoqueatual<p.pr_estoqueminimo);});}
-function setAlertMode(i){alertMode=AMODES[i];D.alertas=computeAlertas(D.estoque);updateBadge();renderCur();}
+function setAlertMode(i){alertMode=AMODES[i];alertCat='Todos';D.alertas=computeAlertas(D.estoque);updateBadge();renderCur();}
+function setAlertCat(i){alertCat=_ACATS[i];renderC();}
 async function load(){
   try{
     const[s,e,v]=await Promise.allSettled([
@@ -213,9 +215,12 @@ function renderV(){
 function renderC(){
   var _modes=[['all','Todos'],['zerado','Zerado/Negativo'],['minimo','Abaixo do mínimo']];
   document.getElementById('achips').innerHTML=_modes.map(function(m,i){return'<button class="ck'+(alertMode===m[0]?' on':'')+'" onclick="setAlertMode('+i+')">'+ m[1]+'</button>';}).join('');
+  _ACATS=['Todos',...new Set(D.alertas.map(function(p){return String(p.pr_grupo||'');}).filter(Boolean))];
+  document.getElementById('agchips').innerHTML=_ACATS.map(function(g,i){return'<button class="ck'+(alertCat===g?' on':'')+'" onclick="setAlertCat('+i+')">'+(g==='Todos'?'Todos':'Gr.'+g)+'</button>';}).join('');
+  var ps=alertCat==='Todos'?D.alertas:D.alertas.filter(function(p){return String(p.pr_grupo||'')===alertCat;});
   var _lbl=alertMode==='zerado'?'zerados/negativos':alertMode==='minimo'?'abaixo do mínimo':'em alerta';
-  document.getElementById('csub').textContent=D.alertas.length+' produto'+(D.alertas.length!==1?'s':'')+' '+_lbl;
-  document.getElementById('ctb').innerHTML=D.alertas.map(function(p){var s=st(p);var pct=p.pr_estoqueminimo>0?Math.min(100,Math.max(0,Math.round(p.pr_estoqueatual/p.pr_estoqueminimo*100))):0;var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3)-p.pr_estoqueatual);return'<tr><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td class="nr" style="color:'+(s==='cr'?'var(--cr)':'var(--wn)')+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+p.pr_estoqueminimo+'</td><td class="nr" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</td><td>'+bk(s)+'</td><td><div style="display:flex;align-items:center;gap:6px"><div class="pb"><div class="pbf'+(s==='wn'?' w':'')+'" style="width:'+pct+'%"></div></div><span style="font-size:11px;color:var(--i3)">'+pct+'%</span></div></td></tr>';}).join('')||'<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--ok);font-weight:600">✓ Sem alertas</td></tr>';
+  document.getElementById('csub').textContent=ps.length+' produto'+(ps.length!==1?'s':'')+' '+_lbl;
+  document.getElementById('ctb').innerHTML=ps.map(function(p){var s=st(p);var pct=p.pr_estoqueminimo>0?Math.min(100,Math.max(0,Math.round(p.pr_estoqueatual/p.pr_estoqueminimo*100))):0;var sug=Math.max(0,(p.pr_estoquemaximo||p.pr_estoqueminimo*3)-p.pr_estoqueatual);return'<tr><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td class="nr" style="color:'+(s==='cr'?'var(--cr)':'var(--wn)')+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+p.pr_estoqueminimo+'</td><td class="nr" style="font-weight:700;color:var(--nv)">'+sug.toFixed(0)+' '+p.pr_unidade+'</td><td>'+bk(s)+'</td><td><div style="display:flex;align-items:center;gap:6px"><div class="pb"><div class="pbf'+(s==='wn'?' w':'')+'" style="width:'+pct+'%"></div></div><span style="font-size:11px;color:var(--i3)">'+pct+'%</span></div></td></tr>';}).join('')||'<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--ok);font-weight:600">✓ Sem alertas</td></tr>';
 }
 function printC(){
   var html='<html><head><title>Lista Compras Baggio</title><style>body{font-family:system-ui;padding:20px;color:#111}h1{font-size:16px;margin-bottom:4px}p{color:#666;font-size:12px;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#888;padding:7px 10px;border-bottom:2px solid #eee;text-align:left}td{padding:8px 10px;border-bottom:1px solid #eee;font-size:12px}.c{padding:2px 7px;border-radius:99px;font-size:10px;font-weight:700}.cr{background:#fee2e2;color:#b91c1c}.wn{background:#fef3c7;color:#b45309}</style></head><body><h1>Lista de Compras — Supermercados Baggio</h1><p>'+new Date().toLocaleString('pt-BR')+' · '+D.alertas.length+' itens</p><table><thead><tr><th>Produto</th><th>Gr.</th><th>Atual</th><th>Mínimo</th><th>Comprar</th><th>Urgência</th></tr></thead><tbody>'+
