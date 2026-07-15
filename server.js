@@ -62,6 +62,7 @@ const affiliateRouter = require("./routes/affiliate");
 const adminRouter     = require("./routes/admin");
 const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
+const baggioRouter    = require("./routes/baggio");
 
 // --- App ---
 const app = express();
@@ -143,6 +144,7 @@ app.use(affiliateRouter);
 app.use(adminRouter);
 app.use(aiRouter);
 app.use(therapyRouter);
+app.use(baggioRouter);
 
 // --- 404 ---
 app.use((req, res) => {
