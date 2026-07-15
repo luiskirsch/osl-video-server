@@ -200,8 +200,15 @@ async function openProd(cod,nome,grp,p){
     var d=await r.json();
     if(!d||d.error)throw new Error(d&&d.error||'resposta vazia');
     var sug2=Math.max(0,(d.pr_estoquemaximo||d.pr_estoqueminimo*3||10)-(+d.pr_estoqueatual||0));
-    var nomeFor=d.fo_razaosocial||d.pr_nomefornecedor||'';
-    var temFor=nomeFor||d.fo_telefone||d.fo_email;
+    var nomeFor=d.fo_nome||d.fr_fantasia||d.pr_nomefornecedor||'';
+    var tel=d.fr_telefone&&d.fr_telefone.replace(/[^\d]/g,'').length>4?d.fr_telefone:'';
+    var tel2=d.fr_telefone2&&d.fr_telefone2.replace(/[^\d]/g,'').length>4?d.fr_telefone2:'';
+    var cel=d.fr_celular2&&d.fr_celular2.replace(/[^\d]/g,'').length>4?d.fr_celular2:'';
+    var cfone=d.fr_contato_fone&&d.fr_contato_fone.replace(/[^\d]/g,'').length>4?d.fr_contato_fone:'';
+    var ccel=d.fr_contato_celular&&d.fr_contato_celular.replace(/[^\d]/g,'').length>4?d.fr_contato_celular:'';
+    var email=d.fr_email&&d.fr_email.includes('@')?d.fr_email:'';
+    var local=d.fr_cidade?d.fr_cidade+(d.fr_estado?' — '+d.fr_estado:''):'';
+    var temFor=nomeFor||tel||email;
     document.getElementById('mBody').innerHTML=
       '<div class="mrow"><span class="mk">Estoque</span><span class="mv"><b style="color:var(--cr)">'+(+d.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</b> '+d.pr_unidade+' · mín '+(d.pr_estoqueminimo||0)+'</span></div>'+
       '<div class="mrow"><span class="mk">Comprar</span><span class="mv" style="font-weight:700;color:var(--nv)">'+sug2.toFixed(0)+' '+d.pr_unidade+'</span></div>'+
@@ -209,9 +216,11 @@ async function openProd(cod,nome,grp,p){
       ((d.pr_vda7||d.pr_vda30)?'<div class="mrow"><span class="mk">Giro</span><span class="mv" style="color:var(--i3)">'+(d.pr_vda7?d.pr_vda7.toFixed(1)+' un/7d':'')+' '+(d.pr_vda30?' · '+d.pr_vda30.toFixed(1)+' un/30d':'')+'</span></div>':'')+
       '<hr class="msep">'+
       (nomeFor?'<div class="mrow"><span class="mk">Fornecedor</span><span class="mv" style="font-weight:600">'+nomeFor+'</span></div>':'')+
-      (d.fo_contato?'<div class="mrow"><span class="mk">Contato</span><span class="mv">'+d.fo_contato+'</span></div>':'')+
-      (d.fo_telefone?'<div class="mrow"><span class="mk">Telefone</span><span class="mv"><a href="tel:'+d.fo_telefone+'" style="color:var(--nv);text-decoration:none;font-weight:600">'+d.fo_telefone+'</a></span></div>':'')+
-      (d.fo_email?'<div class="mrow"><span class="mk">E-mail</span><span class="mv"><a href="mailto:'+d.fo_email+'" style="color:var(--nv);text-decoration:none">'+d.fo_email+'</a></span></div>':'')+
+      (local?'<div class="mrow"><span class="mk">Cidade</span><span class="mv" style="color:var(--i3)">'+local+'</span></div>':'')+
+      (d.fr_contato?'<div class="mrow"><span class="mk">Contato</span><span class="mv">'+d.fr_contato+'</span></div>':'')+
+      (tel?'<div class="mrow"><span class="mk">Telefone</span><span class="mv"><a href="tel:'+tel+'" style="color:var(--nv);text-decoration:none;font-weight:600">'+tel+'</a>'+(tel2?' · <a href="tel:'+tel2+'" style="color:var(--nv);text-decoration:none">'+tel2+'</a>':'')+'</span></div>':'')+
+      (cel||cfone||ccel?'<div class="mrow"><span class="mk">Celular</span><span class="mv"><a href="tel:'+(cel||cfone||ccel)+'" style="color:var(--nv);text-decoration:none;font-weight:600">'+(cel||cfone||ccel)+'</a></span></div>':'')+
+      (email?'<div class="mrow"><span class="mk">E-mail</span><span class="mv"><a href="mailto:'+email+'" style="color:var(--nv);text-decoration:none">'+email+'</a></span></div>':'')+
       (!temFor?'<div style="padding:10px;text-align:center;color:var(--i3);font-size:12px">Fornecedor não cadastrado</div>':'');
   }catch(e){
     document.getElementById('mBody').innerHTML=
