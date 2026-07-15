@@ -143,7 +143,7 @@ tr:hover td{background:var(--bg)}
     <div class="sg" id="sg"></div>
     <div class="g2">
       <div class="card"><div class="ch"><span>Alertas de ruptura</span><button class="btn btng" style="padding:4px 10px;font-size:11px" onclick="nav('compras')">Ver todos</button></div><div id="dalerts"></div></div>
-      <div class="card"><div class="ch"><span>Saúde por grupo</span></div><div id="dcats"></div></div>
+      <div class="card"><div class="ch"><span>Saúde por grupo</span></div><div id="dcats" style="max-height:320px;overflow-y:auto"></div></div>
     </div>
     <div class="card"><div class="ch"><span>Últimas vendas do dia</span></div><div id="dsales"></div></div>
   </div>
@@ -258,7 +258,7 @@ function renderD(){
     '<div class="sc"><label>Alertas de ruptura</label><div class="v '+(D.alertas.length?'cr':'ok')+'">'+D.alertas.length+'</div><small>abaixo do mínimo</small></div>';
   document.getElementById('dalerts').innerHTML=D.alertas.slice(0,5).map(function(p){var s=st(p);return'<div class="ar '+s+'"><div class="ast"></div><div class="an"><strong>'+p.pr_descricao+'</strong><small>Grupo '+(p.pr_grupo||'—')+' · mín '+p.pr_estoqueminimo+' '+p.pr_unidade+'</small></div><div class="aq"><strong>'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:2})+'</strong>'+p.pr_unidade+'</div></div>';}).join('')||'<div style="padding:20px;text-align:center;color:var(--ok);font-size:13px;font-weight:600">✓ Sem alertas</div>';
   var grpNames=[...new Set(D.estoque.map(function(p){return String(p.pr_grupo||'');}).filter(Boolean))];
-  var grps=grpNames.map(function(g){var ps=D.estoque.filter(function(p){return String(p.pr_grupo)===g;});var pct=Math.round(ps.filter(function(p){return st(p)==='ok';}).length/ps.length*100);return{g:g,pct:pct};}).sort(function(a,b){return b.pct-a.pct;}).slice(0,7);
+  var grps=grpNames.map(function(g){var ps=D.estoque.filter(function(p){return String(p.pr_grupo)===g;});var pct=Math.round(ps.filter(function(p){return st(p)==='ok';}).length/ps.length*100);return{g:g,pct:pct};}).sort(function(a,b){return b.pct-a.pct;});
   document.getElementById('dcats').innerHTML=grps.map(function(item){var col=item.pct>80?'var(--ok)':item.pct>50?'var(--wn)':'var(--cr)';return'<div class="cbr"><div class="cbl">Gr.'+item.g+'</div><div class="cbt"><div class="cbf" style="width:'+item.pct+'%;background:'+col+'"></div></div><div class="cbp">'+item.pct+'%</div></div>';}).join('')||'<div style="padding:16px;color:var(--i3);font-size:12px;text-align:center">Sem dados</div>';
   document.getElementById('dsales').innerHTML=D.vendas.slice(0,8).map(function(v){return'<div class="slr"><div class="sld"></div><div class="sln">'+(v.pr_descricao||v.mg_codebar||'—')+'</div><div class="slv">'+M(v.mg_valor)+'</div><div class="slt">'+H(v.mg_hora)+'</div></div>';}).join('')||'<div style="padding:20px;text-align:center;color:var(--i3)">Sem vendas hoje</div>';
 }
