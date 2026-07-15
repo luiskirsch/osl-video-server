@@ -151,7 +151,8 @@ tr:hover td{background:var(--bg)}
 </main>
 <script>
 const API='/baggio';
-let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash';
+let D={stats:null,alertas:[],estoque:[],vendas:[]},cat='Todos',curV='dash',_CATS=[];
+function selectCat(i){cat=_CATS[i];renderE();}
 const M=v=>'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const H=h=>h?String(h).substring(0,5):'--';
 function st(p){if(p.pr_estoqueminimo>0){if(p.pr_estoqueatual<=0)return'cr';const r=p.pr_estoqueatual/p.pr_estoqueminimo;return r<=0.5?'cr':r<=1?'wn':'ok';}return p.pr_estoqueatual<=0?'wn':'ok';}
@@ -193,8 +194,9 @@ function renderD(){
 function cats(){return['Todos',...new Set(D.estoque.map(function(p){return String(p.pr_grupo||'');}).filter(Boolean))];}
 function renderE(){
   var q=(document.getElementById('esrch').value||'').toLowerCase();
+  _CATS=cats();
   var ps=D.estoque.filter(function(p){return(cat==='Todos'||String(p.pr_grupo)===cat)&&(!q||(p.pr_descricao||'').toLowerCase().includes(q));});
-  document.getElementById('echips').innerHTML=cats().map(function(c){return'<button class="ck'+(c===cat?' on':'')+'" onclick="cat=\''+c+'\';renderE()">'+(c==='Todos'?'Todos':'Gr.'+c)+'</button>';}).join('');
+  document.getElementById('echips').innerHTML=_CATS.map(function(c,i){return'<button class="ck'+(c===cat?' on':'')+'" onclick="selectCat('+i+')">'+(c==='Todos'?'Todos':'Gr.'+c)+'</button>';}).join('');
   document.getElementById('ecount').textContent=ps.length+' produto'+(ps.length!==1?'s':'');
   document.getElementById('etb').innerHTML=ps.map(function(p){var s=st(p);var col=s==='cr'?'var(--cr)':s==='wn'?'var(--wn)':'var(--ink)';return'<tr><td style="font-weight:600">'+p.pr_descricao+'</td><td style="color:var(--i3)">Gr.'+(p.pr_grupo||'—')+'</td><td style="color:var(--i3)">'+(p.pr_unidade||'—')+'</td><td class="nr" style="color:'+col+'">'+(+p.pr_estoqueatual||0).toLocaleString('pt-BR',{maximumFractionDigits:3})+'</td><td class="nr" style="color:var(--i3)">'+(p.pr_estoqueminimo>0?p.pr_estoqueminimo:'—')+'</td><td>'+(p.pr_estoqueminimo>0?bk(s):'<span style="color:var(--i3);font-size:11px">—</span>')+'</td></tr>';}).join('')||'<tr><td colspan="6" style="padding:24px;text-align:center;color:var(--i3)">Nenhum produto</td></tr>';
 }
