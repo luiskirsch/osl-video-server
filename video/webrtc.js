@@ -53,6 +53,22 @@ async function generateLiveKitToken(room, user) {
   return at.toJwt();
 }
 
+async function generateSpectatorToken(room, user) {
+  if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+    throw new Error("LIVEKIT_NAO_CONFIGURADO");
+  }
+
+  const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+    identity: `spec_${user}`,
+    name: `spec_${user}`,
+    ttl: 3600
+  });
+
+  at.addGrant({ roomJoin: true, room, canPublish: false, canPublishData: false, canSubscribe: true });
+
+  return at.toJwt();
+}
+
 // --- Gravação / Egress ---
 
 async function startRoomRecording(roomId, type, ref, email) {
@@ -262,7 +278,7 @@ async function stopRoomStreaming(roomId) {
 module.exports = {
   egressClient,
   recordingS3Config, recordingDownloadUrl,
-  generateLiveKitToken,
+  generateLiveKitToken, generateSpectatorToken,
   startRoomRecording, stopRoomRecording,
   startRoomStreaming, stopRoomStreaming, buildRtmpUrl
 };

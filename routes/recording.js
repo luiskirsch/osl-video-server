@@ -3,11 +3,20 @@ const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError, nowIso, normalizePathEmail } = require("../utils");
 const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, broadcastPanelUpdate } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
-const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken } = require("../video/webrtc");
+const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken } = require("../video/webrtc");
 const { getDb, isPrestige, isPassActive } = require("../services/firestore");
-const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET } = require("../config");
+const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL } = require("../config");
 
 const router = express.Router();
+
+// GET /spectate-token — token LiveKit subscriber-only para espectador (sem câmera/mic)
+router.get("/spectate-token", asyncHandler(async (req, res) => {
+  const { room, user } = req.query;
+  if (!room || !user) return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
+  if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
+  const token = await generateSpectatorToken(room, user);
+  return res.json({ ok: true, token, url: LIVEKIT_URL });
+}));
 
 // GET /token — gera token LiveKit para WebRTC
 router.get("/token", asyncHandler(async (req, res) => {
