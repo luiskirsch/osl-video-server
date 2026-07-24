@@ -4,7 +4,7 @@ const { nowIso } = require("../utils");
 // --- Constantes de TTL e limites ---
 const PANEL_ROOM_TTL_MS   = 1000 * 60 * 60 * 6; // 6h sem jogadores → remove
 const PANEL_PLAYER_TTL_MS = 1000 * 60 * 2;       // 2min sem heartbeat → remove jogador
-const INACTIVITY_CLOSE_MS = 1000 * 60 * 60;      // 1h sem heartbeat → fecha sala
+const INACTIVITY_CLOSE_MS = 1000 * 60 * 5;       // 5min sem heartbeat → fecha sala (heartbeat a cada 15s)
 const MAX_ROOM_PLAYERS    = 5;
 
 // --- Maps de estado em memória ---
