@@ -57,6 +57,8 @@ function verifyMercadoPagoSignature(req, paymentId) {
   return match ? { ok: true, verified: true } : { ok: false, reason: "SIG_INVALIDA" };
 }
 
+const { FieldValue } = require("firebase-admin/firestore");
+
 const router = express.Router();
 
 // Security #11: rate limit em /criar-pagamento pra evitar abuso de criação de cobranças MP
@@ -257,6 +259,27 @@ router.post("/webhook", asyncHandler(async (req, res) => {
           logInfo("streaming_pass_activated", { email: approvedEmail, expiresAt });
         } catch (err) {
           logError("streaming_pass_save_error", err, { email: approvedEmail });
+        }
+      }
+
+      // Moedas — credita automaticamente na conta do comprador
+      const catalogEntry = PRODUCT_CATALOG[productIdFromWebhook];
+      if (catalogEntry?.type === "coins" && catalogEntry?.coins && approvedEmail && db) {
+        try {
+          const usersSnap = await db.collection("users").where("email", "==", approvedEmail).limit(1).get();
+          if (!usersSnap.empty) {
+            await usersSnap.docs[0].ref.update({ coins: FieldValue.increment(catalogEntry.coins) });
+            logInfo("coins_credited", { email: approvedEmail, coins: catalogEntry.coins, ref });
+          } else {
+            // Usuário ainda não tem perfil — salva crédito pendente para aplicar no primeiro acesso
+            await db.collection("pending_coins").doc(approvedEmail).set({
+              email: approvedEmail, coins: FieldValue.increment(catalogEntry.coins),
+              paymentId: String(payment.id), ref, product: productIdFromWebhook, createdAt: Date.now()
+            }, { merge: true });
+            logWarn("coins_credit_user_not_found_pending", { email: approvedEmail, coins: catalogEntry.coins, ref });
+          }
+        } catch (err) {
+          logError("coins_credit_error", err, { email: approvedEmail });
         }
       }
 

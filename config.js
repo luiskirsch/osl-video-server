@@ -168,6 +168,27 @@ const PRODUCT_CATALOG = {
     description: "Efeitos visuais especiais na sala",
     price: 2.90,
     type: "cosmetic"
+  },
+  "coins_150": {
+    title: "O SextoLugar — Pacote Explorador",
+    description: "150 moedas para usar na loja do jogo",
+    price: 4.90,
+    type: "coins",
+    coins: 150
+  },
+  "coins_500": {
+    title: "O SextoLugar — Pacote Aliado",
+    description: "500 moedas para usar na loja do jogo",
+    price: 12.90,
+    type: "coins",
+    coins: 500
+  },
+  "coins_1500": {
+    title: "O SextoLugar — Pacote Mestre",
+    description: "1.500 moedas para usar na loja do jogo",
+    price: 29.90,
+    type: "coins",
+    coins: 1500
   }
 };
 
