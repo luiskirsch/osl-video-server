@@ -1670,6 +1670,7 @@
               ${ev.status==="running" ? `<button class="btn" onclick="emEndEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:#ff6b6b">■ Encerrar</button>` : ""}
               <button class="btn" onclick="emAbrirSala('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,204,255,.08);border:1px solid rgba(0,204,255,.3);color:#00ccff">🚪 Abrir Sala</button>
               <button class="btn" onclick="emDarIngresso('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(215,176,107,.1);border:1px solid rgba(215,176,107,.3);color:#d7b06b">🎫 Dar Ingresso</button>
+              <button class="btn" onclick="emResetarCheckins('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,165,0,.08);border:1px solid rgba(255,165,0,.3);color:#ffa500">🔄 Resetar</button>
               <button class="btn btnDanger" onclick="emDeleteEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Excluir</button>
             </div>
           </div>`).join("");
@@ -1750,6 +1751,17 @@
       try {
         await emApi(`/encontro/admin/eventos/${eventId}/dar-ingresso`, "POST", { email });
         alert(`Ingresso criado para ${email}!`);
+      } catch (err) {
+        alert("Erro: " + err.message);
+      }
+    }
+
+    async function emResetarCheckins(eventId) {
+      if (!confirm("Limpar TODOS os check-ins deste evento? Use antes de cada teste para evitar participantes duplicados.")) return;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}/resetar-checkins`, "POST");
+        alert("Check-ins resetados. Peça ao participante para recarregar a página e fazer check-in novamente.");
+        emLoadEvents();
       } catch (err) {
         alert("Erro: " + err.message);
       }

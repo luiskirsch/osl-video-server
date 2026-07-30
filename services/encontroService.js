@@ -374,6 +374,23 @@ async function forceEndEvent(eventId) {
   await endEvent(eventId);
 }
 
+async function resetCheckins(eventId) {
+  const db = getDb();
+  if (db) {
+    const snap = await db.collection("encontro_checkins")
+      .where("eventId", "==", eventId)
+      .get();
+    const batch = db.batch();
+    snap.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
+  }
+  if (activeEvent?.eventId === eventId) {
+    activeEvent.participants = new Map();
+    activeEvent.status = "waiting";
+  }
+  logInfo("encontro_checkins_reset", { eventId });
+}
+
 // ─── Match / interesse ────────────────────────────────────────────────────────
 
 async function voteInterest(eventId, voterUid, targetUid, liked) {
@@ -535,6 +552,7 @@ module.exports = {
   checkinParticipant,
   startEvent,
   forceEndEvent,
+  resetCheckins,
   voteInterest,
   getMyMatches,
   getActiveEventMemoryStatus,

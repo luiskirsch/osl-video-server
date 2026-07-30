@@ -7,7 +7,7 @@ const { ensureDb } = require("../services/firestore");
 const {
   createEvent, listEvents, getEvent, deleteEvent,
   verifyTicket, checkinParticipant,
-  startEvent, forceEndEvent,
+  startEvent, forceEndEvent, resetCheckins,
   voteInterest, getMyMatches,
   getActiveEventMemoryStatus, getAdminEventDetails,
 } = require("../services/encontroService");
@@ -209,6 +209,18 @@ router.post("/encontro/admin/eventos/:id/dar-ingresso", requireAdmin, asyncHandl
     return res.json({ ok: true, ticketId, email, eventId });
   } catch (err) {
     return sendError(res, 500, "ERRO_DAR_INGRESSO", { detail: err.message });
+  }
+}));
+
+// POST /encontro/admin/eventos/:id/resetar-checkins — limpa check-ins (testes)
+router.post("/encontro/admin/eventos/:id/resetar-checkins", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const eventId = String(req.params.id || "").trim();
+  try {
+    await resetCheckins(eventId);
+    return res.json({ ok: true });
+  } catch (err) {
+    return sendError(res, 500, "ERRO_RESETAR_CHECKINS", { detail: err.message });
   }
 }));
 
