@@ -283,6 +283,20 @@ router.post("/webhook", asyncHandler(async (req, res) => {
         }
       }
 
+      // Ingresso Encontro Marcado — salva ticket no Firestore
+      if (productIdFromWebhook === "encontro-ingresso" && approvedEmail && approvedRoomId && db) {
+        try {
+          const ticketId = `${approvedRoomId}_${approvedEmail}`;
+          await db.collection("encontro_tickets").doc(ticketId).set({
+            email: approvedEmail, eventId: approvedRoomId,
+            paymentRef: ref, paymentId: String(payment.id), approvedAt: Date.now()
+          }, { merge: true });
+          logInfo("encontro_ticket_activated", { email: approvedEmail, eventId: approvedRoomId, ref });
+        } catch (err) {
+          logError("encontro_ticket_save_error", err, { email: approvedEmail, eventId: approvedRoomId });
+        }
+      }
+
       if (db) {
         try {
           await approveReferralRewardFromPayment(payment);

@@ -63,6 +63,7 @@ const adminRouter     = require("./routes/admin");
 const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
 const baggioRouter    = require("./routes/baggio");
+const encontroRouter  = require("./routes/encontro");
 
 // --- App ---
 const app = express();
@@ -145,6 +146,7 @@ app.use(adminRouter);
 app.use(aiRouter);
 app.use(therapyRouter);
 app.use(baggioRouter);
+app.use(encontroRouter);
 
 // --- 404 ---
 app.use((req, res) => {

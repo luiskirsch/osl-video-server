@@ -757,6 +757,7 @@
                 <button class="navBtn" data-section="chat">Chat</button>
                 <button class="navBtn" data-section="video">Vídeo</button>
                 <button class="navBtn" data-section="system">Sistema</button>
+                <button class="navBtn" data-section="encontro" style="color:#e87b8f">♥ Encontro</button>
               </div>
             </div>
           </section>
@@ -892,6 +893,46 @@
               </div>
 
               <div class="systemList" id="systemContent"></div>
+            </div>
+          </section>
+
+          <!-- ── Encontro Marcado ─────────────────────────────────────────── -->
+          <section class="card panelSection" id="section-encontro">
+            <div class="cardInner">
+              <div class="panelHeader">
+                <div>
+                  <h2 style="color:#e87b8f">♥ Encontro Marcado</h2>
+                  <p>Gerenciar eventos de Speed Dating online.</p>
+                </div>
+              </div>
+
+              <div style="margin-bottom:18px">
+                <p class="label">Admin Secret</p>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input type="password" id="emSecret" placeholder="ADMIN_SECRET" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;flex:1" />
+                  <button class="btn" onclick="emLoadEvents()">Carregar</button>
+                </div>
+              </div>
+
+              <div style="margin-bottom:20px;padding:16px;background:rgba(232,123,143,.06);border:1px solid rgba(232,123,143,.2);border-radius:14px">
+                <p class="label" style="margin-bottom:12px">Criar Novo Evento</p>
+                <div style="display:grid;gap:10px">
+                  <div>
+                    <p class="label">Título (opcional)</p>
+                    <input type="text" id="emNewTitle" placeholder="Encontro Marcado — 01 de Agosto" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;width:100%" />
+                  </div>
+                  <div>
+                    <p class="label">Data e hora do evento</p>
+                    <input type="datetime-local" id="emNewDate" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;width:100%" />
+                  </div>
+                  <button class="btn" style="background:rgba(232,123,143,.15);border:1px solid rgba(232,123,143,.35);color:#e87b8f" onclick="emCreateEvent()">+ Criar Evento</button>
+                </div>
+              </div>
+
+              <p class="label" style="margin-bottom:10px">Eventos</p>
+              <div id="emEventsList" style="display:flex;flex-direction:column;gap:12px">
+                <p style="color:rgba(255,255,255,.3);font-size:13px">Clique em "Carregar" para listar eventos.</p>
+              </div>
             </div>
           </section>
 
@@ -1568,6 +1609,138 @@
     loadLogsSnapshot();
     connectLogStream();
     startAutoRefresh();
+
+    // ─── Encontro Marcado admin ───────────────────────────────────────────────
+    function emSecret() { return document.getElementById("emSecret").value.trim(); }
+
+    async function emApi(path, method = "GET", body = null) {
+      const sec = emSecret();
+      if (!sec) { alert("Digite o Admin Secret primeiro."); throw new Error("NO_SECRET"); }
+      const opts = {
+        method,
+        headers: { "Content-Type": "application/json", "x-admin-secret": sec },
+        cache: "no-store"
+      };
+      if (body) opts.body = JSON.stringify(body);
+      const res  = await fetch(SERVER + path, opts);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || `HTTP_${res.status}`);
+      return json;
+    }
+
+    function emStatusBadge(status) {
+      const map = {
+        upcoming: { label: "Agendado",   color: "#ffd166" },
+        waiting:  { label: "Aguardando", color: "#00ccff" },
+        running:  { label: "Ao vivo",    color: "#00ff9c" },
+        ended:    { label: "Encerrado",  color: "#888"    },
+      };
+      const s = map[status] || { label: status, color: "#888" };
+      return `<span style="background:${s.color}22;border:1px solid ${s.color}55;color:${s.color};padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">${s.label}</span>`;
+    }
+
+    function emFmtDate(ts) {
+      return new Date(ts).toLocaleString("pt-BR", { weekday:"short", day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" });
+    }
+
+    async function emLoadEvents() {
+      const list = document.getElementById("emEventsList");
+      list.innerHTML = '<p style="color:var(--muted);font-size:13px">Carregando...</p>';
+      try {
+        const data = await emApi("/encontro/admin/eventos");
+        if (!data.events?.length) {
+          list.innerHTML = '<p style="color:var(--muted);font-size:13px">Nenhum evento cadastrado.</p>';
+          return;
+        }
+        list.innerHTML = data.events.map(ev => `
+          <div style="background:rgba(232,123,143,.05);border:1px solid rgba(232,123,143,.18);border-radius:14px;padding:16px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px">
+              <div>
+                <div style="font-size:14px;font-weight:700;color:#e7fff7;margin-bottom:4px">${ev.title}</div>
+                <div style="font-size:12px;color:var(--muted)">${emFmtDate(ev.scheduledAt)}</div>
+              </div>
+              ${emStatusBadge(ev.status)}
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+              <span style="font-size:12px;color:var(--muted)">ID: <code style="color:#e87b8f;font-family:monospace">${ev.eventId}</code></span>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn" onclick="emEventDetails('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Ver detalhes</button>
+              ${ev.status==="waiting" ? `<button class="btn" onclick="emStartEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,255,156,.12);border:1px solid rgba(0,255,156,.3);color:#00ff9c">▶ Iniciar</button>` : ""}
+              ${ev.status==="running" ? `<button class="btn" onclick="emEndEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:#ff6b6b">■ Encerrar</button>` : ""}
+              <button class="btn btnDanger" onclick="emDeleteEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Excluir</button>
+            </div>
+          </div>`).join("");
+      } catch (err) {
+        list.innerHTML = `<p style="color:var(--danger);font-size:13px">Erro: ${err.message}</p>`;
+      }
+    }
+
+    async function emCreateEvent() {
+      const title = document.getElementById("emNewTitle").value.trim();
+      const dt    = document.getElementById("emNewDate").value;
+      if (!dt) { alert("Selecione a data e hora do evento."); return; }
+      const scheduledAt = new Date(dt).getTime();
+      if (!scheduledAt || scheduledAt < Date.now()) { alert("Data inválida ou no passado."); return; }
+      try {
+        await emApi("/encontro/admin/eventos", "POST", { title: title || null, scheduledAt });
+        document.getElementById("emNewTitle").value = "";
+        document.getElementById("emNewDate").value  = "";
+        alert("Evento criado com sucesso!");
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro ao criar evento: " + err.message);
+      }
+    }
+
+    async function emEventDetails(eventId) {
+      try {
+        const data = await emApi(`/encontro/admin/eventos/${eventId}`);
+        const ev   = data.event;
+        alert(
+          `${ev.title}\n` +
+          `Status: ${ev.status}\n` +
+          `Ingressos vendidos: ${ev.ticketCount}\n` +
+          `Check-ins: ${ev.checkedIn} (${ev.men} homens / ${ev.women} mulheres)\n` +
+          `Rodada atual: ${ev.currentRound} / ${ev.totalRounds}`
+        );
+      } catch (err) {
+        alert("Erro: " + err.message);
+      }
+    }
+
+    async function emStartEvent(eventId) {
+      if (!confirm("Iniciar o evento agora? Todos os participantes com check-in serão pareados.")) return;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}/iniciar`, "POST");
+        alert("Evento iniciado! As rodadas começaram.");
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro ao iniciar: " + err.message);
+      }
+    }
+
+    async function emEndEvent(eventId) {
+      if (!confirm("Encerrar o evento agora? Os participantes irão para a tela de votação.")) return;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}/encerrar`, "POST");
+        alert("Evento encerrado.");
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro ao encerrar: " + err.message);
+      }
+    }
+
+    async function emDeleteEvent(eventId) {
+      if (!confirm(`Excluir evento ${eventId}? Esta ação não pode ser desfeita.`)) return;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}`, "DELETE");
+        alert("Evento excluído.");
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro ao excluir: " + err.message);
+      }
+    }
   </script>
 </body>
 </html>

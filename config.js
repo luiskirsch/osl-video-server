@@ -189,6 +189,12 @@ const PRODUCT_CATALOG = {
     price: 29.90,
     type: "coins",
     coins: 1500
+  },
+  "encontro-ingresso": {
+    title: "O SextoLugar — Encontro Marcado",
+    description: "Ingresso para o Speed Dating online quinzenal — 4 minutos com cada parceiro(a)",
+    price: 15.00,
+    type: "event_ticket"
   }
 };
 
