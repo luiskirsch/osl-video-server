@@ -17,7 +17,19 @@ function generateEventId() {
 
 // Algoritmo clássico de speed dating:
 // homens ficam fixos, mulheres rotacionam por roundIndex
-function computePairsForRound(participants, roundIndex) {
+function computePairsForRound(participants, roundIndex, forceMode = false) {
+  if (forceMode) {
+    // Modo teste: pareia sequencialmente ignorando gênero
+    const all = [...participants.values()];
+    const pairs = [];
+    for (let i = 0; i + 1 < all.length; i += 2) {
+      pairs.push({
+        uid1: all[i].uid,     name1: all[i].name,
+        uid2: all[i+1].uid,   name2: all[i+1].name,
+      });
+    }
+    return pairs;
+  }
   const men   = [...participants.values()].filter(p => p.gender === "M");
   const women = [...participants.values()].filter(p => p.gender === "F");
   const n     = Math.min(men.length, women.length);
@@ -145,6 +157,7 @@ async function checkinParticipant(eventId, uid, email, name, gender) {
       participants:   await loadCheckins(db, eventId),
       currentRound:   -1,
       totalRounds:    0,
+      forceMode:      false,
       allRoundPairs:  [],
       currentPairs:   [],
       roundStartedAt: null,
@@ -201,6 +214,7 @@ async function startEvent(eventId, force = false) {
       participants:   await loadCheckins(db, eventId),
       currentRound:   -1,
       totalRounds:    0,
+      forceMode:      false,
       allRoundPairs:  [],
       currentPairs:   [],
       roundStartedAt: null,
@@ -212,20 +226,22 @@ async function startEvent(eventId, force = false) {
     logInfo("encontro_participants_reloaded", { eventId, count: activeEvent.participants.size });
   }
 
-  let men   = [...activeEvent.participants.values()].filter(p => p.gender === "M");
-  let women = [...activeEvent.participants.values()].filter(p => p.gender === "F");
-  if (men.length === 0 || women.length === 0) {
-    if (!force) throw new Error("PARTICIPANTES_INSUFICIENTES");
-    // Modo teste: injeta bot do gênero faltante para completar 1 par
-    if (men.length === 0)   men   = [{ uid: "bot_m", name: "Bot M", gender: "M" }];
-    if (women.length === 0) women = [{ uid: "bot_f", name: "Bot F", gender: "F" }];
-    for (const bot of [...men, ...women]) {
-      if (bot.uid.startsWith("bot_")) activeEvent.participants.set(bot.uid, bot);
-    }
+  const all   = [...activeEvent.participants.values()];
+  const men   = all.filter(p => p.gender === "M");
+  const women = all.filter(p => p.gender === "F");
+
+  if (force) {
+    // Modo teste: pareia qualquer pessoa com qualquer pessoa, ignora gênero
+    if (all.length < 2) throw new Error("PARTICIPANTES_INSUFICIENTES");
+    activeEvent.forceMode   = true;
+    activeEvent.totalRounds = 1; // 1 rodada de teste é suficiente
+  } else {
+    if (men.length === 0 || women.length === 0) throw new Error("PARTICIPANTES_INSUFICIENTES");
+    activeEvent.forceMode   = false;
+    activeEvent.totalRounds = Math.min(men.length, women.length);
   }
 
-  activeEvent.totalRounds = Math.min(men.length, women.length);
-  activeEvent.status      = "running";
+  activeEvent.status = "running";
 
   const db = getDb();
   if (db) {
@@ -249,7 +265,7 @@ async function advanceToNextRound() {
     return;
   }
 
-  const pairs = computePairsForRound(activeEvent.participants, currentRound);
+  const pairs = computePairsForRound(activeEvent.participants, currentRound, activeEvent.forceMode);
   activeEvent.currentPairs    = pairs;
   activeEvent.roundStartedAt  = Date.now();
   activeEvent.allRoundPairs.push(pairs);
