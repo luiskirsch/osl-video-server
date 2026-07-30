@@ -1,4 +1,5 @@
 const express = require("express");
+const path    = require("path");
 const rateLimit = require("express-rate-limit");
 const admin  = require("firebase-admin");
 const { logInfo, logWarn } = require("../logger");
@@ -185,5 +186,12 @@ router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (r
   }
   return res.json({ ok: true, env: status, nodeEnv: process.env.NODE_ENV, appEnv: process.env.APP_ENV });
 }));
+
+// GET /system-core — serve o painel admin como HTML estático.
+// Sem auth no arquivo em si (é só HTML); as chamadas de API dentro dele
+// requerem ADMIN_SECRET — segurança está nas rotas, não no acesso ao HTML.
+router.get("/system-core", (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "admin.html"));
+});
 
 module.exports = router;
