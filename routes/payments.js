@@ -121,18 +121,20 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
       failure: `${FRONTEND_BASE_URL}/erro.html`,
       pending: `${FRONTEND_BASE_URL}/pendente.html`
     },
-    auto_return: "approved",
-    statement_descriptor: "SEXTO LUGAR"
+    auto_return: "approved"
   };
 
   const { response, data } = await mercadoPagoFetch("https://api.mercadopago.com/checkout/preferences", { method: "POST", body: JSON.stringify(body) });
 
   if (!response.ok) {
+    logWarn("mp_criar_pagamento_falhou", { status: response.status, productId, message: data?.message, cause: data?.cause, error: data?.error });
+    const cause = data?.cause?.[0];
+    const detail = cause ? `[${cause.code}] ${cause.description}` : (data?.message || data?.error || "");
     return res.status(500).json({
       ok: false,
       error: "ERRO_MP_CRIAR_PAGAMENTO",
       details: data,
-      message: data?.message || data?.error || data?.cause?.[0]?.description || data?.cause?.[0]?.code || "Falha ao criar preferência no Mercado Pago"
+      message: detail || "Falha ao criar preferência no Mercado Pago"
     });
   }
 
