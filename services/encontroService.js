@@ -118,7 +118,7 @@ async function checkinParticipant(eventId, uid, email, name, gender) {
 
   const event = await getEvent(eventId);
   if (!event) throw new Error("EVENTO_NAO_ENCONTRADO");
-  if (!["upcoming", "waiting"].includes(event.status)) throw new Error("EVENTO_NAO_DISPONIVEL");
+  if (!["upcoming", "waiting", "running"].includes(event.status)) throw new Error("EVENTO_NAO_DISPONIVEL");
 
   const db = getDb();
 
