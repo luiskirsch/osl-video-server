@@ -3,6 +3,7 @@ const admin      = require("firebase-admin");
 const { asyncHandler, sendError } = require("../utils");
 const { requireAdmin } = require("../services/auth");
 const { logError } = require("../logger");
+const { ensureDb } = require("../services/firestore");
 const {
   createEvent, listEvents, getEvent, deleteEvent,
   verifyTicket, checkinParticipant,
@@ -104,37 +105,62 @@ router.get("/encontro/matches", requireFirebaseToken, asyncHandler(async (req, r
 
 // GET /encontro/admin/eventos — lista com detalhes admin
 router.get("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, res) => {
-  const events = await listEvents();
-  return res.json({ ok: true, events });
+  if (!ensureDb(res)) return;
+  try {
+    const events = await listEvents();
+    return res.json({ ok: true, events });
+  } catch (err) {
+    logError("encontro_list_error", err);
+    return sendError(res, 500, "ERRO_LISTAR_EVENTOS", { detail: err.message });
+  }
 }));
 
 // POST /encontro/admin/eventos — criar evento
 router.post("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const title       = String(req.body?.title       || "").trim();
   const scheduledAt = Number(req.body?.scheduledAt || 0);
   if (!scheduledAt || scheduledAt < Date.now()) return sendError(res, 400, "DATA_INVALIDA");
 
-  const event = await createEvent(title || null, scheduledAt);
-  return res.json({ ok: true, event });
+  try {
+    const event = await createEvent(title || null, scheduledAt);
+    return res.json({ ok: true, event });
+  } catch (err) {
+    logError("encontro_create_error", err);
+    return sendError(res, 500, "ERRO_CRIAR_EVENTO", { detail: err.message });
+  }
 }));
 
 // DELETE /encontro/admin/eventos/:id — excluir evento
 router.delete("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const eventId = String(req.params.id || "").trim();
-  await deleteEvent(eventId);
-  return res.json({ ok: true });
+  try {
+    await deleteEvent(eventId);
+    return res.json({ ok: true });
+  } catch (err) {
+    logError("encontro_delete_error", err);
+    return sendError(res, 500, "ERRO_EXCLUIR_EVENTO", { detail: err.message });
+  }
 }));
 
 // GET /encontro/admin/eventos/:id — detalhes admin (ingressos + check-ins)
 router.get("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const eventId = String(req.params.id || "").trim();
-  const details = await getAdminEventDetails(eventId);
-  if (!details) return sendError(res, 404, "EVENTO_NAO_ENCONTRADO");
-  return res.json({ ok: true, event: details });
+  try {
+    const details = await getAdminEventDetails(eventId);
+    if (!details) return sendError(res, 404, "EVENTO_NAO_ENCONTRADO");
+    return res.json({ ok: true, event: details });
+  } catch (err) {
+    logError("encontro_details_error", err);
+    return sendError(res, 500, "ERRO_DETALHES_EVENTO", { detail: err.message });
+  }
 }));
 
 // POST /encontro/admin/eventos/:id/iniciar — iniciar evento
 router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const eventId = String(req.params.id || "").trim();
   try {
     await startEvent(eventId);
@@ -143,15 +169,21 @@ router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(as
     const known = ["EVENTO_NAO_ENCONTRADO","PARTICIPANTES_INSUFICIENTES"];
     if (known.includes(err.message)) return sendError(res, 400, err.message);
     logError("encontro_start_error", err, { eventId });
-    return sendError(res, 500, "ERRO_INICIAR_EVENTO");
+    return sendError(res, 500, "ERRO_INICIAR_EVENTO", { detail: err.message });
   }
 }));
 
 // POST /encontro/admin/eventos/:id/encerrar — encerrar evento manualmente
 router.post("/encontro/admin/eventos/:id/encerrar", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
   const eventId = String(req.params.id || "").trim();
-  await forceEndEvent(eventId);
-  return res.json({ ok: true, message: "Evento encerrado" });
+  try {
+    await forceEndEvent(eventId);
+    return res.json({ ok: true, message: "Evento encerrado" });
+  } catch (err) {
+    logError("encontro_end_error", err);
+    return sendError(res, 500, "ERRO_ENCERRAR_EVENTO", { detail: err.message });
+  }
 }));
 
 module.exports = router;

@@ -1624,7 +1624,7 @@
       if (body) opts.body = JSON.stringify(body);
       const res  = await fetch(SERVER + path, opts);
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || `HTTP_${res.status}`);
+      if (!res.ok) throw new Error((json?.detail ? `${json.error}: ${json.detail}` : json?.error) || `HTTP_${res.status}`);
       return json;
     }
 
