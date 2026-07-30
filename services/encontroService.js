@@ -404,10 +404,20 @@ async function resetCheckins(eventId) {
     const batch = db.batch();
     snap.docs.forEach(doc => batch.delete(doc.ref));
     await batch.commit();
+    // Reseta status do evento para "waiting" para permitir novo teste
+    await db.collection("encontro_eventos").doc(eventId).update({ status: "waiting" });
   }
   if (activeEvent?.eventId === eventId) {
+    clearTimers();
     activeEvent.participants = new Map();
-    activeEvent.status = "waiting";
+    activeEvent.status       = "waiting";
+    activeEvent.currentRound = -1;
+    activeEvent.totalRounds  = 0;
+    activeEvent.forceMode    = false;
+    activeEvent.allRoundPairs = [];
+    activeEvent.currentPairs  = [];
+    activeEvent.roundStartedAt = null;
+    activeEvent.interestVotes  = new Map();
   }
   logInfo("encontro_checkins_reset", { eventId });
 }
