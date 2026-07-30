@@ -3,7 +3,7 @@ const admin      = require("firebase-admin");
 const { asyncHandler, sendError } = require("../utils");
 const { requireAdmin } = require("../services/auth");
 const { logError } = require("../logger");
-const { ensureDb } = require("../services/firestore");
+const { ensureDb, getDb } = require("../services/firestore");
 const {
   createEvent, listEvents, getEvent, deleteEvent,
   verifyTicket, checkinParticipant,
@@ -135,10 +135,9 @@ router.post("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, re
   }
 }));
 
-// PUT /encontro/admin/eventos/:id — editar título e/ou data
+// PUT /encontro/admin/eventos/:id — editar titulo e/ou data
 router.put("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const { getDb } = require("../services/firestore");
   const eventId    = String(req.params.id || "").trim();
   const title      = req.body?.title      ? String(req.body.title).trim()  : null;
   const scheduledAt = req.body?.scheduledAt ? Number(req.body.scheduledAt) : null;
@@ -203,7 +202,6 @@ router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(as
 // POST /encontro/admin/eventos/:id/abrir-sala — avança scheduledAt para agora (teste)
 router.post("/encontro/admin/eventos/:id/abrir-sala", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const { getDb } = require("../services/firestore");
   const eventId = String(req.params.id || "").trim();
   try {
     const db = getDb();
@@ -217,7 +215,6 @@ router.post("/encontro/admin/eventos/:id/abrir-sala", requireAdmin, asyncHandler
 // POST /encontro/admin/eventos/:id/dar-ingresso — ingresso manual (teste/cortesia)
 router.post("/encontro/admin/eventos/:id/dar-ingresso", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const { getDb } = require("../services/firestore");
   const eventId = String(req.params.id || "").trim();
   const email   = String(req.body?.email || "").trim().toLowerCase();
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
