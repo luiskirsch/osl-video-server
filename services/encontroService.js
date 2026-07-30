@@ -57,9 +57,12 @@ async function createEvent(title, scheduledAt) {
   if (!db) throw new Error("DB_NAO_DISPONIVEL");
 
   const eventId = generateEventId();
+  const months = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
+  const d = new Date(scheduledAt);
+  const defaultTitle = `Encontro Marcado — ${String(d.getDate()).padStart(2,"0")} de ${months[d.getMonth()]}`;
   const event   = {
     eventId,
-    title: title || `Encontro Marcado — ${new Date(scheduledAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "long" })}`,
+    title: title || defaultTitle,
     scheduledAt,
     status: "upcoming",
     createdAt: Date.now(),

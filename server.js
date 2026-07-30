@@ -84,7 +84,8 @@ const ALLOWED_ORIGINS = [
   "https://luiskirsch.github.io",
   "http://localhost:3000",
   "http://localhost:8080",
-  "http://localhost:5173"
+  "http://localhost:5173",
+  "https://osl-video-server-production.up.railway.app"
 ];
 app.use(cors({
   origin: (origin, cb) => {

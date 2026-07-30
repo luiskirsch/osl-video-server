@@ -117,15 +117,19 @@ router.get("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, res
 
 // POST /encontro/admin/eventos — criar evento
 router.post("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, res) => {
+  console.log("[ENCONTRO] POST /encontro/admin/eventos body=", JSON.stringify(req.body));
   if (!ensureDb(res)) return;
   const title       = String(req.body?.title       || "").trim();
   const scheduledAt = Number(req.body?.scheduledAt || 0);
+  console.log("[ENCONTRO] title=", title, "scheduledAt=", scheduledAt, "now=", Date.now());
   if (!scheduledAt || scheduledAt < Date.now()) return sendError(res, 400, "DATA_INVALIDA");
 
   try {
     const event = await createEvent(title || null, scheduledAt);
+    console.log("[ENCONTRO] event created:", event.eventId);
     return res.json({ ok: true, event });
   } catch (err) {
+    console.error("[ENCONTRO] createEvent failed:", err.message, err.stack);
     logError("encontro_create_error", err);
     return sendError(res, 500, "ERRO_CRIAR_EVENTO", { detail: err.message });
   }
