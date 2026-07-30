@@ -112,6 +112,19 @@ async function verifyTicket(eventId, email) {
 
 // ─── Check-in ────────────────────────────────────────────────────────────────
 
+async function loadCheckins(db, eventId) {
+  if (!db) return new Map();
+  const snap = await db.collection("encontro_checkins")
+    .where("eventId", "==", eventId)
+    .get();
+  const map = new Map();
+  for (const doc of snap.docs) {
+    const d = doc.data();
+    map.set(d.uid, { uid: d.uid, name: d.name, email: d.email, gender: d.gender });
+  }
+  return map;
+}
+
 async function checkinParticipant(eventId, uid, email, name, gender) {
   const hasTicket = await verifyTicket(eventId, email);
   if (!hasTicket) throw new Error("INGRESSO_NAO_ENCONTRADO");
@@ -122,26 +135,35 @@ async function checkinParticipant(eventId, uid, email, name, gender) {
 
   const db = getDb();
 
-  // Inicializa estado em memória se ainda não existe
+  // Inicializa estado em memória — recarrega check-ins do Firestore se necessário
   if (!activeEvent || activeEvent.eventId !== eventId) {
     activeEvent = {
       eventId,
       title:          event.title,
       scheduledAt:    event.scheduledAt,
       status:         "waiting",
-      participants:   new Map(),
+      participants:   await loadCheckins(db, eventId),
       currentRound:   -1,
       totalRounds:    0,
-      allRoundPairs:  [], // [[{uid1,name1,uid2,name2},...]] por rodada
+      allRoundPairs:  [],
       currentPairs:   [],
+      roundStartedAt: null,
       roundTimer:     null,
       warnTimer:      null,
       transitionTimer:null,
-      interestVotes:  new Map(), // `${voterUid}_${targetUid}` → boolean
+      interestVotes:  new Map(),
     };
   }
 
   activeEvent.participants.set(uid, { uid, name, email, gender });
+
+  // Persiste check-in no Firestore para sobreviver a restarts do servidor
+  if (db) {
+    await db.collection("encontro_checkins").doc(`${eventId}_${uid}`).set(
+      { eventId, uid, name, email, gender, checkedInAt: Date.now() },
+      { merge: true }
+    );
+  }
 
   // Atualiza status no Firestore para "waiting" na primeira vez
   if (event.status === "upcoming" && db) {
@@ -170,21 +192,24 @@ async function startEvent(eventId, force = false) {
   if (!activeEvent || activeEvent.eventId !== eventId) {
     const event = await getEvent(eventId);
     if (!event) throw new Error("EVENTO_NAO_ENCONTRADO");
+    const db = getDb();
     activeEvent = {
       eventId,
       title:          event.title,
       scheduledAt:    event.scheduledAt,
       status:         "waiting",
-      participants:   new Map(),
+      participants:   await loadCheckins(db, eventId),
       currentRound:   -1,
       totalRounds:    0,
       allRoundPairs:  [],
       currentPairs:   [],
+      roundStartedAt: null,
       roundTimer:     null,
       warnTimer:      null,
       transitionTimer:null,
       interestVotes:  new Map(),
     };
+    logInfo("encontro_participants_reloaded", { eventId, count: activeEvent.participants.size });
   }
 
   let men   = [...activeEvent.participants.values()].filter(p => p.gender === "M");
