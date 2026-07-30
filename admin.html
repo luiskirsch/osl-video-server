@@ -1643,6 +1643,8 @@
       return new Date(ts).toLocaleString("pt-BR", { weekday:"short", day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" });
     }
 
+    let _emEvents = {};  // cache local: eventId → ev
+
     async function emLoadEvents() {
       const list = document.getElementById("emEventsList");
       list.innerHTML = '<p style="color:var(--muted);font-size:13px">Carregando...</p>';
@@ -1652,6 +1654,8 @@
           list.innerHTML = '<p style="color:var(--muted);font-size:13px">Nenhum evento cadastrado.</p>';
           return;
         }
+        _emEvents = {};
+        data.events.forEach(ev => { _emEvents[ev.eventId] = ev; });
         list.innerHTML = data.events.map(ev => `
           <div style="background:rgba(232,123,143,.05);border:1px solid rgba(232,123,143,.18);border-radius:14px;padding:16px">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px">
@@ -1671,6 +1675,7 @@
               <button class="btn" onclick="emAbrirSala('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,204,255,.08);border:1px solid rgba(0,204,255,.3);color:#00ccff">🚪 Abrir Sala</button>
               <button class="btn" onclick="emDarIngresso('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(215,176,107,.1);border:1px solid rgba(215,176,107,.3);color:#d7b06b">🎫 Dar Ingresso</button>
               <button class="btn" onclick="emResetarCheckins('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,165,0,.08);border:1px solid rgba(255,165,0,.3);color:#ffa500">🔄 Resetar</button>
+              <button class="btn" onclick="emEditEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(180,180,255,.08);border:1px solid rgba(180,180,255,.3);color:#aaaaff">✏️ Editar</button>
               <button class="btn btnDanger" onclick="emDeleteEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Excluir</button>
             </div>
           </div>`).join("");
@@ -1767,6 +1772,48 @@
       }
     }
 
+    function emEditEvent(eventId) {
+      const ev = _emEvents[eventId];
+      if (!ev) { alert("Evento não encontrado no cache. Recarregue a lista."); return; }
+
+      // Formata data/hora para o input datetime-local (YYYY-MM-DDTHH:MM)
+      const d = new Date(ev.scheduledAt);
+      const pad = n => String(n).padStart(2,"0");
+      const localDt = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+      document.getElementById("emEditId").value      = eventId;
+      document.getElementById("emEditTitle").value   = ev.title || "";
+      document.getElementById("emEditDate").value    = localDt;
+      document.getElementById("emEditModal").style.display = "flex";
+    }
+
+    document.getElementById("emEditModal").addEventListener("click", e => {
+      if (e.target === document.getElementById("emEditModal")) emCloseEditModal();
+    });
+
+    function emCloseEditModal() {
+      document.getElementById("emEditModal").style.display = "none";
+    }
+
+    async function emSaveEdit() {
+      const eventId     = document.getElementById("emEditId").value;
+      const title       = document.getElementById("emEditTitle").value.trim();
+      const dateVal     = document.getElementById("emEditDate").value;
+      if (!dateVal) { alert("Selecione uma data."); return; }
+      const scheduledAt = new Date(dateVal).getTime();
+      if (isNaN(scheduledAt)) { alert("Data inválida."); return; }
+      const body = {};
+      if (title)       body.title       = title;
+      if (scheduledAt) body.scheduledAt = scheduledAt;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}`, "PUT", body);
+        emCloseEditModal();
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro ao salvar: " + err.message);
+      }
+    }
+
     async function emDeleteEvent(eventId) {
       if (!confirm(`Excluir evento ${eventId}? Esta ação não pode ser desfeita.`)) return;
       try {
@@ -1778,5 +1825,27 @@
       }
     }
   </script>
+
+<!-- Modal de edição de evento -->
+<div id="emEditModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#1a1a2e;border:1px solid rgba(232,123,143,.25);border-radius:20px;padding:28px;width:min(420px,100%);display:flex;flex-direction:column;gap:16px">
+    <div style="font-size:16px;font-weight:700;color:#e7fff7">✏️ Editar Evento</div>
+    <input type="hidden" id="emEditId" />
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <label style="font-size:12px;font-weight:600;color:#9a7e84;text-transform:uppercase;letter-spacing:.08em">Título</label>
+      <input id="emEditTitle" type="text" placeholder="Deixe vazio para manter o atual"
+        style="background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.25);border-radius:10px;padding:10px 14px;font-size:14px;color:#f5e8ec;outline:none" />
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <label style="font-size:12px;font-weight:600;color:#9a7e84;text-transform:uppercase;letter-spacing:.08em">Data e Hora</label>
+      <input id="emEditDate" type="datetime-local"
+        style="background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.25);border-radius:10px;padding:10px 14px;font-size:14px;color:#f5e8ec;outline:none;color-scheme:dark" />
+    </div>
+    <div style="display:flex;gap:10px;margin-top:4px">
+      <button onclick="emSaveEdit()" style="flex:1;padding:12px;background:linear-gradient(135deg,#c96b7a,#e87b8f);border:none;border-radius:12px;font-size:14px;font-weight:700;color:#fff;cursor:pointer">Salvar</button>
+      <button onclick="emCloseEditModal()" style="flex:1;padding:12px;background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.2);border-radius:12px;font-size:14px;color:#9a7e84;cursor:pointer">Cancelar</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

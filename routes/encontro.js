@@ -135,6 +135,28 @@ router.post("/encontro/admin/eventos", requireAdmin, asyncHandler(async (req, re
   }
 }));
 
+// PUT /encontro/admin/eventos/:id — editar título e/ou data
+router.put("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const { getDb } = require("../services/firestore");
+  const eventId    = String(req.params.id || "").trim();
+  const title      = req.body?.title      ? String(req.body.title).trim()  : null;
+  const scheduledAt = req.body?.scheduledAt ? Number(req.body.scheduledAt) : null;
+  if (scheduledAt !== null && isNaN(scheduledAt)) return sendError(res, 400, "DATA_INVALIDA");
+  try {
+    const db = getDb();
+    const updates = {};
+    if (title)       updates.title       = title;
+    if (scheduledAt) updates.scheduledAt = scheduledAt;
+    if (!Object.keys(updates).length) return sendError(res, 400, "NADA_PARA_ATUALIZAR");
+    await db.collection("encontro_eventos").doc(eventId).update(updates);
+    return res.json({ ok: true });
+  } catch (err) {
+    logError("encontro_edit_error", err);
+    return sendError(res, 500, "ERRO_EDITAR_EVENTO", { detail: err.message });
+  }
+}));
+
 // DELETE /encontro/admin/eventos/:id — excluir evento
 router.delete("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
