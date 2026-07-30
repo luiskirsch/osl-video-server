@@ -232,7 +232,12 @@ async function startEvent(eventId, force = false) {
 
   if (force) {
     // Modo teste: pareia qualquer pessoa com qualquer pessoa, ignora gênero
-    if (all.length < 2) throw new Error("PARTICIPANTES_INSUFICIENTES");
+    if (all.length < 1) throw new Error("PARTICIPANTES_INSUFICIENTES");
+    // Com 1 participante real, injeta parceiro virtual para testar o fluxo solo
+    if (all.length === 1) {
+      const bot = { uid: "bot_parceiro", name: "Convidado(a)", gender: "F" };
+      activeEvent.participants.set(bot.uid, bot);
+    }
     activeEvent.forceMode   = true;
     activeEvent.totalRounds = 1; // 1 rodada de teste é suficiente
   } else {
