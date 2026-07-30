@@ -166,7 +166,7 @@ async function checkinParticipant(eventId, uid, email, name, gender) {
 
 // ─── Orquestração das rodadas ─────────────────────────────────────────────────
 
-async function startEvent(eventId) {
+async function startEvent(eventId, force = false) {
   if (!activeEvent || activeEvent.eventId !== eventId) {
     const event = await getEvent(eventId);
     if (!event) throw new Error("EVENTO_NAO_ENCONTRADO");
@@ -187,9 +187,17 @@ async function startEvent(eventId) {
     };
   }
 
-  const men   = [...activeEvent.participants.values()].filter(p => p.gender === "M");
-  const women = [...activeEvent.participants.values()].filter(p => p.gender === "F");
-  if (men.length === 0 || women.length === 0) throw new Error("PARTICIPANTES_INSUFICIENTES");
+  let men   = [...activeEvent.participants.values()].filter(p => p.gender === "M");
+  let women = [...activeEvent.participants.values()].filter(p => p.gender === "F");
+  if (men.length === 0 || women.length === 0) {
+    if (!force) throw new Error("PARTICIPANTES_INSUFICIENTES");
+    // Modo teste: injeta bot do gênero faltante para completar 1 par
+    if (men.length === 0)   men   = [{ uid: "bot_m", name: "Bot M", gender: "M" }];
+    if (women.length === 0) women = [{ uid: "bot_f", name: "Bot F", gender: "F" }];
+    for (const bot of [...men, ...women]) {
+      if (bot.uid.startsWith("bot_")) activeEvent.participants.set(bot.uid, bot);
+    }
+  }
 
   activeEvent.totalRounds = Math.min(men.length, women.length);
   activeEvent.status      = "running";

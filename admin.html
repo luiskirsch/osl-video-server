@@ -1714,7 +1714,7 @@
     async function emStartEvent(eventId) {
       if (!confirm("Iniciar o evento agora? Todos os participantes com check-in serão pareados.")) return;
       try {
-        await emApi(`/encontro/admin/eventos/${eventId}/iniciar`, "POST");
+        await emApi(`/encontro/admin/eventos/${eventId}/iniciar`, "POST", { force: true });
         alert("Evento iniciado! As rodadas começaram.");
         emLoadEvents();
       } catch (err) {

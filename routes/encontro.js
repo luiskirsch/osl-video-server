@@ -166,8 +166,9 @@ router.get("/encontro/admin/eventos/:id", requireAdmin, asyncHandler(async (req,
 router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const eventId = String(req.params.id || "").trim();
+  const force   = req.body?.force === true || req.query.force === "true";
   try {
-    await startEvent(eventId);
+    await startEvent(eventId, force);
     return res.json({ ok: true, message: "Evento iniciado" });
   } catch (err) {
     const known = ["EVENTO_NAO_ENCONTRADO","PARTICIPANTES_INSUFICIENTES"];
