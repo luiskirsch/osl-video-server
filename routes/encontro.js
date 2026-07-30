@@ -177,6 +177,26 @@ router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(as
   }
 }));
 
+// POST /encontro/admin/eventos/:id/dar-ingresso — ingresso manual (teste/cortesia)
+router.post("/encontro/admin/eventos/:id/dar-ingresso", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const { getDb } = require("../services/firestore");
+  const eventId = String(req.params.id || "").trim();
+  const email   = String(req.body?.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  try {
+    const db = getDb();
+    const ticketId = `${eventId}_${email}`;
+    await db.collection("encontro_tickets").doc(ticketId).set({
+      email, eventId, paymentRef: "admin_manual", paymentId: "admin_manual",
+      approvedAt: Date.now()
+    }, { merge: true });
+    return res.json({ ok: true, ticketId, email, eventId });
+  } catch (err) {
+    return sendError(res, 500, "ERRO_DAR_INGRESSO", { detail: err.message });
+  }
+}));
+
 // POST /encontro/admin/eventos/:id/encerrar — encerrar evento manualmente
 router.post("/encontro/admin/eventos/:id/encerrar", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
