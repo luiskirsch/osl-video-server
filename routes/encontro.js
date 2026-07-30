@@ -177,6 +177,20 @@ router.post("/encontro/admin/eventos/:id/iniciar", requireAdmin, asyncHandler(as
   }
 }));
 
+// POST /encontro/admin/eventos/:id/abrir-sala — avança scheduledAt para agora (teste)
+router.post("/encontro/admin/eventos/:id/abrir-sala", requireAdmin, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const { getDb } = require("../services/firestore");
+  const eventId = String(req.params.id || "").trim();
+  try {
+    const db = getDb();
+    await db.collection("encontro_eventos").doc(eventId).update({ scheduledAt: Date.now() - 5000, status: "waiting" });
+    return res.json({ ok: true });
+  } catch (err) {
+    return sendError(res, 500, "ERRO_ABRIR_SALA", { detail: err.message });
+  }
+}));
+
 // POST /encontro/admin/eventos/:id/dar-ingresso — ingresso manual (teste/cortesia)
 router.post("/encontro/admin/eventos/:id/dar-ingresso", requireAdmin, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;

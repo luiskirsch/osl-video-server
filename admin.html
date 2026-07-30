@@ -1668,6 +1668,7 @@
               <button class="btn" onclick="emEventDetails('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Ver detalhes</button>
               ${ev.status==="waiting" ? `<button class="btn" onclick="emStartEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,255,156,.12);border:1px solid rgba(0,255,156,.3);color:#00ff9c">▶ Iniciar</button>` : ""}
               ${ev.status==="running" ? `<button class="btn" onclick="emEndEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:#ff6b6b">■ Encerrar</button>` : ""}
+              <button class="btn" onclick="emAbrirSala('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,204,255,.08);border:1px solid rgba(0,204,255,.3);color:#00ccff">🚪 Abrir Sala</button>
               <button class="btn" onclick="emDarIngresso('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(215,176,107,.1);border:1px solid rgba(215,176,107,.3);color:#d7b06b">🎫 Dar Ingresso</button>
               <button class="btn btnDanger" onclick="emDeleteEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Excluir</button>
             </div>
@@ -1729,6 +1730,17 @@
         emLoadEvents();
       } catch (err) {
         alert("Erro ao encerrar: " + err.message);
+      }
+    }
+
+    async function emAbrirSala(eventId) {
+      if (!confirm("Avançar o horário para AGORA e abrir a sala de espera?")) return;
+      try {
+        await emApi(`/encontro/admin/eventos/${eventId}/abrir-sala`, "POST");
+        alert("Sala aberta! Recarregue o encontro-marcado.html.");
+        emLoadEvents();
+      } catch (err) {
+        alert("Erro: " + err.message);
       }
     }
 
