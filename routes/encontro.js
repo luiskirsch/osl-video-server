@@ -59,6 +59,16 @@ router.get("/encontro/meu-ingresso", requireFirebaseToken, asyncHandler(async (r
   return res.json({ ok: true, hasTicket, email: req.firebaseEmail });
 }));
 
+// GET /encontro/meu-checkin — verifica se o usuário ainda tem check-in ativo (Firestore)
+router.get("/encontro/meu-checkin", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const eventId = String(req.query.eventId || "").trim();
+  if (!eventId) return sendError(res, 400, "EVENT_ID_OBRIGATORIO");
+  const db = getDb();
+  if (!db) return res.json({ ok: true, checkedIn: false });
+  const doc = await db.collection("encontro_checkins").doc(`${eventId}_${req.firebaseUid}`).get();
+  return res.json({ ok: true, checkedIn: doc.exists });
+}));
+
 // POST /encontro/checkin — check-in do participante
 router.post("/encontro/checkin", requireFirebaseToken, asyncHandler(async (req, res) => {
   const eventId = String(req.body?.eventId || "").trim();
