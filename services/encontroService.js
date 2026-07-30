@@ -225,7 +225,8 @@ async function advanceToNextRound() {
   }
 
   const pairs = computePairsForRound(activeEvent.participants, currentRound);
-  activeEvent.currentPairs = pairs;
+  activeEvent.currentPairs    = pairs;
+  activeEvent.roundStartedAt  = Date.now();
   activeEvent.allRoundPairs.push(pairs);
 
   const io = getIo();
@@ -234,11 +235,19 @@ async function advanceToNextRound() {
       const pair     = pairs[i];
       const roomName = `encontro-${eventId}-r${currentRound}-p${i}`;
 
-      try {
-        const [tok1, tok2] = await Promise.all([
-          generateLiveKitToken(roomName, pair.uid1),
-          generateLiveKitToken(roomName, pair.uid2),
-        ]);
+      // Gera tokens independentemente — bot não bloqueia usuário real
+      const tok1 = pair.uid1.startsWith("bot_") ? null
+        : await generateLiveKitToken(roomName, pair.uid1).catch(err => {
+            logError("encontro_token_error", err, { eventId, roomName, uid: pair.uid1 });
+            return null;
+          });
+      const tok2 = pair.uid2.startsWith("bot_") ? null
+        : await generateLiveKitToken(roomName, pair.uid2).catch(err => {
+            logError("encontro_token_error", err, { eventId, roomName, uid: pair.uid2 });
+            return null;
+          });
+
+      if (tok1) {
         io.to(pair.uid1).emit("encontro:round_started", {
           eventId,
           round:        currentRound + 1,
@@ -248,6 +257,8 @@ async function advanceToNextRound() {
           partnerName:  pair.name2,
           durationMs:   ROUND_DURATION_MS,
         });
+      }
+      if (tok2) {
         io.to(pair.uid2).emit("encontro:round_started", {
           eventId,
           round:        currentRound + 1,
@@ -257,8 +268,6 @@ async function advanceToNextRound() {
           partnerName:  pair.name1,
           durationMs:   ROUND_DURATION_MS,
         });
-      } catch (err) {
-        logError("encontro_token_error", err, { eventId, roomName });
       }
     }
 
@@ -407,6 +416,49 @@ async function getMyMatches(eventId, uid) {
   return matches;
 }
 
+// ─── Catch-up para socket que conectou durante rodada em andamento ────────────
+
+async function getRoundCatchupForUser(uid) {
+  if (!activeEvent || activeEvent.status !== "running") return null;
+  if (!activeEvent.participants.has(uid)) return null;
+
+  const { eventId, currentRound, totalRounds, currentPairs, roundStartedAt } = activeEvent;
+  if (!currentPairs || currentPairs.length === 0) return null;
+
+  const pairIndex = currentPairs.findIndex(p => p.uid1 === uid || p.uid2 === uid);
+  if (pairIndex === -1) {
+    // Está de fora nesta rodada
+    const elapsed    = Date.now() - (roundStartedAt || 0);
+    const remaining  = Math.max(0, ROUND_DURATION_MS - elapsed);
+    return { type: "sitting_out", eventId, round: currentRound + 1, totalRounds, durationMs: remaining };
+  }
+
+  const pair      = currentPairs[pairIndex];
+  const roomName  = `encontro-${eventId}-r${currentRound}-p${pairIndex}`;
+  const isUid1    = pair.uid1 === uid;
+  const partnerName = isUid1 ? pair.name2 : pair.name1;
+
+  const elapsed   = Date.now() - (roundStartedAt || 0);
+  const remaining = Math.max(0, ROUND_DURATION_MS - elapsed);
+  if (remaining <= 0) return null; // rodada já acabou, não faz catch-up
+
+  try {
+    const token = await generateLiveKitToken(roomName, uid);
+    return {
+      type: "round_started",
+      eventId,
+      round:        currentRound + 1,
+      totalRounds,
+      room:         roomName,
+      livekitToken: token,
+      partnerName,
+      durationMs:   remaining,
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Status e detalhes (admin) ────────────────────────────────────────────────
 
 function getActiveEventMemoryStatus(eventId) {
@@ -462,4 +514,5 @@ module.exports = {
   getMyMatches,
   getActiveEventMemoryStatus,
   getAdminEventDetails,
+  getRoundCatchupForUser,
 };

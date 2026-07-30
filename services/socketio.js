@@ -2,7 +2,7 @@
 // initSocketIo() chamado uma vez em server.js; getIo() usado nos handlers.
 const { Server } = require("socket.io");
 const admin = require("firebase-admin");
-const { logInfo } = require("../logger");
+const { logInfo, logError } = require("../logger");
 
 let _io = null;
 
@@ -27,10 +27,40 @@ function initSocketIo(httpServer, allowedOrigins) {
     }
   });
 
-  _io.on("connection", (socket) => {
-    // Cada profissional entra no próprio room (uid) — push apenas para ele.
+  _io.on("connection", async (socket) => {
+    // Cada usuário entra no próprio room (uid) — push apenas para ele.
     socket.join(socket.uid);
     logInfo("socket_connected", { uid: socket.uid });
+
+    // Catch-up: se há rodada ativa para este uid, re-emite round_started com tempo restante
+    try {
+      const { getRoundCatchupForUser } = require("./encontroService");
+      const catchup = await getRoundCatchupForUser(socket.uid);
+      if (catchup) {
+        if (catchup.type === "round_started") {
+          logInfo("socket_catchup_round_started", { uid: socket.uid, round: catchup.round, remaining: catchup.durationMs });
+          socket.emit("encontro:round_started", {
+            eventId:      catchup.eventId,
+            round:        catchup.round,
+            totalRounds:  catchup.totalRounds,
+            room:         catchup.room,
+            livekitToken: catchup.livekitToken,
+            partnerName:  catchup.partnerName,
+            durationMs:   catchup.durationMs,
+          });
+        } else if (catchup.type === "sitting_out") {
+          socket.emit("encontro:sitting_out", {
+            eventId:    catchup.eventId,
+            round:      catchup.round,
+            totalRounds: catchup.totalRounds,
+            durationMs: catchup.durationMs,
+          });
+        }
+      }
+    } catch (err) {
+      logError("socket_catchup_error", err, { uid: socket.uid });
+    }
+
     socket.on("disconnect", () => {
       logInfo("socket_disconnected", { uid: socket.uid });
     });
