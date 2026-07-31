@@ -442,14 +442,24 @@ async function voteInterest(eventId, voterUid, targetUid, liked) {
 
   // Bot responde always com like → match imediato
   if (targetUid.startsWith("bot_")) {
+    const db = getDb();
+    const botInfo = activeEvent?.participants.get(targetUid);
+    const botName = botInfo?.name || "Convidado(a)";
+    if (db) {
+      // Salva voto do usuário e voto reverso do bot no Firestore (com nome)
+      await db.collection("encontro_interests")
+        .doc(`${eventId}_${voterUid}_${targetUid}`)
+        .set({ eventId, voterUid, targetUid, liked: true, targetName: botName, createdAt: Date.now() }, { merge: true });
+      await db.collection("encontro_interests")
+        .doc(`${eventId}_${targetUid}_${voterUid}`)
+        .set({ eventId, voterUid: targetUid, targetUid: voterUid, liked: true, createdAt: Date.now() }, { merge: true });
+    }
     const io = getIo();
     if (io) {
-      const voterInfo  = activeEvent?.participants.get(voterUid);
-      const targetInfo = activeEvent?.participants.get(targetUid);
       io.to(voterUid).emit("encontro:match", {
         eventId,
         matchUid:  targetUid,
-        matchName: targetInfo?.name || "Convidado(a)",
+        matchName: botName,
       });
     }
     return { matched: true };
@@ -498,7 +508,9 @@ async function getMyMatches(eventId, uid) {
       .get();
     if (reverseDoc.exists && reverseDoc.data().liked === true) {
       const info = activeEvent?.participants.get(targetUid);
-      matches.push({ uid: targetUid, name: info?.name || "Match" });
+      // Fallback: nome salvo no doc original (útil para bots após reset)
+      const savedName = doc.data().targetName;
+      matches.push({ uid: targetUid, name: info?.name || savedName || "Match" });
     }
   }
   return matches;
