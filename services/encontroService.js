@@ -440,6 +440,21 @@ async function voteInterest(eventId, voterUid, targetUid, liked) {
 
   if (!liked) return { matched: false };
 
+  // Bot responde always com like → match imediato
+  if (targetUid.startsWith("bot_")) {
+    const io = getIo();
+    if (io) {
+      const voterInfo  = activeEvent?.participants.get(voterUid);
+      const targetInfo = activeEvent?.participants.get(targetUid);
+      io.to(voterUid).emit("encontro:match", {
+        eventId,
+        matchUid:  targetUid,
+        matchName: targetInfo?.name || "Convidado(a)",
+      });
+    }
+    return { matched: true };
+  }
+
   // Verifica match mútuo
   const reverseKey = `${targetUid}_${voterUid}`;
   let theyLiked    = activeEvent?.interestVotes?.get(reverseKey);
