@@ -603,6 +603,35 @@ async function getAdminEventDetails(eventId) {
 
 // ─── Fotos dos participantes ──────────────────────────────────────────────────
 
+async function getAllMyMatches(uid) {
+  const db = getDb();
+  if (!db) return [];
+
+  const myVotes = await db.collection("encontro_interests")
+    .where("voterUid", "==", uid)
+    .where("liked", "==", true)
+    .get();
+
+  const matches = [];
+  for (const doc of myVotes.docs) {
+    const { targetUid, eventId, targetName } = doc.data();
+    const reverseDoc = await db.collection("encontro_interests")
+      .doc(`${eventId}_${targetUid}_${uid}`)
+      .get();
+    if (!reverseDoc.exists || !reverseDoc.data().liked) continue;
+
+    const info      = activeEvent?.participants.get(targetUid);
+    const photoDoc  = await db.collection("encontro_fotos").doc(`${eventId}_${targetUid}`).get();
+    matches.push({
+      uid:     targetUid,
+      name:    info?.name || targetName || "Match",
+      eventId,
+      photo:   photoDoc.exists ? photoDoc.data().photoBase64 : null,
+    });
+  }
+  return matches;
+}
+
 async function saveUserPhoto(eventId, uid, photoBase64) {
   const db = getDb();
   if (!db) return;
@@ -668,6 +697,7 @@ module.exports = {
   getActiveEventMemoryStatus,
   getAdminEventDetails,
   getRoundCatchupForUser,
+  getAllMyMatches,
   saveUserPhoto,
   getUserPhoto,
   makeChatId,

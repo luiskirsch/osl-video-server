@@ -10,6 +10,7 @@ const {
   startEvent, forceEndEvent, resetCheckins,
   voteInterest, getMyMatches,
   getActiveEventMemoryStatus, getAdminEventDetails,
+  getAllMyMatches,
   saveUserPhoto, getUserPhoto,
   makeChatId, checkMutualMatch, getChatMessages,
 } = require("../services/encontroService");
@@ -110,6 +111,12 @@ router.get("/encontro/matches", requireFirebaseToken, asyncHandler(async (req, r
   const eventId = String(req.query.eventId || "").trim();
   if (!eventId) return sendError(res, 400, "EVENT_ID_OBRIGATORIO");
   const matches = await getMyMatches(eventId, req.firebaseUid);
+  return res.json({ ok: true, matches });
+}));
+
+// GET /encontro/meus-matches — todos os matches do usuário em todos os eventos
+router.get("/encontro/meus-matches", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const matches = await getAllMyMatches(req.firebaseUid);
   return res.json({ ok: true, matches });
 }));
 
