@@ -601,6 +601,58 @@ async function getAdminEventDetails(eventId) {
   };
 }
 
+// ─── Fotos dos participantes ──────────────────────────────────────────────────
+
+async function saveUserPhoto(eventId, uid, photoBase64) {
+  const db = getDb();
+  if (!db) return;
+  if (photoBase64.length > 80000) throw new Error("FOTO_MUITO_GRANDE");
+  await db.collection("encontro_fotos").doc(`${eventId}_${uid}`).set({
+    eventId, uid, photoBase64, updatedAt: Date.now()
+  });
+}
+
+async function getUserPhoto(eventId, uid) {
+  const db = getDb();
+  if (!db) return null;
+  const doc = await db.collection("encontro_fotos").doc(`${eventId}_${uid}`).get();
+  return doc.exists ? doc.data().photoBase64 : null;
+}
+
+// ─── Chat entre matches ───────────────────────────────────────────────────────
+
+function makeChatId(eventId, uid1, uid2) {
+  const [a, b] = [uid1, uid2].sort();
+  return `${eventId}__${a}__${b}`;
+}
+
+async function checkMutualMatch(eventId, uid1, uid2) {
+  const db = getDb();
+  if (!db) return false;
+  const [d1, d2] = await Promise.all([
+    db.collection("encontro_interests").doc(`${eventId}_${uid1}_${uid2}`).get(),
+    db.collection("encontro_interests").doc(`${eventId}_${uid2}_${uid1}`).get(),
+  ]);
+  return d1.exists && d1.data().liked && d2.exists && d2.data().liked;
+}
+
+async function saveChatMessage(chatId, senderUid, text) {
+  const db  = getDb();
+  const msg = { chatId, senderUid, text, createdAt: Date.now() };
+  if (db) await db.collection("encontro_chat_msgs").add(msg);
+  return msg;
+}
+
+async function getChatMessages(chatId) {
+  const db = getDb();
+  if (!db) return [];
+  const snap = await db.collection("encontro_chat_msgs")
+    .where("chatId", "==", chatId)
+    .limit(100)
+    .get();
+  return snap.docs.map(d => d.data()).sort((a, b) => a.createdAt - b.createdAt);
+}
+
 module.exports = {
   createEvent,
   listEvents,
@@ -616,4 +668,10 @@ module.exports = {
   getActiveEventMemoryStatus,
   getAdminEventDetails,
   getRoundCatchupForUser,
+  saveUserPhoto,
+  getUserPhoto,
+  makeChatId,
+  checkMutualMatch,
+  saveChatMessage,
+  getChatMessages,
 };

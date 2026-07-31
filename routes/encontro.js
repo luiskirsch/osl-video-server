@@ -10,6 +10,8 @@ const {
   startEvent, forceEndEvent, resetCheckins,
   voteInterest, getMyMatches,
   getActiveEventMemoryStatus, getAdminEventDetails,
+  saveUserPhoto, getUserPhoto,
+  makeChatId, checkMutualMatch, getChatMessages,
 } = require("../services/encontroService");
 
 const router = express.Router();
@@ -109,6 +111,42 @@ router.get("/encontro/matches", requireFirebaseToken, asyncHandler(async (req, r
   if (!eventId) return sendError(res, 400, "EVENT_ID_OBRIGATORIO");
   const matches = await getMyMatches(eventId, req.firebaseUid);
   return res.json({ ok: true, matches });
+}));
+
+// POST /encontro/foto — salva foto do participante (thumbnail JPEG base64)
+router.post("/encontro/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const eventId = String(req.body?.eventId || "").trim();
+  const photo   = String(req.body?.photo   || "").trim();
+  if (!eventId || !photo) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  if (!photo.startsWith("data:image/")) return sendError(res, 400, "FORMATO_INVALIDO");
+  try {
+    await saveUserPhoto(eventId, req.firebaseUid, photo);
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err.message === "FOTO_MUITO_GRANDE") return sendError(res, 400, "FOTO_MUITO_GRANDE");
+    return sendError(res, 500, "ERRO_SALVAR_FOTO");
+  }
+}));
+
+// GET /encontro/foto — busca foto de um participante
+router.get("/encontro/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const eventId = String(req.query.eventId || "").trim();
+  const uid     = String(req.query.uid     || "").trim();
+  if (!eventId || !uid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  const photo = await getUserPhoto(eventId, uid);
+  return res.json({ ok: true, photo: photo || null });
+}));
+
+// GET /encontro/chat — histórico de mensagens entre dois matches
+router.get("/encontro/chat", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const eventId      = String(req.query.eventId      || "").trim();
+  const recipientUid = String(req.query.recipientUid || "").trim();
+  if (!eventId || !recipientUid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  const isOk = await checkMutualMatch(eventId, req.firebaseUid, recipientUid);
+  if (!isOk) return sendError(res, 403, "SEM_MATCH");
+  const chatId = makeChatId(eventId, req.firebaseUid, recipientUid);
+  const msgs   = await getChatMessages(chatId);
+  return res.json({ ok: true, chatId, msgs });
 }));
 
 // ─── Rotas admin ──────────────────────────────────────────────────────────────

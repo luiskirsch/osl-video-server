@@ -61,6 +61,23 @@ function initSocketIo(httpServer, allowedOrigins) {
       logError("socket_catchup_error", err, { uid: socket.uid });
     }
 
+    socket.on("chat:message", async ({ eventId, recipientUid, text }) => {
+      if (!eventId || !recipientUid || !text?.trim()) return;
+      const safeText = String(text).trim().slice(0, 1000);
+      try {
+        const { checkMutualMatch, saveChatMessage, makeChatId } = require("./encontroService");
+        const ok = await checkMutualMatch(eventId, socket.uid, recipientUid);
+        if (!ok) return;
+        const chatId  = makeChatId(eventId, socket.uid, recipientUid);
+        const msg     = await saveChatMessage(chatId, socket.uid, safeText);
+        const payload = { chatId, senderUid: socket.uid, text: safeText, createdAt: msg.createdAt };
+        _io.to(socket.uid).emit("chat:receive", payload);
+        _io.to(recipientUid).emit("chat:receive", payload);
+      } catch (err) {
+        logError("chat_message_error", err, { uid: socket.uid });
+      }
+    });
+
     socket.on("disconnect", () => {
       logInfo("socket_disconnected", { uid: socket.uid });
     });
