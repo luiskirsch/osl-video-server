@@ -632,6 +632,25 @@ async function getAllMyMatches(uid) {
   return matches;
 }
 
+// ─── Foto de perfil do usuário (persistente) ─────────────────────────────────
+
+async function saveProfilePhoto(uid, photoBase64) {
+  const db = getDb();
+  if (!db) return;
+  if (photoBase64.length > 120000) throw new Error("FOTO_MUITO_GRANDE");
+  await db.collection("user_profiles").doc(uid).set(
+    { photoBase64, updatedAt: Date.now() },
+    { merge: true }
+  );
+}
+
+async function getProfilePhoto(uid) {
+  const db = getDb();
+  if (!db) return null;
+  const doc = await db.collection("user_profiles").doc(uid).get();
+  return doc.exists ? doc.data().photoBase64 : null;
+}
+
 async function saveUserPhoto(eventId, uid, photoBase64) {
   const db = getDb();
   if (!db) return;
@@ -698,6 +717,8 @@ module.exports = {
   getAdminEventDetails,
   getRoundCatchupForUser,
   getAllMyMatches,
+  saveProfilePhoto,
+  getProfilePhoto,
   saveUserPhoto,
   getUserPhoto,
   makeChatId,

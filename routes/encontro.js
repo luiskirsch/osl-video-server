@@ -11,6 +11,7 @@ const {
   voteInterest, getMyMatches,
   getActiveEventMemoryStatus, getAdminEventDetails,
   getAllMyMatches,
+  saveProfilePhoto, getProfilePhoto,
   saveUserPhoto, getUserPhoto,
   makeChatId, checkMutualMatch, getChatMessages,
 } = require("../services/encontroService");
@@ -112,6 +113,28 @@ router.get("/encontro/matches", requireFirebaseToken, asyncHandler(async (req, r
   if (!eventId) return sendError(res, 400, "EVENT_ID_OBRIGATORIO");
   const matches = await getMyMatches(eventId, req.firebaseUid);
   return res.json({ ok: true, matches });
+}));
+
+// POST /encontro/perfil/foto — salva foto de perfil permanente do usuário
+router.post("/encontro/perfil/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const photo = String(req.body?.photo || "").trim();
+  if (!photo) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  if (!photo.startsWith("data:image/")) return sendError(res, 400, "FORMATO_INVALIDO");
+  try {
+    await saveProfilePhoto(req.firebaseUid, photo);
+    return res.json({ ok: true });
+  } catch (err) {
+    if (err.message === "FOTO_MUITO_GRANDE") return sendError(res, 400, "FOTO_MUITO_GRANDE");
+    return sendError(res, 500, "ERRO_SALVAR_FOTO");
+  }
+}));
+
+// GET /encontro/perfil/foto — busca foto de perfil de qualquer usuário
+router.get("/encontro/perfil/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+  const uid = String(req.query.uid || req.firebaseUid || "").trim();
+  if (!uid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  const photo = await getProfilePhoto(uid);
+  return res.json({ ok: true, photo: photo || null });
 }));
 
 // GET /encontro/meus-matches — todos os matches do usuário em todos os eventos
