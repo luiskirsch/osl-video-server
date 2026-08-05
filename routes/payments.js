@@ -187,7 +187,11 @@ router.get("/verificar-compra/:ref", (req, res) => {
 
 // POST /webhook — Mercado Pago
 router.post("/webhook", asyncHandler(async (req, res) => {
-  logInfo("mercado_pago_webhook_received", { body: req.body || {} });
+  const _body = req.body || {};
+  logInfo("mercado_pago_webhook_received", {
+    type: _body.type || _body.topic || null,
+    paymentId: _body.data?.id || null,
+  });
 
   const body      = req.body || {};
   const type      = body.type || body.topic || null;

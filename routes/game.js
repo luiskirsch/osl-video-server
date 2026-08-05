@@ -12,12 +12,30 @@ const {
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
 const { roomLimiter } = require("../services/rateLimit");
+const { verifySignedToken } = require("../services/auth");
+const { ADMIN_SECRET } = require("../config");
 
 const router = express.Router();
+
+// Verifica token de sessão do painel via Authorization header OU ?token query param
+// (EventSource do browser não suporta headers customizados, logo aceita query param).
+function checkPanelToken(req) {
+  const fromQuery  = req.query.token || "";
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const token = fromQuery || fromHeader;
+  if (!token || !ADMIN_SECRET) return false;
+  const r = verifySignedToken(token, ADMIN_SECRET);
+  return r.valid && r.payload?.token_type === "panel_session";
+}
 
 // --- SSE do painel ---
 
 router.get("/panel/stream", (req, res) => {
+  if (!checkPanelToken(req)) {
+    res.status(403).json({ ok: false, error: "ADMIN_SECRET_INVALIDO" });
+    return;
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -239,6 +257,7 @@ router.post("/game/session/start", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive = true;
     room.updatedAt = nowIso();
@@ -254,6 +273,7 @@ router.post("/game/session/end", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive  = false;
     room.videoActive    = false;
@@ -272,6 +292,7 @@ router.post("/game/video", (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
     const active = !!req.body?.active;
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.videoActive = active;
     room.updatedAt   = nowIso();
@@ -288,6 +309,7 @@ router.post("/game/recording", (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
     const active = !!req.body?.active;
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.recordingActive = active;
     room.updatedAt       = nowIso();

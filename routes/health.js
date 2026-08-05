@@ -1,11 +1,21 @@
 const express = require("express");
 const fs      = require("fs");
 const { APP_START_TIME, LOG_FILE } = require("../logger");
-const { PORT, APP_ENV, LIVEKIT_API_KEY, LIVEKIT_URL } = require("../config");
+const { PORT, APP_ENV, LIVEKIT_API_KEY, LIVEKIT_URL, ADMIN_SECRET } = require("../config");
 const { getDb } = require("../services/firestore");
 const { activeStreams, activeRecordings } = require("../game/state");
+const { verifySignedToken } = require("../services/auth");
 
 const router = express.Router();
+
+function checkPanelToken(req) {
+  const fromQuery  = req.query.token || "";
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const token = fromQuery || fromHeader;
+  if (!token || !ADMIN_SECRET) return false;
+  const r = verifySignedToken(token, ADMIN_SECRET);
+  return r.valid && r.payload?.token_type === "panel_session";
+}
 
 function firebaseProjectId() {
   const db = getDb();
@@ -95,12 +105,7 @@ router.get("/panel", (req, res) => {
         }
       }
 
-      const source      = new EventSource("/logs/stream");
-      const panelSource = new EventSource("/panel/stream");
-
-      panelSource.addEventListener("rooms", (event) => {
-        console.log("Atualização do painel:", JSON.parse(event.data));
-      });
+      const source = new EventSource("/logs/stream");
 
       source.addEventListener("bootstrap", (event) => {
         try { const lines = JSON.parse(event.data); logsEl.innerHTML = ""; lines.forEach(addLogLine); } catch (e) {}
@@ -130,6 +135,11 @@ router.get("/logs", (req, res) => {
 });
 
 router.get("/logs/stream", (req, res) => {
+  if (!checkPanelToken(req)) {
+    res.status(403).json({ ok: false, error: "ADMIN_SECRET_INVALIDO" });
+    return;
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",

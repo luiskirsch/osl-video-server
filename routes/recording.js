@@ -5,26 +5,38 @@ const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, 
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken } = require("../video/webrtc");
 const { getDb, isPrestige, isPassActive } = require("../services/firestore");
+const { requireAdmin } = require("../services/auth");
 const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL } = require("../config");
 
 const router = express.Router();
 
 // GET /spectate-token — token LiveKit subscriber-only para espectador (sem câmera/mic)
+// Requer que a sala exista no sistema (criada pelo fluxo do jogo).
 router.get("/spectate-token", asyncHandler(async (req, res) => {
   const { room, user } = req.query;
   if (!room || !user) return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
+
+  const normalizedRoom = normalizeRoomId(room);
+  if (!panelRooms.has(normalizedRoom)) return sendError(res, 403, "SALA_NAO_REGISTRADA");
+
   const token = await generateSpectatorToken(room, user);
   return res.json({ ok: true, token, url: LIVEKIT_URL });
 }));
 
 // GET /token — gera token LiveKit para WebRTC
+// Requer que a sala exista E que o jogador já tenha sido aprovado (está em room.players).
 router.get("/token", asyncHandler(async (req, res) => {
   const room = req.query.room;
   const user = req.query.user;
 
   if (!room || !user) return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
+
+  const normalizedRoom = normalizeRoomId(room);
+  const panelRoom = panelRooms.get(normalizedRoom);
+  if (!panelRoom) return sendError(res, 403, "SALA_NAO_REGISTRADA");
+  if (!panelRoom.players[user]) return sendError(res, 403, "JOGADOR_NAO_APROVADO");
 
   const token = await generateLiveKitToken(room, user);
   return res.json({ ok: true, token });
@@ -43,10 +55,14 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
 }));
 
 // POST /recording/auto-start — inicia gravação automaticamente quando o ritual começa
+// Requer que a sala exista e tenha sessão ativa (impede abuso de Egress por IDs aleatórios).
 router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
+
+  const room = panelRooms.get(roomId);
+  if (!room || !room.sessionActive) return sendError(res, 403, "SALA_SEM_SESSAO_ATIVA");
 
   if (activeRecordings.has(roomId)) {
     const job = activeRecordings.get(roomId);
@@ -62,8 +78,8 @@ router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   }
 }));
 
-// POST /recording/discard — para e descarta a gravação (sem salvar URL)
-router.post("/recording/discard", asyncHandler(async (req, res) => {
+// POST /recording/discard — para e descarta a gravação (sem salvar URL) [admin only]
+router.post("/recording/discard", requireAdmin, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
@@ -167,8 +183,8 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
   }
 }));
 
-// POST /recording/stop
-router.post("/recording/stop", asyncHandler(async (req, res) => {
+// POST /recording/stop [admin only]
+router.post("/recording/stop", requireAdmin, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!activeRecordings.has(roomId)) return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");

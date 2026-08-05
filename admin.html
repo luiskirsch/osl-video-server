@@ -1420,7 +1420,8 @@
     function connectLogStream() {
       if (state.logsEventSource) state.logsEventSource.close();
       try {
-        const src = new EventSource(SERVER+"/logs/stream");
+        const tk = encodeURIComponent(getPanelToken());
+        const src = new EventSource(SERVER+"/logs/stream?token="+tk);
         state.logsEventSource = src;
         src.addEventListener("bootstrap",e=>{ if(state.logsPaused)return; try{const l=JSON.parse(e.data);if(Array.isArray(l))l.slice(-120).forEach(parseLogLine);}catch{} });
         src.addEventListener("log",e=>{ if(!state.logsPaused) parseLogLine(e.data); });

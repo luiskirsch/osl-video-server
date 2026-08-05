@@ -131,10 +131,13 @@ router.post("/encontro/perfil/foto", requireFirebaseToken, photoLimiter, require
   }
 }));
 
-// GET /encontro/perfil/foto — busca foto de perfil de qualquer usuário
+// GET /encontro/perfil/foto — busca foto de perfil
+// Apenas o próprio usuário pode buscar sua foto via uid externo.
+// Para ver fotos de terceiros, usar /encontro/foto (requer match confirmado).
 router.get("/encontro/perfil/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
   const uid = String(req.query.uid || req.firebaseUid || "").trim();
   if (!uid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  if (uid !== req.firebaseUid) return sendError(res, 403, "ACESSO_NEGADO");
   const photo = await getProfilePhoto(uid);
   return res.json({ ok: true, photo: photo || null });
 }));
@@ -160,11 +163,15 @@ router.post("/encontro/foto", requireFirebaseToken, photoLimiter, asyncHandler(a
   }
 }));
 
-// GET /encontro/foto — busca foto de um participante
+// GET /encontro/foto — busca foto de um participante (requer match mútuo confirmado)
 router.get("/encontro/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
   const eventId = String(req.query.eventId || "").trim();
   const uid     = String(req.query.uid     || "").trim();
   if (!eventId || !uid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  if (uid !== req.firebaseUid) {
+    const matched = await checkMutualMatch(eventId, req.firebaseUid, uid);
+    if (!matched) return sendError(res, 403, "SEM_MATCH_CONFIRMADO");
+  }
   const photo = await getUserPhoto(eventId, uid);
   return res.json({ ok: true, photo: photo || null });
 }));
