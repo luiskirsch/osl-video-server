@@ -64,6 +64,9 @@ const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
 const baggioRouter    = require("./routes/baggio");
 const encontroRouter  = require("./routes/encontro");
+const securityRouter  = require("./routes/security");
+
+const { globalLimiter } = require("./services/rateLimit");
 
 // --- App ---
 const app = express();
@@ -105,6 +108,9 @@ app.use(stripeWebhookRouter);
 // validando tamanho específico no handler.
 app.use(express.json({ limit: "6mb" }));
 app.use(express.urlencoded({ extended: true, limit: "6mb" }));
+
+// Rate limit global: 300 req/min por IP em qualquer rota
+app.use(globalLimiter);
 
 // Demais rotas Stripe (create-checkout, portal) — precisam do body JSON parseado.
 app.use(stripeRouter);
@@ -148,6 +154,7 @@ app.use(aiRouter);
 app.use(therapyRouter);
 app.use(baggioRouter);
 app.use(encontroRouter);
+app.use(securityRouter);
 
 // --- 404 ---
 app.use((req, res) => {

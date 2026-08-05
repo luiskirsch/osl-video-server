@@ -2,7 +2,25 @@
 // initSocketIo() chamado uma vez em server.js; getIo() usado nos handlers.
 const { Server } = require("socket.io");
 const admin = require("firebase-admin");
-const { logInfo, logError } = require("../logger");
+const { logInfo, logWarn, logError } = require("../logger");
+
+// Rate limit de chat por WebSocket: 20 mensagens/minuto por uid.
+// In-memory — adequado para Railway (redeploy reseta, não há estado crítico aqui).
+const CHAT_MAX_PER_MIN = 20;
+const CHAT_WINDOW_MS   = 60_000;
+const chatCounters     = new Map(); // uid → { count, windowStart }
+
+function checkChatRateLimit(uid) {
+  const now = Date.now();
+  const e   = chatCounters.get(uid);
+  if (!e || now - e.windowStart > CHAT_WINDOW_MS) {
+    chatCounters.set(uid, { count: 1, windowStart: now });
+    return true;
+  }
+  if (e.count >= CHAT_MAX_PER_MIN) return false;
+  e.count++;
+  return true;
+}
 
 let _io = null;
 
@@ -14,15 +32,25 @@ function initSocketIo(httpServer, allowedOrigins) {
     transports: ["websocket", "polling"]
   });
 
-  // Middleware de autenticação via Firebase ID Token.
+  // Middleware de autenticação + verificação de ban via Firebase ID Token.
   _io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("AUTH_REQUIRED"));
     try {
       const decoded = await admin.auth().verifyIdToken(token);
       socket.uid = decoded.uid;
+
+      // Usuários banidos não podem conectar ao socket
+      const { isUserBanned } = require("./abuseGuard");
+      const banned = await isUserBanned(decoded.uid);
+      if (banned) {
+        logWarn("banned_user_socket_blocked", { uid: decoded.uid });
+        return next(new Error("USER_BANNED"));
+      }
+
       next();
-    } catch {
+    } catch (err) {
+      if (err.message === "USER_BANNED") return next(err);
       next(new Error("AUTH_INVALID"));
     }
   });
@@ -63,7 +91,15 @@ function initSocketIo(httpServer, allowedOrigins) {
 
     socket.on("chat:message", async ({ eventId, recipientUid, text }) => {
       if (!eventId || !recipientUid || !text?.trim()) return;
-      const safeText = String(text).trim().slice(0, 1000);
+
+      // Rate limit: 20 mensagens/min por usuário
+      if (!checkChatRateLimit(socket.uid)) {
+        logWarn("chat_rate_limit_hit", { uid: socket.uid, eventId });
+        socket.emit("chat:error", { error: "MENSAGENS_MUITO_RAPIDAS" });
+        return;
+      }
+
+      const safeText = String(text).trim().slice(0, 500);
       try {
         const { checkMutualMatch, saveChatMessage, makeChatId } = require("./encontroService");
         const ok = await checkMutualMatch(eventId, socket.uid, recipientUid);

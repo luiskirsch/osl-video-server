@@ -11,6 +11,7 @@ const {
   getOrCreatePanelRoom, cleanupPanelRooms, closeRoom
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
+const { roomLimiter } = require("../services/rateLimit");
 
 const router = express.Router();
 
@@ -41,7 +42,7 @@ router.get("/panel/stream", (req, res) => {
 
 // --- Salas ---
 
-router.post("/game/room/create", (req, res) => {
+router.post("/game/room/create", roomLimiter, (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     const name   = String(req.body?.name || "").trim();

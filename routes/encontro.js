@@ -2,8 +2,10 @@ const express    = require("express");
 const admin      = require("firebase-admin");
 const { asyncHandler, sendError } = require("../utils");
 const { requireAdmin } = require("../services/auth");
-const { logError } = require("../logger");
+const { logError, logWarn } = require("../logger");
 const { ensureDb, getDb } = require("../services/firestore");
+const { authLimiter, voteLimiter, photoLimiter, reportLimiter } = require("../services/rateLimit");
+const { requireNotBanned, reportUser, VALID_REASONS } = require("../services/abuseGuard");
 const {
   createEvent, listEvents, getEvent, deleteEvent,
   verifyTicket, checkinParticipant,
@@ -74,7 +76,7 @@ router.get("/encontro/meu-checkin", requireFirebaseToken, asyncHandler(async (re
 }));
 
 // POST /encontro/checkin — check-in do participante
-router.post("/encontro/checkin", requireFirebaseToken, asyncHandler(async (req, res) => {
+router.post("/encontro/checkin", requireFirebaseToken, authLimiter, requireNotBanned, asyncHandler(async (req, res) => {
   const eventId = String(req.body?.eventId || "").trim();
   const name    = String(req.body?.name    || "").trim().slice(0, 40);
   const gender  = String(req.body?.gender  || "").trim().toUpperCase();
@@ -95,7 +97,7 @@ router.post("/encontro/checkin", requireFirebaseToken, asyncHandler(async (req, 
 }));
 
 // POST /encontro/match — votar interesse
-router.post("/encontro/match", requireFirebaseToken, asyncHandler(async (req, res) => {
+router.post("/encontro/match", requireFirebaseToken, voteLimiter, requireNotBanned, asyncHandler(async (req, res) => {
   const eventId   = String(req.body?.eventId   || "").trim();
   const targetUid = String(req.body?.targetUid || "").trim();
   const liked     = req.body?.liked === true || req.body?.liked === "true";
@@ -116,7 +118,7 @@ router.get("/encontro/matches", requireFirebaseToken, asyncHandler(async (req, r
 }));
 
 // POST /encontro/perfil/foto — salva foto de perfil permanente do usuário
-router.post("/encontro/perfil/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+router.post("/encontro/perfil/foto", requireFirebaseToken, photoLimiter, requireNotBanned, asyncHandler(async (req, res) => {
   const photo = String(req.body?.photo || "").trim();
   if (!photo) return sendError(res, 400, "PARAMETROS_INVALIDOS");
   if (!photo.startsWith("data:image/")) return sendError(res, 400, "FORMATO_INVALIDO");
@@ -144,7 +146,7 @@ router.get("/encontro/meus-matches", requireFirebaseToken, asyncHandler(async (r
 }));
 
 // POST /encontro/foto — salva foto do participante (thumbnail JPEG base64)
-router.post("/encontro/foto", requireFirebaseToken, asyncHandler(async (req, res) => {
+router.post("/encontro/foto", requireFirebaseToken, photoLimiter, asyncHandler(async (req, res) => {
   const eventId = String(req.body?.eventId || "").trim();
   const photo   = String(req.body?.photo   || "").trim();
   if (!eventId || !photo) return sendError(res, 400, "PARAMETROS_INVALIDOS");
@@ -177,6 +179,33 @@ router.get("/encontro/chat", requireFirebaseToken, asyncHandler(async (req, res)
   const chatId = makeChatId(eventId, req.firebaseUid, recipientUid);
   const msgs   = await getChatMessages(chatId);
   return res.json({ ok: true, chatId, msgs });
+}));
+
+// POST /encontro/reportar — denunciar um usuário (assédio, nudez, ameaça etc.)
+router.post("/encontro/reportar", requireFirebaseToken, reportLimiter, asyncHandler(async (req, res) => {
+  const reportedUid = String(req.body?.reportedUid || "").trim();
+  const reason      = String(req.body?.reason      || "").trim().toUpperCase();
+  const comment     = String(req.body?.comment     || "").trim();
+  const eventId     = String(req.body?.eventId     || "").trim() || null;
+
+  if (!reportedUid)                   return sendError(res, 400, "PARAMETROS_INVALIDOS");
+  if (!VALID_REASONS.includes(reason)) return sendError(res, 400, "MOTIVO_INVALIDO");
+
+  try {
+    const result = await reportUser({
+      reporterUid: req.firebaseUid,
+      reportedUid,
+      reason,
+      comment,
+      context: eventId ? { eventId } : null,
+    });
+    logWarn("encontro_report_submitted", { reporterUid: req.firebaseUid, reportedUid, reason, eventId });
+    return res.json({ ok: true, reportId: result.reportId });
+  } catch (err) {
+    if (err.code === "MOTIVO_INVALIDO") return sendError(res, 400, "MOTIVO_INVALIDO");
+    if (err.code === "AUTO_DENUNCIA")   return sendError(res, 400, "AUTO_DENUNCIA");
+    throw err;
+  }
 }));
 
 // ─── Rotas admin ──────────────────────────────────────────────────────────────
