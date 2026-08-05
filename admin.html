@@ -2,968 +2,953 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <title>OSL // SYSTEM CORE</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-
+  <title>OSL Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
-    :root{
-      --bg:#020504;
-      --bg2:#03110c;
-      --bg3:#072117;
-      --panel:#071410;
-      --panel-soft:#0a1b15;
-      --line:rgba(0,255,156,.12);
-      --line-2:rgba(0,255,156,.22);
-      --line-3:rgba(0,255,156,.34);
-      --text:#e7fff7;
-      --muted:#8ab8aa;
-      --green:#00ff9c;
-      --green2:#00d985;
-      --danger:#ff6b6b;
-      --warn:#ffd166;
-      --radius-xl:26px;
-      --radius-lg:22px;
-      --radius-md:18px;
-      --radius-sm:14px;
-      --shadow:0 18px 70px rgba(0,0,0,.42);
-      --glow:0 0 18px rgba(0,255,156,.14);
-    }
-
-    *{ box-sizing:border-box; }
-
-    html,body{
-      margin:0;
-      min-height:100%;
-      background:
-        radial-gradient(circle at 20% 20%, rgba(0,255,156,.08), transparent 35%),
-        radial-gradient(circle at 80% 0%, rgba(0,150,90,.10), transparent 35%),
-        radial-gradient(circle at 50% 100%, rgba(0,255,156,.05), transparent 30%),
-        linear-gradient(180deg, var(--bg3) 0%, var(--bg2) 38%, var(--bg) 100%);
-      color:var(--text);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      overflow-x:hidden;
-    }
-
-    body::before{
-      content:"";
-      position:fixed;
-      inset:0;
-      pointer-events:none;
-      background:
-        linear-gradient(rgba(0,255,156,.018) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,255,156,.018) 1px, transparent 1px);
-      background-size:32px 32px;
-      opacity:.16;
-    }
-
-    body::after{
-      content:"";
-      position:fixed;
-      inset:0;
-      pointer-events:none;
-      background:radial-gradient(circle at center, transparent 58%, rgba(0,0,0,.38) 100%);
-      opacity:.9;
-    }
-
-    .page{
-      position:relative;
-      z-index:1;
-      min-height:100vh;
-      padding:
-        max(12px, env(safe-area-inset-top))
-        max(12px, env(safe-area-inset-right))
-        max(12px, env(safe-area-inset-bottom))
-        max(12px, env(safe-area-inset-left));
-    }
-
-    .shell{
-      width:min(1620px, 100%);
-      margin:0 auto;
-      display:grid;
-      gap:14px;
-    }
-
-    .topbar{
-      display:grid;
-      grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto;
-      align-items:center;
-      gap:16px;
-      min-height:110px;
-      padding:18px 20px;
-      border:1px solid var(--line-3);
-      border-radius:28px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,.018), rgba(255,255,255,.008)),
-        radial-gradient(circle at 50% 0%, rgba(0,255,156,.12), transparent 58%),
-        linear-gradient(180deg, rgba(8,26,19,.92), rgba(4,12,9,.97));
-      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.015);
-      overflow:hidden;
-      position:relative;
-    }
-
-    .topbar::before{
-      content:"";
-      position:absolute;
-      inset:0;
-      pointer-events:none;
-      background:linear-gradient(90deg, transparent, rgba(0,255,156,.10), transparent);
-      opacity:.32;
-    }
-
-    .eyebrow{
-      margin:0 0 8px;
-      font-size:11px;
-      letter-spacing:.34em;
-      text-transform:uppercase;
-      color:var(--muted);
-    }
-
-    .title{
-      margin:0;
-      line-height:.88;
-      letter-spacing:-.06em;
-      font-size:clamp(42px, 5vw, 74px);
-      color:#f2fff9;
-      text-shadow:0 0 18px rgba(0,255,156,.10);
-    }
-
-    .meta{
-      display:flex;
-      justify-content:center;
-      align-items:center;
-      flex-wrap:wrap;
-      gap:12px;
-      font-size:15px;
-      color:#d9fff0;
-    }
-
-    .meta strong{
-      color:var(--green);
-      text-shadow:0 0 10px rgba(0,255,156,.24);
-    }
-
-    .topActions{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-
-    .btn{
-      appearance:none;
-      border:none;
-      cursor:pointer;
-      min-height:52px;
-      padding:12px 18px;
-      border-radius:16px;
-      font:inherit;
-      font-size:14px;
-      font-weight:800;
-      color:var(--text);
-      background:rgba(255,255,255,.03);
-      border:1px solid var(--line-2);
-      transition:transform .12s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
-    }
-
-    .btn:hover{
-      transform:translateY(-1px);
-      background:rgba(255,255,255,.05);
-      border-color:var(--line-3);
-    }
-
-    .btn:active{
-      transform:translateY(0);
-      opacity:.95;
-    }
-
-    .btnPrimary{
-      background:linear-gradient(180deg, #00ff9c, #00d47f);
-      color:#04150f;
-      border-color:transparent;
-      box-shadow:0 0 24px rgba(0,255,156,.18);
-    }
-
-    .btnDanger{
-      color:#ffdede;
-      border-color:rgba(255,107,107,.18);
-      background:rgba(255,107,107,.08);
-    }
-
-    .layout{
-      display:grid;
-      grid-template-columns:280px minmax(0,1fr) 360px;
-      gap:14px;
-      min-height:calc(100vh - 150px);
-    }
-
-    .sideCol,
-    .centerCol,
-    .rightCol{
-      display:grid;
-      gap:14px;
-      align-content:start;
-      min-height:0;
-    }
-
-    .card{
-      position:relative;
-      overflow:hidden;
-      border:1px solid var(--line-2);
-      border-radius:26px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.006)),
-        linear-gradient(180deg, rgba(6,18,14,.94), rgba(3,11,8,.97));
-      box-shadow:var(--shadow), inset 0 0 0 1px rgba(255,255,255,.012);
-      min-height:0;
-      min-width:0;
-    }
-
-    .card::before{
-      content:"";
-      position:absolute;
-      inset:0;
-      pointer-events:none;
-      background:radial-gradient(480px 140px at 50% 0%, rgba(0,255,156,.08), transparent 66%);
-      opacity:.7;
-    }
-
-    .cardInner{
-      position:relative;
-      z-index:1;
-      padding:18px;
-    }
-
-    .label{
-      margin:0 0 14px;
-      font-size:11px;
-      letter-spacing:.30em;
-      text-transform:uppercase;
-      color:var(--green);
-      text-shadow:0 0 8px rgba(0,255,156,.18);
-    }
-
-    .navButtons{
-      display:grid;
-      gap:12px;
-    }
-
-    .navBtn{
-      width:100%;
-      text-align:left;
-      padding:16px 18px;
-      border-radius:18px;
-      border:1px solid var(--line-2);
-      background:rgba(255,255,255,.02);
-      color:#e4fff6;
-      cursor:pointer;
-      font:inherit;
-      font-size:16px;
-      transition:all .15s ease;
-    }
-
-    .navBtn:hover,
-    .navBtn.active{
-      background:linear-gradient(180deg, rgba(0,255,156,.14), rgba(0,255,156,.05));
-      border-color:var(--line-3);
-      box-shadow:var(--glow);
-    }
-
-    .miniStack{
-      display:grid;
-      gap:12px;
-    }
-
-    .miniBox{
-      border:1px solid var(--line);
-      border-radius:18px;
-      padding:14px;
-      background:rgba(255,255,255,.02);
-    }
-
-    .miniBox b{
-      display:block;
-      margin-bottom:10px;
-      font-size:11px;
-      letter-spacing:.20em;
-      text-transform:uppercase;
-      color:var(--muted);
-    }
-
-    .miniBox span{
-      display:block;
-      line-height:1.7;
-      font-size:14px;
-      color:#edfff8;
-      word-break:break-word;
-    }
-
-    .metricsCard .metricsGrid{
-      display:grid;
-      grid-template-columns:repeat(3, minmax(0,1fr));
-      gap:14px;
-    }
-
-    .metric{
-      border:1px solid var(--line);
-      border-radius:22px;
-      padding:16px;
-      background:rgba(255,255,255,.02);
-      min-width:0;
-    }
-
-    .metricLabel{
-      font-size:11px;
-      letter-spacing:.24em;
-      text-transform:uppercase;
-      color:var(--muted);
-      margin-bottom:12px;
-    }
-
-    .metricValue{
-      font-size:clamp(34px, 4vw, 52px);
-      font-weight:900;
-      line-height:1;
-      color:#f2fff9;
-      text-shadow:0 0 14px rgba(0,255,156,.08);
-    }
-
-    .metricHint{
-      margin-top:12px;
-      color:var(--muted);
-      font-size:12px;
-      line-height:1.55;
-    }
-
-    .panelSection{ display:none; }
-    .panelSection.active{ display:block; }
-
-    .panelHeader{
-      display:flex;
-      justify-content:space-between;
-      align-items:flex-start;
-      gap:12px;
-      flex-wrap:wrap;
-      margin-bottom:14px;
-    }
-
-    .panelHeader h2{
-      margin:0 0 6px;
-      font-size:clamp(30px, 3vw, 56px);
-      line-height:.92;
-      letter-spacing:-.05em;
-      color:#f3fff9;
-    }
-
-    .panelHeader p{
-      margin:0;
-      color:var(--muted);
-      font-size:14px;
-      line-height:1.6;
-    }
-
-    .search{
-      width:100%;
-      min-height:56px;
-      border-radius:16px;
-      border:1px solid var(--line-2);
-      background:rgba(0,0,0,.20);
-      color:var(--text);
-      padding:14px 16px;
-      outline:none;
-      font:inherit;
-      font-size:14px;
-    }
-
-    .search::placeholder{
-      color:rgba(231,255,247,.32);
-    }
-
-    .roomsList,
-    .chatList,
-    .videoList,
-    .systemList{
-      display:grid;
-      gap:12px;
-      margin-top:14px;
-    }
-
-    .rowCard{
-      border:1px solid var(--line);
-      border-radius:22px;
-      background:rgba(255,255,255,.02);
-      padding:16px;
-    }
-
-    .rowTitle{
-      margin:0 0 8px;
-      font-size:22px;
-      line-height:1.05;
-      color:#f1fff8;
-    }
-
-    .rowMeta{
-      display:flex;
-      flex-wrap:wrap;
-      gap:8px;
-      margin-bottom:12px;
-    }
-
-    .badge{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      min-height:28px;
-      padding:0 10px;
-      border-radius:999px;
-      border:1px solid var(--line-2);
-      background:rgba(255,255,255,.03);
-      color:#ddfff3;
-      font-size:11px;
-      letter-spacing:.14em;
-      text-transform:uppercase;
-    }
-
-    .badge.ok{
-      color:#dffff0;
-      background:rgba(0,255,156,.08);
-      border-color:rgba(0,255,156,.24);
-    }
-
-    .badge.warn{
-      color:#fff6d8;
-      background:rgba(255,209,102,.08);
-      border-color:rgba(255,209,102,.24);
-    }
-
-    .badge.danger{
-      color:#ffdede;
-      background:rgba(255,107,107,.08);
-      border-color:rgba(255,107,107,.24);
-    }
-
-    .roomGrid{
-      display:grid;
-      grid-template-columns:repeat(4, minmax(0,1fr));
-      gap:10px;
-    }
-
-    .subBox{
-      border:1px solid rgba(0,255,156,.10);
-      border-radius:16px;
-      padding:12px;
-      background:rgba(255,255,255,.015);
-      min-width:0;
-    }
-
-    .subBox b{
-      display:block;
-      margin-bottom:8px;
-      font-size:10px;
-      letter-spacing:.18em;
-      text-transform:uppercase;
-      color:var(--muted);
-    }
-
-    .subBox span{
-      font-size:14px;
-      color:#eefff9;
-      word-break:break-word;
-    }
-
-    .playersWrap{
-      display:grid;
-      gap:10px;
-      margin-top:12px;
-    }
-
-    .playerLine{
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      gap:12px;
-      flex-wrap:wrap;
-      padding:12px;
-      border-radius:16px;
-      border:1px solid rgba(0,255,156,.10);
-      background:rgba(255,255,255,.015);
-    }
-
-    .chatEntry{
-      border:1px solid rgba(0,255,156,.10);
-      border-radius:18px;
-      background:rgba(255,255,255,.02);
-      padding:14px;
-    }
-
-    .chatMeta{
-      font-size:11px;
-      letter-spacing:.16em;
-      text-transform:uppercase;
-      color:var(--green);
-      margin-bottom:8px;
-    }
-
-    .chatText{
-      font-size:14px;
-      line-height:1.65;
-      color:#effff8;
-      word-break:break-word;
-    }
-
-    .videoGrid{
-      display:grid;
-      grid-template-columns:repeat(2, minmax(0,1fr));
-      gap:12px;
-    }
-
-    .videoBox{
-      border:1px solid rgba(0,255,156,.10);
-      border-radius:18px;
-      background:rgba(255,255,255,.02);
-      padding:14px;
-    }
-
-    .videoBox h3{
-      margin:0 0 10px;
-      font-size:20px;
-      color:#effff8;
-    }
-
-    .sysRows{
-      display:grid;
-      gap:12px;
-    }
-
-    .sysRow{
-      border:1px solid rgba(0,255,156,.10);
-      border-radius:18px;
-      background:rgba(255,255,255,.02);
-      padding:14px;
-      line-height:1.65;
-      font-size:14px;
-      color:#effff8;
-    }
-
-    .logsCard{
-      display:grid;
-      grid-template-rows:auto auto 1fr;
-      min-height:0;
-    }
-
-    .logsTools{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      margin-bottom:14px;
-    }
-
-    .logsBox{
-      min-height:420px;
-      max-height:calc(100vh - 260px);
-      overflow:auto;
-      display:grid;
-      gap:10px;
-      align-content:start;
-      padding-right:2px;
-    }
-
-    .logLine{
-      border:1px solid rgba(0,255,156,.14);
-      border-radius:16px;
-      background:rgba(255,255,255,.02);
-      padding:12px 14px;
-      font-size:13px;
-      line-height:1.65;
-      color:#eafff7;
-      word-break:break-word;
-      box-shadow:inset 3px 0 0 rgba(0,255,156,.38);
-    }
-
-    .logLine.info{ box-shadow:inset 3px 0 0 rgba(0,255,156,.38); }
-    .logLine.warn{ box-shadow:inset 3px 0 0 rgba(255,209,102,.60); }
-    .logLine.error{ box-shadow:inset 3px 0 0 rgba(255,107,107,.60); }
-
-    .emptyState{
-      border:1px dashed var(--line-2);
-      border-radius:18px;
-      background:rgba(255,255,255,.015);
-      padding:22px 18px;
-      text-align:center;
-      color:var(--muted);
-      line-height:1.7;
-      margin-top:14px;
-    }
-
-    .footer{
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      gap:12px;
-      flex-wrap:wrap;
-      color:var(--muted);
-      font-size:12px;
-      letter-spacing:.10em;
-      text-transform:uppercase;
-      padding:2px 4px 0;
-    }
-
-    .footer strong{
-      color:var(--green);
-    }
-
-    @media (max-width:1320px){
-      .layout{
-        grid-template-columns:260px minmax(0,1fr);
-      }
-
-      .rightCol{
-        grid-column:1 / -1;
-      }
-
-      .logsBox{
-        max-height:360px;
-      }
-    }
-
-    @media (max-width:1024px){
-      .layout{
-        grid-template-columns:1fr;
-      }
-
-      .metricsCard .metricsGrid{
-        grid-template-columns:repeat(2, minmax(0,1fr));
-      }
-
-      .roomGrid{
-        grid-template-columns:repeat(2, minmax(0,1fr));
-      }
-
-      .videoGrid{
-        grid-template-columns:1fr;
-      }
-    }
-
-    @media (max-width:760px){
-      .page{
-        padding:
-          max(10px, env(safe-area-inset-top))
-          max(10px, env(safe-area-inset-right))
-          max(10px, env(safe-area-inset-bottom))
-          max(10px, env(safe-area-inset-left));
-      }
-
-      .topbar{
-        grid-template-columns:1fr;
-        min-height:auto;
-        border-radius:22px;
-        padding:16px;
-      }
-
-      .title{
-        font-size:54px;
-      }
-
-      .meta{
-        justify-content:flex-start;
-      }
-
-      .topActions{
-        justify-content:flex-start;
-      }
-
-      .metricsCard .metricsGrid{
-        grid-template-columns:1fr;
-      }
-
-      .navButtons{
-        grid-template-columns:repeat(2, minmax(0,1fr));
-      }
-
-      .navBtn{
-        text-align:center;
-      }
-
-      .logsTools{
-        flex-direction:column;
-      }
-
-      .btn{
-        width:100%;
-      }
-
-      .roomGrid{
-        grid-template-columns:1fr;
-      }
-    }
-
-    @media (max-width:520px){
-      .title{
-        font-size:44px;
-      }
-
-      .navButtons{
-        grid-template-columns:1fr;
-      }
-
-      .panelHeader h2{
-        font-size:38px;
-      }
-
-      .rowTitle{
-        font-size:20px;
-      }
-
-      .logsBox{
-        min-height:280px;
-        max-height:320px;
-      }
+    :root {
+      --bg:      #060b09;
+      --sidebar: #040d08;
+      --card:    #0b1510;
+      --line:    rgba(0,255,156,.10);
+      --line-2:  rgba(0,255,156,.18);
+      --line-3:  rgba(0,255,156,.30);
+      --text:    #dff5eb;
+      --muted:   #4a7060;
+      --green:   #00ff9c;
+      --danger:  #ff6b6b;
+      --warn:    #ffd166;
+      --chrome:  system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      --mono:    ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--chrome);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── App shell ── */
+    .app {
+      display: grid;
+      grid-template:
+        "sidebar topbar" 50px
+        "sidebar main"   1fr
+        / 208px 1fr;
+      height: 100vh;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      grid-area: sidebar;
+      background: var(--sidebar);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    .sidebar-logo {
+      padding: 13px 14px 11px;
+      border-bottom: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+
+    .sidebar-logo-text {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--green);
+    }
+
+    .sidebar-logo-sub {
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: .10em;
+      text-transform: uppercase;
+      margin-top: 1px;
+    }
+
+    .nav {
+      flex: 1;
+      padding: 8px 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .navBtn {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      padding: 8px 10px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font-family: var(--chrome);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      transition: background .10s, color .10s;
+    }
+
+    .navBtn:hover { background: rgba(0,255,156,.06); color: var(--text); }
+    .navBtn.active { background: rgba(0,255,156,.10); color: var(--green); }
+    .navBtn svg { flex-shrink: 0; opacity: .65; }
+    .navBtn.active svg { opacity: 1; }
+    .navBtn.em-btn { color: #d4708a; }
+    .navBtn.em-btn:hover, .navBtn.em-btn.active { color: #e87b8f; background: rgba(232,123,143,.08); }
+
+    .nav-sep { height: 1px; background: var(--line); margin: 5px 6px; }
+
+    .sidebar-secret {
+      padding: 10px 10px 8px;
+      border-top: 1px solid var(--line);
+      flex-shrink: 0;
+    }
+
+    .sidebar-secret-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .sidebar-info {
+      padding: 8px 12px 10px;
+      border-top: 1px solid var(--line);
+      font-size: 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .sidebar-info span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* ── Topbar ── */
+    .topbar {
+      grid-area: topbar;
+      background: var(--card);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 0;
+      padding: 0 14px;
+      overflow: hidden;
+    }
+
+    .beacon {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #ff6b6b;
+      flex-shrink: 0;
+      margin-right: 8px;
+    }
+
+    .beacon.online {
+      background: var(--green);
+      animation: blink 2.4s ease infinite;
+    }
+
+    @keyframes blink {
+      0%,100% { box-shadow: 0 0 0 0 rgba(0,255,156,.5); }
+      60%      { box-shadow: 0 0 0 5px rgba(0,255,156,0); }
+    }
+
+    .tb-status {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-right: 14px;
+      white-space: nowrap;
+      display: flex;
+      gap: 5px;
+      align-items: center;
+    }
+
+    .tb-status strong { color: var(--text); font-weight: 600; }
+    .tb-dot { color: rgba(74,112,96,.5); }
+
+    .chips {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .chip {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(0,255,156,.04);
+      border: 1px solid var(--line);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .chip-l { color: var(--muted); font-weight: 500; }
+    .chip-v { color: var(--text); font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    .tb-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; margin-left: 10px; }
+
+    /* ── Buttons ── */
+    .btn {
+      appearance: none;
+      border: 1px solid var(--line-2);
+      border-radius: 5px;
+      background: rgba(255,255,255,.04);
+      color: var(--text);
+      font-family: var(--chrome);
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 11px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .10s, border-color .10s;
+    }
+
+    .btn:hover { background: rgba(255,255,255,.08); border-color: var(--line-3); }
+
+    .btnPrimary { background: var(--green); color: #030e08; border-color: transparent; }
+    .btnPrimary:hover { background: #00e68c; border-color: transparent; }
+
+    .btnDanger { color: #ffdede; border-color: rgba(255,107,107,.22); background: rgba(255,107,107,.07); }
+    .btnDanger:hover { background: rgba(255,107,107,.14); border-color: rgba(255,107,107,.36); }
+
+    /* ── Main ── */
+    .main {
+      grid-area: main;
+      display: grid;
+      grid-template-columns: 1fr 268px;
+      overflow: hidden;
+    }
+
+    .content-col {
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 14px;
+    }
+
+    /* ── Panel sections ── */
+    .panelSection { display: none; }
+    .panelSection.active { display: block; }
+
+    .section-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .section-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -.02em; }
+    .section-desc  { font-size: 11px; color: var(--muted); }
+
+    /* ── Search ── */
+    .search {
+      width: 100%;
+      padding: 7px 11px;
+      background: var(--card);
+      border: 1px solid var(--line-2);
+      border-radius: 5px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+      margin-bottom: 10px;
+    }
+
+    .search::placeholder { color: var(--muted); }
+    .search:focus { border-color: var(--line-3); }
+
+    /* ── Row cards ── */
+    .rowCard {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--card);
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+
+    .rowCard:last-child { margin-bottom: 0; }
+    .rowTitle { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 7px; }
+    .rowMeta  { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .badge.ok     { background: rgba(0,255,156,.07);   border-color: rgba(0,255,156,.22);   color: #7fffd4; }
+    .badge.warn   { background: rgba(255,209,102,.07); border-color: rgba(255,209,102,.22); color: #ffd166; }
+    .badge.danger { background: rgba(255,107,107,.07); border-color: rgba(255,107,107,.22); color: #ff9090; }
+
+    /* ── Grid subboxes ── */
+    .roomGrid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0,1fr));
+      gap: 7px;
+      margin-top: 7px;
+    }
+
+    .subBox {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 8px 10px;
+      background: rgba(255,255,255,.02);
+    }
+
+    .subBox b {
+      display: block;
+      font-size: 9px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 3px;
+      font-family: var(--chrome);
+      font-weight: 600;
+    }
+
+    .subBox span {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+      word-break: break-all;
+    }
+
+    /* ── Players ── */
+    .playerLine {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 9px;
+      border-radius: 5px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.01);
+      font-size: 12px;
+      margin-top: 5px;
+    }
+
+    .playerLine strong { color: var(--text); font-family: var(--mono); }
+    .playerLine div:last-child { color: var(--muted); font-family: var(--mono); font-size: 10px; }
+
+    /* ── Chat ── */
+    .chatEntry {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--card);
+      padding: 9px 11px;
+      margin-bottom: 6px;
+    }
+
+    .chatEntry:last-child { margin-bottom: 0; }
+    .chatMeta { font-family: var(--mono); font-size: 10px; color: var(--green); margin-bottom: 3px; }
+    .chatText { font-size: 12px; color: var(--text); line-height: 1.5; word-break: break-word; }
+
+    /* ── Video ── */
+    .videoGrid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 8px; }
+
+    .videoBox {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--card);
+      padding: 11px;
+    }
+
+    .videoBox h3 { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 7px; }
+
+    /* ── System ── */
+    .sysRows { display: grid; gap: 5px; }
+
+    .sysRow {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--card);
+      padding: 8px 11px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .sysRow strong {
+      display: inline-block;
+      min-width: 90px;
+      color: var(--muted);
+      font-family: var(--chrome);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      font-weight: 600;
+    }
+
+    /* ── Empty state ── */
+    .emptyState {
+      border: 1px dashed var(--line-2);
+      border-radius: 7px;
+      padding: 20px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    /* ── Log column ── */
+    .log-col {
+      border-left: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .log-header {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .log-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      color: var(--muted);
+    }
+
+    .log-actions { display: flex; gap: 3px; }
+
+    .logsBox {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .logLine {
+      padding: 5px 7px;
+      border-radius: 4px;
+      background: rgba(255,255,255,.02);
+      border-left: 2px solid rgba(0,255,156,.28);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.5;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .logLine.warn  { border-left-color: rgba(255,209,102,.55); }
+    .logLine.error { border-left-color: rgba(255,107,107,.55); }
+
+    /* ── Field inputs ── */
+    .field-input {
+      width: 100%;
+      padding: 7px 10px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid var(--line-2);
+      border-radius: 5px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+    }
+
+    .field-input:focus { border-color: var(--line-3); }
+
+    .field-label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .10em;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .field-group { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+
+    /* ── Encontro ── */
+    .em-section-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      color: var(--green);
+      margin-bottom: 8px;
+    }
+
+    .em-event-card {
+      border: 1px solid rgba(232,123,143,.18);
+      border-radius: 7px;
+      background: rgba(232,123,143,.03);
+      padding: 11px;
+      margin-bottom: 7px;
+    }
+
+    .em-event-card:last-child { margin-bottom: 0; }
+
+    .em-event-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .em-event-title { font-size: 13px; font-weight: 700; color: var(--text); }
+    .em-event-date  { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .em-event-id    { font-family: var(--mono); font-size: 10px; color: rgba(232,123,143,.6); margin-bottom: 7px; }
+    .em-actions     { display: flex; gap: 5px; flex-wrap: wrap; }
+
+    .em-status {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: var(--mono);
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
+    .em-status.upcoming { background: rgba(255,209,102,.10); border: 1px solid rgba(255,209,102,.25); color: #ffd166; }
+    .em-status.waiting  { background: rgba(0,204,255,.10);   border: 1px solid rgba(0,204,255,.25);   color: #00ccff; }
+    .em-status.running  { background: rgba(0,255,156,.10);   border: 1px solid rgba(0,255,156,.25);   color: #00ff9c; }
+    .em-status.ended    { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.10); color: var(--muted); }
+
+    /* ── Security ── */
+    .sec-report-card {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--card);
+      padding: 10px;
+      margin-bottom: 6px;
+    }
+
+    .sec-report-card:last-child { margin-bottom: 0; }
+
+    .sec-report-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .sec-report-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+    .sec-report-reason { color: var(--warn); font-weight: 700; }
+    .sec-report-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+    .sec-ban-card {
+      border: 1px solid rgba(255,107,107,.14);
+      border-radius: 7px;
+      background: rgba(255,107,107,.03);
+      padding: 10px;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sec-ban-card:last-child { margin-bottom: 0; }
+    .sec-ban-uid    { font-family: var(--mono); font-size: 11px; color: var(--text); }
+    .sec-ban-reason { font-size: 10px; color: var(--muted); margin-top: 1px; }
+
+    /* ── Toast ── */
+    #toastContainer {
+      position: fixed;
+      bottom: 18px;
+      right: 18px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none;
+    }
+
+    .toast {
+      padding: 9px 14px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 500;
+      max-width: 300px;
+      pointer-events: auto;
+      animation: toastIn .15s ease;
+    }
+
+    .toast.ok    { background: rgba(0,255,156,.14); border: 1px solid rgba(0,255,156,.28); color: #7fffd4; }
+    .toast.error { background: rgba(255,107,107,.14); border: 1px solid rgba(255,107,107,.28); color: #ffb0b0; }
+    .toast.info  { background: rgba(0,204,255,.11); border: 1px solid rgba(0,204,255,.24); color: #80e8ff; }
+
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Modals ── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.65);
+      z-index: 500;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    .modal-overlay.open { display: flex; }
+
+    .modal-box {
+      background: #0c1812;
+      border: 1px solid var(--line-3);
+      border-radius: 10px;
+      padding: 22px;
+      width: min(420px, 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .modal-title { font-size: 15px; font-weight: 700; color: var(--text); }
+
+    .modal-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .modal-row:last-of-type { border-bottom: none; padding-bottom: 0; }
+    .modal-row-label { font-size: 10px; text-transform: uppercase; letter-spacing: .10em; color: var(--muted); font-weight: 600; }
+    .modal-row-value { font-family: var(--mono); font-size: 12px; color: var(--text); }
+    .modal-actions   { display: flex; gap: 7px; margin-top: 2px; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar       { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,255,156,.14); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(0,255,156,.24); }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .app { grid-template: "topbar" 50px "main" 1fr / 1fr; }
+      .sidebar { display: none; }
+      .main { grid-template-columns: 1fr; }
+      .log-col { display: none; }
+      .chips { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      .roomGrid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .videoGrid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-  <main class="page">
-    <div class="shell">
+  <div class="app">
 
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">Painel administrativo · núcleo do sistema</p>
-          <h1 class="title">OSL // SYSTEM CORE</h1>
+    <!-- ── Sidebar ── -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="sidebar-logo-text">OSL Admin</div>
+        <div class="sidebar-logo-sub">Painel do sistema</div>
+      </div>
+
+      <nav class="nav">
+        <button class="navBtn active" data-section="dashboard">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="1" width="5" height="5" rx="1" fill="currentColor"/>
+            <rect x="8" y="1" width="5" height="5" rx="1" fill="currentColor"/>
+            <rect x="1" y="8" width="5" height="5" rx="1" fill="currentColor"/>
+            <rect x="8" y="8" width="5" height="5" rx="1" fill="currentColor"/>
+          </svg>
+          Dashboard
+        </button>
+        <button class="navBtn" data-section="rooms">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="3" width="12" height="8" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M1 6h12" stroke="currentColor" stroke-width="1"/>
+          </svg>
+          Salas
+        </button>
+        <button class="navBtn" data-section="chat">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 2.5C2 2 2.45 1.5 3 1.5h8c.55 0 1 .5 1 1v6c0 .55-.45 1-1 1H5l-3 3V2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+          Chat
+        </button>
+        <button class="navBtn" data-section="video">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M9 5.5l4-2v7l-4-2V5.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+          Vídeo
+        </button>
+        <button class="navBtn" data-section="system">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.4"/>
+            <circle cx="7" cy="7" r="2" fill="currentColor"/>
+          </svg>
+          Sistema
+        </button>
+
+        <div class="nav-sep"></div>
+
+        <button class="navBtn em-btn" data-section="encontro">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 12.5C7 12.5 1.5 9 1.5 5A3.5 3.5 0 0 1 8 3.5a3.5 3.5 0 0 1 4.5 1.5C12.5 9 7 12.5 7 12.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+          Encontro
+        </button>
+        <button class="navBtn" data-section="security">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M7 1L1.5 3.5V8c0 2.8 2.4 4.8 5.5 5.5C10.1 12.8 12.5 10.8 12.5 8V3.5L7 1Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          </svg>
+          Segurança
+        </button>
+      </nav>
+
+      <div class="sidebar-secret">
+        <div class="sidebar-secret-label">Admin Secret</div>
+        <input type="password" id="emSecret" class="field-input" placeholder="ADMIN_SECRET" style="font-size:11px;padding:5px 9px" />
+      </div>
+
+      <div class="sidebar-info">
+        <span id="serverUrl" style="color:var(--text)"></span>
+        <span>Atualizado: <span id="lastUpdated">—</span></span>
+        <span>Ciclo: <span id="cycleStatus">Aguardando</span></span>
+        <span id="footerServer" style="display:none"></span>
+      </div>
+    </aside>
+
+    <!-- ── Topbar ── -->
+    <header class="topbar">
+      <div class="beacon" id="beaconDot"></div>
+
+      <div class="tb-status">
+        <strong id="metaServerStatus">—</strong>
+        <span class="tb-dot">·</span>
+        <span id="metaUptime">—</span>
+        <span class="tb-dot">·</span>
+        <span id="metaEnv" style="color:var(--muted)">—</span>
+      </div>
+
+      <div class="chips">
+        <div class="chip"><span class="chip-l">Salas</span><span class="chip-v" id="statRooms">0</span></div>
+        <div class="chip"><span class="chip-l">Jog</span><span class="chip-v" id="statPlayers">0</span></div>
+        <div class="chip"><span class="chip-l">Sess</span><span class="chip-v" id="statSessions">0</span></div>
+        <div class="chip"><span class="chip-l">Vídeo</span><span class="chip-v" id="statVideo">0</span></div>
+        <div class="chip"><span class="chip-l">Grav</span><span class="chip-v" id="statRecord">0</span></div>
+        <div class="chip"><span class="chip-l">Ev</span><span class="chip-v" id="statEvents">0</span></div>
+      </div>
+
+      <div class="tb-actions">
+        <button class="btn" id="refreshBtn">Atualizar</button>
+        <button class="btn btnPrimary" id="autoBtn">Auto: ON</button>
+      </div>
+    </header>
+
+    <!-- ── Main ── -->
+    <div class="main">
+      <div class="content-col">
+
+        <!-- Dashboard -->
+        <div class="panelSection active" id="section-dashboard">
+          <div class="section-header">
+            <span class="section-title">Dashboard</span>
+            <span class="section-desc">Visão consolidada das salas e atividade.</span>
+          </div>
+          <input class="search" id="searchInput" type="text" placeholder="Buscar sala, host, jogador..." />
+          <div id="dashboardContent"></div>
         </div>
 
-        <div class="meta">
-          <span>Servidor: <strong id="metaServerStatus">Conectando</strong></span>
-          <span>•</span>
-          <span>Uptime: <strong id="metaUptime">---</strong></span>
-          <span>•</span>
-          <span>Ambiente: <strong id="metaEnv">---</strong></span>
+        <!-- Salas -->
+        <div class="panelSection" id="section-rooms">
+          <div class="section-header">
+            <span class="section-title">Salas</span>
+            <span class="section-desc">Monitoramento completo das salas ativas.</span>
+          </div>
+          <div id="roomsContent"></div>
         </div>
 
-        <div class="topActions">
-          <button class="btn" id="refreshBtn">Atualizar agora</button>
-          <button class="btn btnPrimary" id="autoBtn">Auto refresh: ON</button>
+        <!-- Chat -->
+        <div class="panelSection" id="section-chat">
+          <div class="section-header">
+            <span class="section-title">Chat</span>
+            <span class="section-desc">Mensagens detectadas pelos logs do sistema.</span>
+          </div>
+          <div id="chatContent"></div>
         </div>
-      </header>
 
-      <section class="layout">
+        <!-- Vídeo -->
+        <div class="panelSection" id="section-video">
+          <div class="section-header">
+            <span class="section-title">Vídeo</span>
+            <span class="section-desc">Estado das salas com vídeo e gravação.</span>
+          </div>
+          <div id="videoContent"></div>
+        </div>
 
-        <aside class="sideCol">
-          <section class="card">
-            <div class="cardInner">
-              <p class="label">Navegação</p>
+        <!-- Sistema -->
+        <div class="panelSection" id="section-system">
+          <div class="section-header">
+            <span class="section-title">Sistema</span>
+            <span class="section-desc">Saúde do backend e ambiente atual.</span>
+          </div>
+          <div id="systemContent"></div>
+        </div>
 
-              <div class="navButtons">
-                <button class="navBtn active" data-section="dashboard">Dashboard</button>
-                <button class="navBtn" data-section="rooms">Salas</button>
-                <button class="navBtn" data-section="chat">Chat</button>
-                <button class="navBtn" data-section="video">Vídeo</button>
-                <button class="navBtn" data-section="system">Sistema</button>
-                <button class="navBtn" data-section="encontro" style="color:#e87b8f">♥ Encontro</button>
-              </div>
+        <!-- Encontro Marcado -->
+        <div class="panelSection" id="section-encontro">
+          <div class="section-header">
+            <span class="section-title" style="color:#e87b8f">♥ Encontro Marcado</span>
+            <button class="btn" onclick="emLoadEvents()">Carregar eventos</button>
+          </div>
+
+          <div style="margin-bottom:16px">
+            <div class="em-section-title">Criar Novo Evento</div>
+            <div class="field-group">
+              <label class="field-label" for="emNewTitle">Título (opcional)</label>
+              <input type="text" id="emNewTitle" class="field-input" placeholder="Encontro Marcado — 01 de Agosto" />
             </div>
-          </section>
-
-          <section class="card">
-            <div class="cardInner miniStack">
-              <p class="label">Servidor alvo</p>
-
-              <div class="miniBox">
-                <b>URL</b>
-                <span id="serverUrl"></span>
-              </div>
-
-              <div class="miniBox">
-                <b>Última atualização</b>
-                <span id="lastUpdated">---</span>
-              </div>
-
-              <div class="miniBox">
-                <b>Status do ciclo</b>
-                <span id="cycleStatus">Aguardando</span>
-              </div>
+            <div class="field-group">
+              <label class="field-label" for="emNewDate">Data e hora</label>
+              <input type="datetime-local" id="emNewDate" class="field-input" style="color-scheme:dark" />
             </div>
-          </section>
-        </aside>
+            <button class="btn" style="background:rgba(232,123,143,.11);border-color:rgba(232,123,143,.28);color:#e87b8f" onclick="emCreateEvent()">+ Criar Evento</button>
+          </div>
 
-        <section class="centerCol">
+          <div class="em-section-title">Eventos</div>
+          <div id="emEventsList">
+            <p style="color:var(--muted);font-size:12px">Clique em "Carregar eventos" para listar.</p>
+          </div>
+        </div>
 
-          <section class="card metricsCard">
-            <div class="cardInner">
-              <p class="label">Métricas em tempo real</p>
+        <!-- Segurança -->
+        <div class="panelSection" id="section-security">
+          <div class="section-header">
+            <span class="section-title">Segurança</span>
+            <span class="section-desc">Denúncias, banimentos e controle de abuso.</span>
+          </div>
 
-              <div class="metricsGrid">
-                <div class="metric">
-                  <div class="metricLabel">Salas</div>
-                  <div class="metricValue" id="statRooms">0</div>
-                  <div class="metricHint">salas registradas</div>
-                </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+            <button class="btn" onclick="secLoadReports('pending')">Pendentes</button>
+            <button class="btn" onclick="secLoadReports('reviewed')">Revisadas</button>
+            <button class="btn" onclick="secLoadBans(false)">Bans ativos</button>
+            <button class="btn" onclick="secLoadBans(true)">Todos os bans</button>
+          </div>
 
-                <div class="metric">
-                  <div class="metricLabel">Jogadores</div>
-                  <div class="metricValue" id="statPlayers">0</div>
-                  <div class="metricHint">online agora</div>
-                </div>
-
-                <div class="metric">
-                  <div class="metricLabel">Sessões</div>
-                  <div class="metricValue" id="statSessions">0</div>
-                  <div class="metricHint">rituais ativos</div>
-                </div>
-
-                <div class="metric">
-                  <div class="metricLabel">Vídeo</div>
-                  <div class="metricValue" id="statVideo">0</div>
-                  <div class="metricHint">salas com vídeo</div>
-                </div>
-
-                <div class="metric">
-                  <div class="metricLabel">Gravação</div>
-                  <div class="metricValue" id="statRecord">0</div>
-                  <div class="metricHint">salas gravando</div>
-                </div>
-
-                <div class="metric">
-                  <div class="metricLabel">Eventos</div>
-                  <div class="metricValue" id="statEvents">0</div>
-                  <div class="metricHint">ciclos processados</div>
-                </div>
-              </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:flex-end">
+            <div style="flex:1;min-width:150px">
+              <label class="field-label">UID para banir</label>
+              <input type="text" id="secBanUid" class="field-input" placeholder="uid do usuário" />
             </div>
-          </section>
-
-          <section class="card panelSection active" id="section-dashboard">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2>Dashboard</h2>
-                  <p>Visão consolidada das salas e atividade do sistema.</p>
-                </div>
-              </div>
-
-              <input class="search" id="searchInput" type="text" placeholder="Buscar por sala, código, host ou jogador..." />
-              <div class="roomsList" id="dashboardContent"></div>
+            <div style="flex:1;min-width:120px">
+              <label class="field-label">Motivo</label>
+              <input type="text" id="secBanReason" class="field-input" placeholder="ASSEDIO" />
             </div>
-          </section>
-
-          <section class="card panelSection" id="section-rooms">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2>Salas</h2>
-                  <p>Monitoramento completo das salas ativas e seus jogadores.</p>
-                </div>
-              </div>
-
-              <div class="roomsList" id="roomsContent"></div>
+            <div style="flex:1;min-width:120px">
+              <label class="field-label">Nota</label>
+              <input type="text" id="secBanNote" class="field-input" placeholder="opcional" />
             </div>
-          </section>
+            <button class="btn btnDanger" onclick="secBanUser()" style="flex-shrink:0">Banir</button>
+          </div>
 
-          <section class="card panelSection" id="section-chat">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2>Chat</h2>
-                  <p>Mensagens detectadas pelo painel e por logs do sistema.</p>
-                </div>
-              </div>
+          <div id="secContent">
+            <div class="emptyState">Selecione uma opção acima para carregar dados de segurança.</div>
+          </div>
+        </div>
 
-              <div class="chatList" id="chatContent"></div>
-            </div>
-          </section>
+      </div>
 
-          <section class="card panelSection" id="section-video">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2>Vídeo</h2>
-                  <p>Estado das salas com vídeo e gravação em tempo real.</p>
-                </div>
-              </div>
-
-              <div class="videoList" id="videoContent"></div>
-            </div>
-          </section>
-
-          <section class="card panelSection" id="section-system">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2>Sistema</h2>
-                  <p>Saúde do backend, integridade do ciclo e ambiente atual.</p>
-                </div>
-              </div>
-
-              <div class="systemList" id="systemContent"></div>
-            </div>
-          </section>
-
-          <!-- ── Encontro Marcado ─────────────────────────────────────────── -->
-          <section class="card panelSection" id="section-encontro">
-            <div class="cardInner">
-              <div class="panelHeader">
-                <div>
-                  <h2 style="color:#e87b8f">♥ Encontro Marcado</h2>
-                  <p>Gerenciar eventos de Speed Dating online.</p>
-                </div>
-              </div>
-
-              <div style="margin-bottom:18px">
-                <p class="label">Admin Secret</p>
-                <div style="display:flex;gap:8px;align-items:center">
-                  <input type="password" id="emSecret" placeholder="ADMIN_SECRET" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;flex:1" />
-                  <button class="btn" onclick="emLoadEvents()">Carregar</button>
-                </div>
-              </div>
-
-              <div style="margin-bottom:20px;padding:16px;background:rgba(232,123,143,.06);border:1px solid rgba(232,123,143,.2);border-radius:14px">
-                <p class="label" style="margin-bottom:12px">Criar Novo Evento</p>
-                <div style="display:grid;gap:10px">
-                  <div>
-                    <p class="label">Título (opcional)</p>
-                    <input type="text" id="emNewTitle" placeholder="Encontro Marcado — 01 de Agosto" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;width:100%" />
-                  </div>
-                  <div>
-                    <p class="label">Data e hora do evento</p>
-                    <input type="datetime-local" id="emNewDate" style="background:rgba(255,255,255,.05);border:1px solid rgba(0,255,156,.2);border-radius:10px;padding:8px 12px;color:#e7fff7;font:inherit;outline:none;width:100%" />
-                  </div>
-                  <button class="btn" style="background:rgba(232,123,143,.15);border:1px solid rgba(232,123,143,.35);color:#e87b8f" onclick="emCreateEvent()">+ Criar Evento</button>
-                </div>
-              </div>
-
-              <p class="label" style="margin-bottom:10px">Eventos</p>
-              <div id="emEventsList" style="display:flex;flex-direction:column;gap:12px">
-                <p style="color:rgba(255,255,255,.3);font-size:13px">Clique em "Carregar" para listar eventos.</p>
-              </div>
-            </div>
-          </section>
-
-        </section>
-
-        <aside class="rightCol">
-          <section class="card logsCard">
-            <div class="cardInner">
-              <p class="label">Logs do sistema</p>
-
-              <div class="logsTools">
-                <button class="btn" id="clearLogsBtn">Limpar logs</button>
-                <button class="btn" id="pauseLogsBtn">Pausar stream</button>
-                <button class="btn btnDanger" id="clearEventsBtn">Limpar eventos</button>
-              </div>
-
-              <div class="logsBox" id="logsBox">
-                <div class="logLine info">Aguardando atividade do sistema...</div>
-              </div>
-            </div>
-          </section>
-        </aside>
-
-      </section>
-
-      <footer class="footer">
-        <div>Painel: <strong>OSL System Core</strong></div>
-        <div>Fonte: <strong id="footerServer"></strong></div>
-      </footer>
+      <!-- ── Log column ── -->
+      <div class="log-col">
+        <div class="log-header">
+          <span class="log-title">Logs</span>
+          <div class="log-actions">
+            <button class="btn" id="clearLogsBtn" style="padding:2px 7px;font-size:10px">Limpar</button>
+            <button class="btn" id="pauseLogsBtn" style="padding:2px 7px;font-size:10px">Pausar</button>
+            <button class="btn btnDanger" id="clearEventsBtn" style="padding:2px 7px;font-size:10px">Eventos</button>
+          </div>
+        </div>
+        <div class="logsBox" id="logsBox">
+          <div class="logLine info">Aguardando atividade...</div>
+        </div>
+      </div>
     </div>
-  </main>
+  </div>
+
+  <!-- ── Edit modal ── -->
+  <div id="emEditModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title">Editar Evento</div>
+      <input type="hidden" id="emEditId" />
+      <div class="field-group">
+        <label class="field-label" for="emEditTitle">Título</label>
+        <input id="emEditTitle" type="text" class="field-input" placeholder="Deixe vazio para manter o atual" />
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="emEditDate">Data e Hora</label>
+        <input id="emEditDate" type="datetime-local" class="field-input" style="color-scheme:dark" />
+      </div>
+      <div class="modal-actions">
+        <button onclick="emSaveEdit()" class="btn btnPrimary" style="flex:1">Salvar</button>
+        <button onclick="emCloseEditModal()" class="btn" style="flex:1">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Details modal ── -->
+  <div id="emDetailsModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-title" id="emDetailsTitle">Detalhes do Evento</div>
+      <div id="emDetailsBody"></div>
+      <div class="modal-actions">
+        <button onclick="document.getElementById('emDetailsModal').classList.remove('open')" class="btn" style="flex:1">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast container ── -->
+  <div id="toastContainer"></div>
 
   <script>
     const SERVER = "https://osl-video-server-production.up.railway.app";
@@ -983,112 +968,91 @@
 
     const el = {
       metaServerStatus: document.getElementById("metaServerStatus"),
-      metaUptime: document.getElementById("metaUptime"),
-      metaEnv: document.getElementById("metaEnv"),
-
-      statRooms: document.getElementById("statRooms"),
-      statPlayers: document.getElementById("statPlayers"),
-      statSessions: document.getElementById("statSessions"),
-      statVideo: document.getElementById("statVideo"),
-      statRecord: document.getElementById("statRecord"),
-      statEvents: document.getElementById("statEvents"),
-
-      serverUrl: document.getElementById("serverUrl"),
-      lastUpdated: document.getElementById("lastUpdated"),
-      cycleStatus: document.getElementById("cycleStatus"),
-
-      searchInput: document.getElementById("searchInput"),
+      metaUptime:       document.getElementById("metaUptime"),
+      metaEnv:          document.getElementById("metaEnv"),
+      beaconDot:        document.getElementById("beaconDot"),
+      statRooms:        document.getElementById("statRooms"),
+      statPlayers:      document.getElementById("statPlayers"),
+      statSessions:     document.getElementById("statSessions"),
+      statVideo:        document.getElementById("statVideo"),
+      statRecord:       document.getElementById("statRecord"),
+      statEvents:       document.getElementById("statEvents"),
+      serverUrl:        document.getElementById("serverUrl"),
+      lastUpdated:      document.getElementById("lastUpdated"),
+      cycleStatus:      document.getElementById("cycleStatus"),
+      footerServer:     document.getElementById("footerServer"),
+      searchInput:      document.getElementById("searchInput"),
       dashboardContent: document.getElementById("dashboardContent"),
-      roomsContent: document.getElementById("roomsContent"),
-      chatContent: document.getElementById("chatContent"),
-      videoContent: document.getElementById("videoContent"),
-      systemContent: document.getElementById("systemContent"),
-
-      logsBox: document.getElementById("logsBox"),
-
-      refreshBtn: document.getElementById("refreshBtn"),
-      autoBtn: document.getElementById("autoBtn"),
-      clearLogsBtn: document.getElementById("clearLogsBtn"),
-      pauseLogsBtn: document.getElementById("pauseLogsBtn"),
-      clearEventsBtn: document.getElementById("clearEventsBtn"),
-
-      footerServer: document.getElementById("footerServer")
+      roomsContent:     document.getElementById("roomsContent"),
+      chatContent:      document.getElementById("chatContent"),
+      videoContent:     document.getElementById("videoContent"),
+      systemContent:    document.getElementById("systemContent"),
+      logsBox:          document.getElementById("logsBox"),
+      refreshBtn:       document.getElementById("refreshBtn"),
+      autoBtn:          document.getElementById("autoBtn"),
+      clearLogsBtn:     document.getElementById("clearLogsBtn"),
+      pauseLogsBtn:     document.getElementById("pauseLogsBtn"),
+      clearEventsBtn:   document.getElementById("clearEventsBtn"),
     };
 
-    el.serverUrl.textContent = SERVER;
+    el.serverUrl.textContent    = SERVER;
     el.footerServer.textContent = SERVER;
 
+    // ── Toast ──
+    function toast(msg, type = "ok", duration = 3200) {
+      const t = document.createElement("div");
+      t.className = `toast ${type}`;
+      t.textContent = msg;
+      document.getElementById("toastContainer").appendChild(t);
+      setTimeout(() => t.remove(), duration);
+    }
+
+    // ── Helpers ──
     function escapeHtml(str) {
       return String(str ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
+        .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;").replaceAll("'","&#39;");
     }
 
     function formatDate(value) {
-      if (!value) return "---";
+      if (!value) return "—";
       const d = new Date(value);
       if (Number.isNaN(d.getTime())) return String(value);
       return d.toLocaleString("pt-BR");
     }
 
     function formatUptime(sec) {
-      const total = Number(sec || 0);
-      const d = Math.floor(total / 86400);
-      const h = Math.floor((total % 86400) / 3600);
-      const m = Math.floor((total % 3600) / 60);
-      const s = Math.floor(total % 60);
-
+      const t = Number(sec || 0);
+      const d = Math.floor(t / 86400), h = Math.floor((t % 86400) / 3600);
+      const m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60);
       if (d > 0) return `${d}d ${h}h ${m}m`;
       if (h > 0) return `${h}h ${m}m`;
       if (m > 0) return `${m}m ${s}s`;
       return `${s}s`;
     }
 
+    // ── Visual logs ──
     function logVisual(message, type = "info") {
-      const entry = {
-        id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
-        time: new Date(),
-        message: String(message),
-        type
-      };
-
-      state.visualEvents.push(entry);
+      state.visualEvents.push({ id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`, time: new Date(), message: String(message), type });
       while (state.visualEvents.length > 300) state.visualEvents.shift();
-
       renderLogs();
     }
 
     function addChatEvent(source, text, roomId = "") {
-      state.chatEvents.unshift({
-        id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
-        time: new Date(),
-        source: source || "Sistema",
-        roomId: roomId || "",
-        text: text || ""
-      });
-
+      state.chatEvents.unshift({ id: `${Date.now()}_${Math.random().toString(36).slice(2,7)}`, time: new Date(), source: source || "Sistema", roomId: roomId || "", text: text || "" });
       while (state.chatEvents.length > 150) state.chatEvents.pop();
       renderChat();
     }
 
     function renderLogs() {
       const items = [...state.visualEvents].slice(-240).reverse();
-
-      if (!items.length) {
-        el.logsBox.innerHTML = `<div class="logLine info">Sem logs visuais no momento.</div>`;
-        return;
-      }
-
-      el.logsBox.innerHTML = items.map(item => `
-        <div class="logLine ${escapeHtml(item.type)}">
-          [${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}] ${escapeHtml(item.message)}
-        </div>
-      `).join("");
+      if (!items.length) { el.logsBox.innerHTML = `<div class="logLine info">Sem logs visuais.</div>`; return; }
+      el.logsBox.innerHTML = items.map(i =>
+        `<div class="logLine ${escapeHtml(i.type)}">[${escapeHtml(i.time.toLocaleTimeString("pt-BR"))}] ${escapeHtml(i.message)}</div>`
+      ).join("");
     }
 
+    // ── Fetch ──
     async function fetchJson(path) {
       const res = await fetch(SERVER + path, { cache: "no-store" });
       const json = await res.json().catch(() => ({}));
@@ -1096,756 +1060,495 @@
       return json;
     }
 
+    // ── Room logic ──
     function roomMatches(room, term) {
       if (!term) return true;
-
       const q = term.toLowerCase();
-      const haystack = [
-        room.roomId,
-        room.name,
-        room.host,
-        ...(room.players || []).map(p => p.playerName)
-      ].join(" ").toLowerCase();
-
-      return haystack.includes(q);
+      return [room.roomId, room.name, room.host, ...(room.players||[]).map(p=>p.playerName)].join(" ").toLowerCase().includes(q);
     }
 
     function computeStats(rooms) {
-      el.statRooms.textContent = String(rooms.length);
-      el.statPlayers.textContent = String(rooms.reduce((a, r) => a + Number(r.playerCount || 0), 0));
-      el.statSessions.textContent = String(rooms.filter(r => r.sessionActive).length);
-      el.statVideo.textContent = String(rooms.filter(r => r.videoActive).length);
-      el.statRecord.textContent = String(rooms.filter(r => r.recordingActive).length);
-      el.statEvents.textContent = String(state.eventCount);
+      el.statRooms.textContent    = String(rooms.length);
+      el.statPlayers.textContent  = String(rooms.reduce((a,r) => a + Number(r.playerCount||0), 0));
+      el.statSessions.textContent = String(rooms.filter(r=>r.sessionActive).length);
+      el.statVideo.textContent    = String(rooms.filter(r=>r.videoActive).length);
+      el.statRecord.textContent   = String(rooms.filter(r=>r.recordingActive).length);
+      el.statEvents.textContent   = String(state.eventCount);
     }
 
     function normalizeRoom(room) {
       return {
-        roomId: String(room.roomId || ""),
-        name: String(room.name || ""),
-        host: String(room.host || ""),
-        playerCount: Number(room.playerCount || 0),
-        players: Array.isArray(room.players) ? room.players : [],
-        sessionActive: !!room.sessionActive,
-        videoActive: !!room.videoActive,
-        recordingActive: !!room.recordingActive,
-        createdAt: room.createdAt || null,
-        updatedAt: room.updatedAt || null
+        roomId:room.roomId||"", name:room.name||"", host:room.host||"",
+        playerCount:Number(room.playerCount||0), players:Array.isArray(room.players)?room.players:[],
+        sessionActive:!!room.sessionActive, videoActive:!!room.videoActive, recordingActive:!!room.recordingActive,
+        createdAt:room.createdAt||null, updatedAt:room.updatedAt||null
       };
     }
 
     function mapPlayers(players) {
-      return new Map((players || []).map(p => [String(p.playerId || p.playerName || Math.random()), p]));
+      return new Map((players||[]).map(p => [String(p.playerId||p.playerName||Math.random()),p]));
     }
 
     function diffRooms(nextRooms) {
-      const nextMap = new Map(nextRooms.map(room => [room.roomId, room]));
+      const nextMap = new Map(nextRooms.map(r=>[r.roomId,r]));
       const prevMap = state.previousRoomsMap;
-
-      for (const [roomId, room] of nextMap.entries()) {
-        if (!prevMap.has(roomId)) {
-          state.eventCount++;
-          logVisual(`Sala criada: ${room.name || roomId}`);
-        }
-
-        const prev = prevMap.get(roomId);
-        if (!prev) continue;
-
-        if (!prev.sessionActive && room.sessionActive) {
-          state.eventCount++;
-          logVisual(`Ritual iniciado em ${room.name || roomId}`);
-        }
-
-        if (prev.sessionActive && !room.sessionActive) {
-          state.eventCount++;
-          logVisual(`Ritual encerrado em ${room.name || roomId}`, "warn");
-        }
-
-        if (!prev.videoActive && room.videoActive) {
-          state.eventCount++;
-          logVisual(`Vídeo ligado em ${room.name || roomId}`);
-        }
-
-        if (prev.videoActive && !room.videoActive) {
-          state.eventCount++;
-          logVisual(`Vídeo desligado em ${room.name || roomId}`, "warn");
-        }
-
-        if (!prev.recordingActive && room.recordingActive) {
-          state.eventCount++;
-          logVisual(`Gravação iniciada em ${room.name || roomId}`, "warn");
-        }
-
-        if (prev.recordingActive && !room.recordingActive) {
-          state.eventCount++;
-          logVisual(`Gravação encerrada em ${room.name || roomId}`, "warn");
-        }
-
-        const prevPlayers = mapPlayers(prev.players);
-        const nextPlayers = mapPlayers(room.players);
-
-        for (const [key, player] of nextPlayers.entries()) {
-          if (!prevPlayers.has(key)) {
-            state.eventCount++;
-            logVisual(`Jogador entrou: ${player.playerName || "Jogador"} em ${room.name || roomId}`);
-          }
-        }
-
-        for (const [key, player] of prevPlayers.entries()) {
-          if (!nextPlayers.has(key)) {
-            state.eventCount++;
-            logVisual(`Jogador saiu: ${player.playerName || "Jogador"} de ${room.name || roomId}`, "warn");
-          }
-        }
+      for (const [id, r] of nextMap.entries()) {
+        if (!prevMap.has(id)) { state.eventCount++; logVisual(`Sala criada: ${r.name||id}`); }
+        const prev = prevMap.get(id); if (!prev) continue;
+        if (!prev.sessionActive   && r.sessionActive)   { state.eventCount++; logVisual(`Ritual iniciado em ${r.name||id}`); }
+        if (prev.sessionActive    && !r.sessionActive)  { state.eventCount++; logVisual(`Ritual encerrado em ${r.name||id}`,"warn"); }
+        if (!prev.videoActive     && r.videoActive)     { state.eventCount++; logVisual(`Vídeo ligado em ${r.name||id}`); }
+        if (prev.videoActive      && !r.videoActive)    { state.eventCount++; logVisual(`Vídeo desligado em ${r.name||id}`,"warn"); }
+        if (!prev.recordingActive && r.recordingActive) { state.eventCount++; logVisual(`Gravação iniciada em ${r.name||id}`,"warn"); }
+        if (prev.recordingActive  && !r.recordingActive){ state.eventCount++; logVisual(`Gravação encerrada em ${r.name||id}`,"warn"); }
+        const pp = mapPlayers(prev.players), np = mapPlayers(r.players);
+        for (const [k,p] of np.entries()) if (!pp.has(k)) { state.eventCount++; logVisual(`Jogador entrou: ${p.playerName||"Jogador"} em ${r.name||id}`); }
+        for (const [k,p] of pp.entries()) if (!np.has(k)) { state.eventCount++; logVisual(`Jogador saiu: ${p.playerName||"Jogador"} de ${r.name||id}`,"warn"); }
       }
-
-      for (const [roomId, room] of prevMap.entries()) {
-        if (!nextMap.has(roomId)) {
-          state.eventCount++;
-          logVisual(`Sala removida: ${room.name || roomId}`, "warn");
-        }
-      }
-
+      for (const [id,r] of prevMap.entries()) if (!nextMap.has(id)) { state.eventCount++; logVisual(`Sala removida: ${r.name||id}`,"warn"); }
       state.previousRoomsMap = nextMap;
     }
 
+    // ── Render functions ──
     function renderDashboard() {
       const rooms = state.rooms || [];
-
-      if (!rooms.length) {
-        el.dashboardContent.innerHTML = `
-          <div class="emptyState">
-            O painel está online. Use a navegação lateral para abrir as áreas de salas, chat, vídeo e sistema.
-          </div>
-        `;
-        return;
-      }
-
-      const totalPlayers = rooms.reduce((sum, room) => sum + Number(room.playerCount || 0), 0);
-      const activeSessions = rooms.filter(r => r.sessionActive).length;
-      const activeVideo = rooms.filter(r => r.videoActive).length;
-      const activeRecord = rooms.filter(r => r.recordingActive).length;
-
-      el.dashboardContent.innerHTML = `
+      if (!rooms.length) { el.dashboardContent.innerHTML=`<div class="emptyState">Painel online. Sem salas ativas no momento.</div>`; return; }
+      const tp=rooms.reduce((s,r)=>s+Number(r.playerCount||0),0), as=rooms.filter(r=>r.sessionActive).length;
+      const av=rooms.filter(r=>r.videoActive).length, ar=rooms.filter(r=>r.recordingActive).length;
+      el.dashboardContent.innerHTML=`
         <div class="rowCard">
-          <h3 class="rowTitle">Resumo global</h3>
-
+          <div class="rowTitle">Resumo global</div>
           <div class="roomGrid">
             <div class="subBox"><b>Salas</b><span>${rooms.length}</span></div>
-            <div class="subBox"><b>Jogadores</b><span>${totalPlayers}</span></div>
-            <div class="subBox"><b>Rituais ativos</b><span>${activeSessions}</span></div>
-            <div class="subBox"><b>Vídeo / gravação</b><span>${activeVideo} / ${activeRecord}</span></div>
+            <div class="subBox"><b>Jogadores</b><span>${tp}</span></div>
+            <div class="subBox"><b>Rituais</b><span>${as}</span></div>
+            <div class="subBox"><b>Vídeo/Grav</b><span>${av}/${ar}</span></div>
           </div>
         </div>
-
-        ${rooms.slice(0, 4).map(room => `
+        ${rooms.slice(0,4).map(r=>`
           <div class="rowCard">
-            <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
-
+            <div class="rowTitle">${escapeHtml(r.name||"Sala sem nome")}</div>
             <div class="rowMeta">
-              <span class="badge">${escapeHtml(room.roomId || "---")}</span>
-              <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
-              <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
-              <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+              <span class="badge">${escapeHtml(r.roomId||"—")}</span>
+              <span class="badge ${r.sessionActive?"ok":""}">${r.sessionActive?"Ritual ativo":"Aguardando"}</span>
+              <span class="badge ${r.videoActive?"warn":""}">${r.videoActive?"Vídeo ON":"Vídeo OFF"}</span>
+              <span class="badge ${r.recordingActive?"danger":""}">${r.recordingActive?"Gravando":"Sem gravação"}</span>
             </div>
-
             <div class="roomGrid">
-              <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
-              <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
-              <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
-              <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
+              <div class="subBox"><b>Host</b><span>${escapeHtml(r.host||"—")}</span></div>
+              <div class="subBox"><b>Jogadores</b><span>${r.playerCount||0}</span></div>
+              <div class="subBox"><b>Criada</b><span>${escapeHtml(formatDate(r.createdAt))}</span></div>
+              <div class="subBox"><b>Atualizada</b><span>${escapeHtml(formatDate(r.updatedAt))}</span></div>
             </div>
-          </div>
-        `).join("")}
-      `;
+          </div>`).join("")}`;
     }
 
     function renderRooms() {
       const term = el.searchInput.value.trim().toLowerCase();
-      const rooms = (state.rooms || []).filter(room => roomMatches(room, term));
-
-      if (!rooms.length) {
-        el.roomsContent.innerHTML = `<div class="emptyState">Nenhuma sala encontrada agora.</div>`;
-        return;
-      }
-
-      el.roomsContent.innerHTML = rooms.map(room => `
+      const rooms = (state.rooms||[]).filter(r=>roomMatches(r,term));
+      if (!rooms.length) { el.roomsContent.innerHTML=`<div class="emptyState">Nenhuma sala encontrada.</div>`; return; }
+      el.roomsContent.innerHTML=rooms.map(r=>`
         <div class="rowCard">
-          <h3 class="rowTitle">${escapeHtml(room.name || "Sala sem nome")}</h3>
-
+          <div class="rowTitle">${escapeHtml(r.name||"Sala sem nome")}</div>
           <div class="rowMeta">
-            <span class="badge">${escapeHtml(room.roomId || "---")}</span>
-            <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Sessão parada"}</span>
-            <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ligado" : "Vídeo desligado"}</span>
-            <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
+            <span class="badge">${escapeHtml(r.roomId||"—")}</span>
+            <span class="badge ${r.sessionActive?"ok":""}">${r.sessionActive?"Ritual ativo":"Sessão parada"}</span>
+            <span class="badge ${r.videoActive?"warn":""}">${r.videoActive?"Vídeo ON":"Vídeo OFF"}</span>
+            <span class="badge ${r.recordingActive?"danger":""}">${r.recordingActive?"Gravando":"Sem gravação"}</span>
           </div>
-
           <div class="roomGrid">
-            <div class="subBox"><b>Host</b><span>${escapeHtml(room.host || "Não definido")}</span></div>
-            <div class="subBox"><b>Jogadores</b><span>${escapeHtml(String(room.playerCount || 0))}</span></div>
-            <div class="subBox"><b>Criada em</b><span>${escapeHtml(formatDate(room.createdAt))}</span></div>
-            <div class="subBox"><b>Atualizada em</b><span>${escapeHtml(formatDate(room.updatedAt))}</span></div>
+            <div class="subBox"><b>Host</b><span>${escapeHtml(r.host||"—")}</span></div>
+            <div class="subBox"><b>Jogadores</b><span>${r.playerCount||0}</span></div>
+            <div class="subBox"><b>Criada</b><span>${escapeHtml(formatDate(r.createdAt))}</span></div>
+            <div class="subBox"><b>Atualizada</b><span>${escapeHtml(formatDate(r.updatedAt))}</span></div>
           </div>
-
-          <div class="playersWrap">
-            ${
-              room.players.length
-                ? room.players.map(player => `
-                  <div class="playerLine">
-                    <div><strong>${escapeHtml(player.playerName || "Jogador")}</strong></div>
-                    <div>${escapeHtml(formatDate(player.joinedAt))}</div>
-                  </div>
-                `).join("")
-                : `<div class="emptyState">Nenhum jogador visível nesta sala.</div>`
-            }
+          <div style="margin-top:6px">
+            ${r.players.length
+              ? r.players.map(p=>`<div class="playerLine"><div><strong>${escapeHtml(p.playerName||"Jogador")}</strong></div><div>${escapeHtml(formatDate(p.joinedAt))}</div></div>`).join("")
+              : `<div class="emptyState" style="padding:8px;margin-top:0">Nenhum jogador visível.</div>`}
           </div>
-        </div>
-      `).join("");
+        </div>`).join("");
     }
 
     function renderChat() {
-      const items = state.chatEvents || [];
-
-      if (!items.length) {
-        el.chatContent.innerHTML = `
-          <div class="emptyState">
-            Nenhuma mensagem detectada ainda.<br>
-            Quando o sistema registrar chat ou eventos textuais, eles aparecerão aqui.
-          </div>
-        `;
-        return;
-      }
-
-      el.chatContent.innerHTML = items.map(item => `
+      const items = state.chatEvents||[];
+      if (!items.length) { el.chatContent.innerHTML=`<div class="emptyState">Nenhuma mensagem detectada ainda.</div>`; return; }
+      el.chatContent.innerHTML=items.map(i=>`
         <div class="chatEntry">
-          <div class="chatMeta">
-            ${escapeHtml(item.source)} ${item.roomId ? "• " + escapeHtml(item.roomId) : ""} • ${escapeHtml(item.time.toLocaleTimeString("pt-BR"))}
-          </div>
-          <div class="chatText">${escapeHtml(item.text)}</div>
-        </div>
-      `).join("");
+          <div class="chatMeta">${escapeHtml(i.source)}${i.roomId?" · "+escapeHtml(i.roomId):""} · ${escapeHtml(i.time.toLocaleTimeString("pt-BR"))}</div>
+          <div class="chatText">${escapeHtml(i.text)}</div>
+        </div>`).join("");
     }
 
     function renderVideo() {
-      const rooms = state.rooms || [];
-
-      if (!rooms.length) {
-        el.videoContent.innerHTML = `<div class="emptyState">Sem atividade de vídeo detectada.</div>`;
-        return;
-      }
-
-      el.videoContent.innerHTML = `
-        <div class="videoGrid">
-          ${rooms.map(room => `
-            <div class="videoBox">
-              <h3>${escapeHtml(room.name || room.roomId || "Sala")}</h3>
-
-              <div class="rowMeta">
-                <span class="badge ${room.videoActive ? "warn" : ""}">${room.videoActive ? "Vídeo ON" : "Vídeo OFF"}</span>
-                <span class="badge ${room.recordingActive ? "danger" : ""}">${room.recordingActive ? "Gravando" : "Sem gravação"}</span>
-                <span class="badge ${room.sessionActive ? "ok" : ""}">${room.sessionActive ? "Ritual ativo" : "Aguardando"}</span>
-              </div>
-
-              <div class="subBox">
-                <b>Participantes</b>
-                <span>${escapeHtml(String(room.playerCount || 0))}</span>
-              </div>
-            </div>
-          `).join("")}
-        </div>
-      `;
+      const rooms=state.rooms||[];
+      if (!rooms.length) { el.videoContent.innerHTML=`<div class="emptyState">Sem atividade de vídeo detectada.</div>`; return; }
+      el.videoContent.innerHTML=`<div class="videoGrid">${rooms.map(r=>`
+        <div class="videoBox">
+          <h3>${escapeHtml(r.name||r.roomId||"Sala")}</h3>
+          <div class="rowMeta">
+            <span class="badge ${r.videoActive?"warn":""}">${r.videoActive?"Vídeo ON":"Vídeo OFF"}</span>
+            <span class="badge ${r.recordingActive?"danger":""}">${r.recordingActive?"Gravando":"Sem gravação"}</span>
+            <span class="badge ${r.sessionActive?"ok":""}">${r.sessionActive?"Ritual ativo":"Aguardando"}</span>
+          </div>
+          <div class="subBox"><b>Participantes</b><span>${r.playerCount||0}</span></div>
+        </div>`).join("")}</div>`;
     }
 
     function renderSystem() {
-      const h = state.health;
-
-      if (!h) {
-        el.systemContent.innerHTML = `<div class="emptyState">Sem dados de sistema no momento.</div>`;
-        return;
-      }
-
-      el.systemContent.innerHTML = `
-        <div class="sysRows">
-          <div class="sysRow"><strong>Serviço:</strong> ${escapeHtml(h.service || "osl-video-server")}</div>
-          <div class="sysRow"><strong>Status:</strong> ${h.ok ? "Online" : "Offline"}</div>
-          <div class="sysRow"><strong>Ambiente:</strong> ${escapeHtml(h.environment || "---")}</div>
-          <div class="sysRow"><strong>Uptime:</strong> ${escapeHtml(formatUptime(h.uptimeSec || 0))}</div>
-          <div class="sysRow"><strong>Iniciado em:</strong> ${escapeHtml(formatDate(h.startedAt))}</div>
-          <div class="sysRow"><strong>Agora:</strong> ${escapeHtml(formatDate(h.now))}</div>
-          <div class="sysRow"><strong>Firebase:</strong> ${h.firebaseConfigured ? "Conectado" : "Não configurado"}</div>
-        </div>
-      `;
+      const h=state.health;
+      if (!h) { el.systemContent.innerHTML=`<div class="emptyState">Sem dados de sistema no momento.</div>`; return; }
+      el.systemContent.innerHTML=`<div class="sysRows">
+        <div class="sysRow"><strong>Serviço</strong>${escapeHtml(h.service||"osl-video-server")}</div>
+        <div class="sysRow"><strong>Status</strong>${h.ok?"Online":"Offline"}</div>
+        <div class="sysRow"><strong>Ambiente</strong>${escapeHtml(h.environment||"—")}</div>
+        <div class="sysRow"><strong>Uptime</strong>${escapeHtml(formatUptime(h.uptimeSec||0))}</div>
+        <div class="sysRow"><strong>Iniciado</strong>${escapeHtml(formatDate(h.startedAt))}</div>
+        <div class="sysRow"><strong>Agora</strong>${escapeHtml(formatDate(h.now))}</div>
+        <div class="sysRow"><strong>Firebase</strong>${h.firebaseConfigured?"Conectado":"Não configurado"}</div>
+      </div>`;
     }
 
+    // ── Log parsing ──
     function parseLogLine(raw) {
-      const line = String(raw || "").trim();
+      const line = String(raw||"").trim();
       if (!line) return;
-
       let data = null;
-      try {
-        data = JSON.parse(line);
-      } catch {
-        data = null;
-      }
-
+      try { data = JSON.parse(line); } catch { data = null; }
       if (data) {
-        const message = String(data.message || "");
-        const type = data.level === "error" ? "error" : data.level === "warn" ? "warn" : "info";
-
-        if (message === "http_request") {
-          const path = String(data.path || "");
-          const method = String(data.method || "");
-          const statusCode = data.statusCode;
-
-          if (path.includes("/game/room/create")) {
-            logVisual(`HTTP ${method} ${path} → sala criada (${statusCode})`, type);
-            addChatEvent("SYSTEM", "Sala criada via backend.", "");
-            return;
-          }
-
-          if (path.includes("/game/player/join")) {
-            logVisual(`HTTP ${method} ${path} → entrada de jogador (${statusCode})`, type);
-            addChatEvent("SYSTEM", "Jogador entrou em uma sala.", "");
-            return;
-          }
-
-          if (path.includes("/game/player/leave")) {
-            logVisual(`HTTP ${method} ${path} → saída de jogador (${statusCode})`, type);
-            addChatEvent("SYSTEM", "Jogador saiu de uma sala.", "");
-            return;
-          }
-
-          if (path.includes("/game/session/start")) {
-            logVisual(`HTTP ${method} ${path} → ritual iniciado (${statusCode})`, type);
-            addChatEvent("RITUAL", "Ritual iniciado.", "");
-            return;
-          }
-
-          if (path.includes("/game/session/end")) {
-            logVisual(`HTTP ${method} ${path} → ritual encerrado (${statusCode})`, type);
-            addChatEvent("RITUAL", "Ritual encerrado.", "");
-            return;
-          }
-
-          if (path.includes("/game/video")) {
-            logVisual(`HTTP ${method} ${path} → atualização de vídeo (${statusCode})`, type);
-            addChatEvent("VÍDEO", "Estado de vídeo alterado.", "");
-            return;
-          }
-
-          if (path.includes("/game/recording")) {
-            logVisual(`HTTP ${method} ${path} → atualização de gravação (${statusCode})`, type);
-            addChatEvent("GRAVAÇÃO", "Estado de gravação alterado.", "");
-            return;
-          }
-
-          if (path.includes("/health")) {
-            logVisual(`Health carregado`, "info");
-            return;
-          }
+        const message = String(data.message||"");
+        const type    = data.level==="error"?"error":data.level==="warn"?"warn":"info";
+        if (message==="http_request") {
+          const path=String(data.path||""), method=String(data.method||""), sc=data.statusCode;
+          if (path.includes("/game/room/create"))   { logVisual(`HTTP ${method} ${path} → sala criada (${sc})`,type);         addChatEvent("SYSTEM","Sala criada via backend.",""); return; }
+          if (path.includes("/game/player/join"))   { logVisual(`HTTP ${method} ${path} → entrada de jogador (${sc})`,type);  addChatEvent("SYSTEM","Jogador entrou em uma sala.",""); return; }
+          if (path.includes("/game/player/leave"))  { logVisual(`HTTP ${method} ${path} → saída de jogador (${sc})`,type);   addChatEvent("SYSTEM","Jogador saiu de uma sala.",""); return; }
+          if (path.includes("/game/session/start")) { logVisual(`HTTP ${method} ${path} → ritual iniciado (${sc})`,type);    addChatEvent("RITUAL","Ritual iniciado.",""); return; }
+          if (path.includes("/game/session/end"))   { logVisual(`HTTP ${method} ${path} → ritual encerrado (${sc})`,type);   addChatEvent("RITUAL","Ritual encerrado.",""); return; }
+          if (path.includes("/game/video"))         { logVisual(`HTTP ${method} ${path} → atualização de vídeo (${sc})`,type); addChatEvent("VÍDEO","Estado de vídeo alterado.",""); return; }
+          if (path.includes("/game/recording"))     { logVisual(`HTTP ${method} ${path} → atualização de gravação (${sc})`,type); addChatEvent("GRAVAÇÃO","Estado de gravação alterado.",""); return; }
+          if (path.includes("/health"))             { logVisual(`Health carregado`,"info"); return; }
         }
-
-        if (message.toLowerCase().includes("chat") || message.toLowerCase().includes("message")) {
-          addChatEvent("LOG", message, data.roomId || data.room || "");
-          logVisual(`Chat detectado por log: ${message}`, type);
-          return;
+        if (message.toLowerCase().includes("chat")||message.toLowerCase().includes("message")) {
+          addChatEvent("LOG",message,data.roomId||data.room||"");
+          logVisual(`Chat detectado: ${message}`,type); return;
         }
-
-        logVisual(message || line, type);
-        return;
+        logVisual(message||line,type); return;
       }
-
-      const lower = line.toLowerCase();
-
-      if (
-        lower.includes("chat") ||
-        lower.includes("message") ||
-        lower.includes("mensagem")
-      ) {
-        addChatEvent("LOG", line, "");
-      }
-
-      logVisual(line, "info");
+      const lower=line.toLowerCase();
+      if (lower.includes("chat")||lower.includes("message")||lower.includes("mensagem")) addChatEvent("LOG",line,"");
+      logVisual(line,"info");
     }
 
     async function loadLogsSnapshot() {
-      try {
-        const data = await fetchJson("/logs");
-        if (!Array.isArray(data)) return;
-
-        data.slice(-120).forEach(parseLogLine);
-      } catch {
-        logVisual("Não foi possível carregar /logs", "warn");
-      }
+      try { const data=await fetchJson("/logs"); if (Array.isArray(data)) data.slice(-120).forEach(parseLogLine); }
+      catch { logVisual("Não foi possível carregar /logs","warn"); }
     }
 
     function connectLogStream() {
       if (state.logsEventSource) state.logsEventSource.close();
-
       try {
-        const source = new EventSource(SERVER + "/logs/stream");
-        state.logsEventSource = source;
-
-        source.addEventListener("bootstrap", (event) => {
-          if (state.logsPaused) return;
-          try {
-            const lines = JSON.parse(event.data);
-            if (Array.isArray(lines)) lines.slice(-120).forEach(parseLogLine);
-          } catch {}
-        });
-
-        source.addEventListener("log", (event) => {
-          if (state.logsPaused) return;
-          parseLogLine(event.data);
-        });
-
-        source.onerror = () => {
-          logVisual("Stream de logs indisponível, mantendo fallback.", "warn");
-        };
-      } catch {
-        logVisual("Falha ao conectar no stream de logs.", "error");
-      }
+        const src = new EventSource(SERVER+"/logs/stream");
+        state.logsEventSource = src;
+        src.addEventListener("bootstrap",e=>{ if(state.logsPaused)return; try{const l=JSON.parse(e.data);if(Array.isArray(l))l.slice(-120).forEach(parseLogLine);}catch{} });
+        src.addEventListener("log",e=>{ if(!state.logsPaused) parseLogLine(e.data); });
+        src.onerror=()=>{ logVisual("Stream de logs indisponível.","warn"); };
+      } catch { logVisual("Falha ao conectar no stream de logs.","error"); }
     }
 
+    // ── Refresh ──
     async function refreshAll() {
-      el.cycleStatus.textContent = "Atualizando...";
-
+      el.cycleStatus.textContent="Atualizando...";
       try {
-        const [health, roomsRes] = await Promise.all([
-          fetchJson("/health"),
-          fetchJson("/game/rooms")
-        ]);
-
-        state.health = health || null;
-
-        el.metaServerStatus.textContent = health?.ok ? "Online" : "Offline";
-        el.metaUptime.textContent = formatUptime(health?.uptimeSec || 0);
-        el.metaEnv.textContent = health?.environment || "---";
-
-        const rooms = Array.isArray(roomsRes.rooms)
-          ? roomsRes.rooms.map(normalizeRoom)
-          : [];
-
-        diffRooms(rooms);
-        state.rooms = rooms;
-
-        computeStats(rooms);
-        renderDashboard();
-        renderRooms();
-        renderChat();
-        renderVideo();
-        renderSystem();
-
-        el.lastUpdated.textContent = new Date().toLocaleString("pt-BR");
-        el.cycleStatus.textContent = "Sincronizado";
-      } catch (error) {
-        el.metaServerStatus.textContent = "Offline";
-        el.cycleStatus.textContent = "Falha";
-        logVisual(`Falha ao atualizar painel: ${error.message || error}`, "error");
+        const [health,roomsRes]=await Promise.all([fetchJson("/health"),fetchJson("/game/rooms")]);
+        state.health=health||null;
+        const online=!!health?.ok;
+        el.metaServerStatus.textContent = online?"Online":"Offline";
+        el.metaUptime.textContent       = formatUptime(health?.uptimeSec||0);
+        el.metaEnv.textContent          = health?.environment||"—";
+        el.beaconDot.className          = `beacon${online?" online":""}`;
+        const rooms=Array.isArray(roomsRes.rooms)?roomsRes.rooms.map(normalizeRoom):[];
+        diffRooms(rooms); state.rooms=rooms;
+        computeStats(rooms); renderDashboard(); renderRooms(); renderChat(); renderVideo(); renderSystem();
+        el.lastUpdated.textContent=new Date().toLocaleString("pt-BR");
+        el.cycleStatus.textContent="Sincronizado";
+      } catch(err) {
+        el.metaServerStatus.textContent="Offline";
+        el.cycleStatus.textContent="Falha";
+        el.beaconDot.className="beacon";
+        logVisual(`Falha ao atualizar: ${err.message||err}`,"error");
       }
     }
 
     function startAutoRefresh() {
       stopAutoRefresh();
-      state.refreshTimer = setInterval(() => {
-        if (state.autoRefresh) refreshAll();
-      }, 3000);
+      state.refreshTimer=setInterval(()=>{ if(state.autoRefresh)refreshAll(); },3000);
     }
 
     function stopAutoRefresh() {
-      if (state.refreshTimer) {
-        clearInterval(state.refreshTimer);
-        state.refreshTimer = null;
-      }
+      if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer=null; }
     }
 
-    document.querySelectorAll(".navBtn").forEach(btn => {
-      btn.addEventListener("click", () => {
-        document.querySelectorAll(".navBtn").forEach(b => b.classList.remove("active"));
+    // ── Nav ──
+    document.querySelectorAll(".navBtn").forEach(btn=>{
+      btn.addEventListener("click",()=>{
+        document.querySelectorAll(".navBtn").forEach(b=>b.classList.remove("active"));
         btn.classList.add("active");
-
-        const section = btn.dataset.section;
-        document.querySelectorAll(".panelSection").forEach(s => s.classList.remove("active"));
-        const target = document.getElementById("section-" + section);
+        const section=btn.dataset.section;
+        document.querySelectorAll(".panelSection").forEach(s=>s.classList.remove("active"));
+        const target=document.getElementById("section-"+section);
         if (target) target.classList.add("active");
       });
     });
 
-    el.searchInput.addEventListener("input", () => {
-      renderRooms();
+    el.searchInput.addEventListener("input",()=>renderRooms());
+    el.refreshBtn.addEventListener("click",()=>refreshAll());
+    el.autoBtn.addEventListener("click",()=>{
+      state.autoRefresh=!state.autoRefresh;
+      el.autoBtn.textContent=`Auto: ${state.autoRefresh?"ON":"OFF"}`;
+      el.autoBtn.classList.toggle("btnPrimary",state.autoRefresh);
+    });
+    el.clearLogsBtn.addEventListener("click",()=>{ state.visualEvents=[]; renderLogs(); logVisual("Logs limpos pelo operador."); });
+    el.pauseLogsBtn.addEventListener("click",()=>{
+      state.logsPaused=!state.logsPaused;
+      el.pauseLogsBtn.textContent=state.logsPaused?"Retomar":"Pausar";
+      logVisual(state.logsPaused?"Stream pausado.":"Stream retomado.");
+    });
+    el.clearEventsBtn.addEventListener("click",()=>{
+      state.chatEvents=[]; state.eventCount=0; renderChat(); el.statEvents.textContent="0";
+      logVisual("Eventos limpos pelo operador.","warn");
     });
 
-    el.refreshBtn.addEventListener("click", () => {
-      refreshAll();
-    });
+    refreshAll(); loadLogsSnapshot(); connectLogStream(); startAutoRefresh();
 
-    el.autoBtn.addEventListener("click", () => {
-      state.autoRefresh = !state.autoRefresh;
-      el.autoBtn.textContent = `Auto refresh: ${state.autoRefresh ? "ON" : "OFF"}`;
-      el.autoBtn.classList.toggle("btnPrimary", state.autoRefresh);
-    });
-
-    el.clearLogsBtn.addEventListener("click", () => {
-      state.visualEvents = [];
-      renderLogs();
-      logVisual("Logs visuais limpos pelo operador.");
-    });
-
-    el.pauseLogsBtn.addEventListener("click", () => {
-      state.logsPaused = !state.logsPaused;
-      el.pauseLogsBtn.textContent = state.logsPaused ? "Retomar stream" : "Pausar stream";
-      logVisual(state.logsPaused ? "Stream visual pausado." : "Stream visual retomado.");
-    });
-
-    el.clearEventsBtn.addEventListener("click", () => {
-      state.chatEvents = [];
-      state.eventCount = 0;
-      renderChat();
-      el.statEvents.textContent = "0";
-      logVisual("Eventos e cache de chat limpos pelo operador.", "warn");
-    });
-
-    refreshAll();
-    loadLogsSnapshot();
-    connectLogStream();
-    startAutoRefresh();
-
-    // ─── Encontro Marcado admin ───────────────────────────────────────────────
+    // ─── Encontro Marcado ───
     function emSecret() { return document.getElementById("emSecret").value.trim(); }
 
-    async function emApi(path, method = "GET", body = null) {
-      const sec = emSecret();
-      if (!sec) { alert("Digite o Admin Secret primeiro."); throw new Error("NO_SECRET"); }
-      const opts = {
-        method,
-        headers: { "Content-Type": "application/json", "x-admin-secret": sec },
-        cache: "no-store"
-      };
-      if (body) opts.body = JSON.stringify(body);
-      const res  = await fetch(SERVER + path, opts);
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((json?.detail ? `${json.error}: ${json.detail}` : json?.error) || `HTTP_${res.status}`);
+    async function emApi(path, method="GET", body=null) {
+      const sec=emSecret();
+      if (!sec) { toast("Digite o Admin Secret primeiro.","error"); throw new Error("NO_SECRET"); }
+      const opts={ method, headers:{"Content-Type":"application/json","x-admin-secret":sec}, cache:"no-store" };
+      if (body) opts.body=JSON.stringify(body);
+      const res=await fetch(SERVER+path,opts);
+      const json=await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error((json?.detail?`${json.error}: ${json.detail}`:json?.error)||`HTTP_${res.status}`);
       return json;
     }
 
     function emStatusBadge(status) {
-      const map = {
-        upcoming: { label: "Agendado",   color: "#ffd166" },
-        waiting:  { label: "Aguardando", color: "#00ccff" },
-        running:  { label: "Ao vivo",    color: "#00ff9c" },
-        ended:    { label: "Encerrado",  color: "#888"    },
-      };
-      const s = map[status] || { label: status, color: "#888" };
-      return `<span style="background:${s.color}22;border:1px solid ${s.color}55;color:${s.color};padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">${s.label}</span>`;
+      const labels={upcoming:"Agendado",waiting:"Aguardando",running:"Ao vivo",ended:"Encerrado"};
+      return `<span class="em-status ${status||"ended"}">${labels[status]||status}</span>`;
     }
 
     function emFmtDate(ts) {
-      return new Date(ts).toLocaleString("pt-BR", { weekday:"short", day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" });
+      return new Date(ts).toLocaleString("pt-BR",{weekday:"short",day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
     }
 
-    let _emEvents = {};  // cache local: eventId → ev
+    let _emEvents={};
 
     async function emLoadEvents() {
-      const list = document.getElementById("emEventsList");
-      list.innerHTML = '<p style="color:var(--muted);font-size:13px">Carregando...</p>';
+      const list=document.getElementById("emEventsList");
+      list.innerHTML='<p style="color:var(--muted);font-size:12px">Carregando...</p>';
       try {
-        const data = await emApi("/encontro/admin/eventos");
-        if (!data.events?.length) {
-          list.innerHTML = '<p style="color:var(--muted);font-size:13px">Nenhum evento cadastrado.</p>';
-          return;
-        }
-        _emEvents = {};
-        data.events.forEach(ev => { _emEvents[ev.eventId] = ev; });
-        list.innerHTML = data.events.map(ev => `
-          <div style="background:rgba(232,123,143,.05);border:1px solid rgba(232,123,143,.18);border-radius:14px;padding:16px">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px">
+        const data=await emApi("/encontro/admin/eventos");
+        if (!data.events?.length) { list.innerHTML='<p style="color:var(--muted);font-size:12px">Nenhum evento cadastrado.</p>'; return; }
+        _emEvents={};
+        data.events.forEach(ev=>{ _emEvents[ev.eventId]=ev; });
+        list.innerHTML=data.events.map(ev=>`
+          <div class="em-event-card">
+            <div class="em-event-header">
               <div>
-                <div style="font-size:14px;font-weight:700;color:#e7fff7;margin-bottom:4px">${ev.title}</div>
-                <div style="font-size:12px;color:var(--muted)">${emFmtDate(ev.scheduledAt)}</div>
+                <div class="em-event-title">${escapeHtml(ev.title)}</div>
+                <div class="em-event-date">${emFmtDate(ev.scheduledAt)}</div>
               </div>
               ${emStatusBadge(ev.status)}
             </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
-              <span style="font-size:12px;color:var(--muted)">ID: <code style="color:#e87b8f;font-family:monospace">${ev.eventId}</code></span>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn" onclick="emEventDetails('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Ver detalhes</button>
-              ${ev.status==="waiting" ? `<button class="btn" onclick="emStartEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,255,156,.12);border:1px solid rgba(0,255,156,.3);color:#00ff9c">▶ Iniciar</button>` : ""}
-              ${ev.status==="running" ? `<button class="btn" onclick="emEndEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:#ff6b6b">■ Encerrar</button>` : ""}
-              <button class="btn" onclick="emAbrirSala('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(0,204,255,.08);border:1px solid rgba(0,204,255,.3);color:#00ccff">🚪 Abrir Sala</button>
-              <button class="btn" onclick="emDarIngresso('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(215,176,107,.1);border:1px solid rgba(215,176,107,.3);color:#d7b06b">🎫 Dar Ingresso</button>
-              <button class="btn" onclick="emResetarCheckins('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(255,165,0,.08);border:1px solid rgba(255,165,0,.3);color:#ffa500">🔄 Resetar</button>
-              <button class="btn" onclick="emEditEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px;background:rgba(180,180,255,.08);border:1px solid rgba(180,180,255,.3);color:#aaaaff">✏️ Editar</button>
-              <button class="btn btnDanger" onclick="emDeleteEvent('${ev.eventId}')" style="font-size:12px;padding:6px 12px">Excluir</button>
+            <div class="em-event-id">ID: ${escapeHtml(ev.eventId)}</div>
+            <div class="em-actions">
+              <button class="btn" onclick="emEventDetails('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">Detalhes</button>
+              ${ev.status==="waiting"?`<button class="btn" onclick="emStartEvent('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px;background:rgba(0,255,156,.10);border-color:rgba(0,255,156,.25);color:#00ff9c">▶ Iniciar</button>`:""}
+              ${ev.status==="running"?`<button class="btn btnDanger" onclick="emEndEvent('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">■ Encerrar</button>`:""}
+              <button class="btn" onclick="emAbrirSala('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">🚪 Sala</button>
+              <button class="btn" onclick="emDarIngresso('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">🎫 Ingresso</button>
+              <button class="btn" onclick="emResetarCheckins('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">↺ Resetar</button>
+              <button class="btn" onclick="emEditEvent('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">✏ Editar</button>
+              <button class="btn btnDanger" onclick="emDeleteEvent('${escapeHtml(ev.eventId)}')" style="font-size:10px;padding:3px 8px">Excluir</button>
             </div>
           </div>`).join("");
-      } catch (err) {
-        list.innerHTML = `<p style="color:var(--danger);font-size:13px">Erro: ${err.message}</p>`;
-      }
+      } catch(err) { list.innerHTML=`<p style="color:var(--danger);font-size:12px">Erro: ${escapeHtml(err.message)}</p>`; }
     }
 
     async function emCreateEvent() {
-      const title = document.getElementById("emNewTitle").value.trim();
-      const dt    = document.getElementById("emNewDate").value;
-      if (!dt) { alert("Selecione a data e hora do evento."); return; }
-      const scheduledAt = new Date(dt).getTime();
-      if (!scheduledAt || scheduledAt < Date.now()) { alert("Data inválida ou no passado."); return; }
+      const title=document.getElementById("emNewTitle").value.trim();
+      const dt=document.getElementById("emNewDate").value;
+      if (!dt) { toast("Selecione a data e hora do evento.","error"); return; }
+      const scheduledAt=new Date(dt).getTime();
+      if (!scheduledAt||scheduledAt<Date.now()) { toast("Data inválida ou no passado.","error"); return; }
       try {
-        await emApi("/encontro/admin/eventos", "POST", { title: title || null, scheduledAt });
-        document.getElementById("emNewTitle").value = "";
-        document.getElementById("emNewDate").value  = "";
-        alert("Evento criado com sucesso!");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro ao criar evento: " + err.message);
-      }
+        await emApi("/encontro/admin/eventos","POST",{title:title||null,scheduledAt});
+        document.getElementById("emNewTitle").value="";
+        document.getElementById("emNewDate").value="";
+        toast("Evento criado com sucesso!"); emLoadEvents();
+      } catch(err) { toast("Erro ao criar evento: "+err.message,"error"); }
     }
 
     async function emEventDetails(eventId) {
       try {
-        const data = await emApi(`/encontro/admin/eventos/${eventId}`);
-        const ev   = data.event;
-        alert(
-          `${ev.title}\n` +
-          `Status: ${ev.status}\n` +
-          `Ingressos vendidos: ${ev.ticketCount}\n` +
-          `Check-ins: ${ev.checkedIn} (${ev.men} homens / ${ev.women} mulheres)\n` +
-          `Rodada atual: ${ev.currentRound} / ${ev.totalRounds}`
-        );
-      } catch (err) {
-        alert("Erro: " + err.message);
-      }
+        const data=await emApi(`/encontro/admin/eventos/${eventId}`); const ev=data.event;
+        document.getElementById("emDetailsTitle").textContent=ev.title||eventId;
+        document.getElementById("emDetailsBody").innerHTML=`
+          <div class="modal-row"><span class="modal-row-label">Status</span><span class="modal-row-value">${escapeHtml(ev.status)}</span></div>
+          <div class="modal-row"><span class="modal-row-label">Ingressos</span><span class="modal-row-value">${escapeHtml(String(ev.ticketCount))}</span></div>
+          <div class="modal-row"><span class="modal-row-label">Check-ins</span><span class="modal-row-value">${escapeHtml(String(ev.checkedIn))} (${escapeHtml(String(ev.men))} H / ${escapeHtml(String(ev.women))} M)</span></div>
+          <div class="modal-row"><span class="modal-row-label">Rodada</span><span class="modal-row-value">${escapeHtml(String(ev.currentRound))} / ${escapeHtml(String(ev.totalRounds))}</span></div>`;
+        document.getElementById("emDetailsModal").classList.add("open");
+      } catch(err) { toast("Erro: "+err.message,"error"); }
     }
 
     async function emStartEvent(eventId) {
       if (!confirm("Iniciar o evento agora? Todos os participantes com check-in serão pareados.")) return;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}/iniciar`, "POST", { force: true });
-        alert("Evento iniciado! As rodadas começaram.");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro ao iniciar: " + err.message);
-      }
+      try { await emApi(`/encontro/admin/eventos/${eventId}/iniciar`,"POST",{force:true}); toast("Evento iniciado! As rodadas começaram."); emLoadEvents(); }
+      catch(err) { toast("Erro ao iniciar: "+err.message,"error"); }
     }
 
     async function emEndEvent(eventId) {
       if (!confirm("Encerrar o evento agora? Os participantes irão para a tela de votação.")) return;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}/encerrar`, "POST");
-        alert("Evento encerrado.");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro ao encerrar: " + err.message);
-      }
+      try { await emApi(`/encontro/admin/eventos/${eventId}/encerrar`,"POST"); toast("Evento encerrado."); emLoadEvents(); }
+      catch(err) { toast("Erro ao encerrar: "+err.message,"error"); }
     }
 
     async function emAbrirSala(eventId) {
       if (!confirm("Avançar o horário para AGORA e abrir a sala de espera?")) return;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}/abrir-sala`, "POST");
-        alert("Sala aberta! Recarregue o encontro-marcado.html.");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro: " + err.message);
-      }
+      try { await emApi(`/encontro/admin/eventos/${eventId}/abrir-sala`,"POST"); toast("Sala aberta! Recarregue o encontro-marcado.html."); emLoadEvents(); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
     }
 
     async function emDarIngresso(eventId) {
-      const email = prompt("E-mail do participante para dar ingresso gratuito:");
-      if (!email) return;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}/dar-ingresso`, "POST", { email });
-        alert(`Ingresso criado para ${email}!`);
-      } catch (err) {
-        alert("Erro: " + err.message);
-      }
+      const email=prompt("E-mail do participante para dar ingresso gratuito:"); if (!email) return;
+      try { await emApi(`/encontro/admin/eventos/${eventId}/dar-ingresso`,"POST",{email}); toast(`Ingresso criado para ${email}!`); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
     }
 
     async function emResetarCheckins(eventId) {
       if (!confirm("Limpar TODOS os check-ins deste evento? Use antes de cada teste para evitar participantes duplicados.")) return;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}/resetar-checkins`, "POST");
-        alert("Check-ins resetados. Peça ao participante para recarregar a página e fazer check-in novamente.");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro: " + err.message);
-      }
+      try { await emApi(`/encontro/admin/eventos/${eventId}/resetar-checkins`,"POST"); toast("Check-ins resetados."); emLoadEvents(); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
     }
 
     function emEditEvent(eventId) {
-      const ev = _emEvents[eventId];
-      if (!ev) { alert("Evento não encontrado no cache. Recarregue a lista."); return; }
-
-      // Formata data/hora para o input datetime-local (YYYY-MM-DDTHH:MM)
-      const d = new Date(ev.scheduledAt);
-      const pad = n => String(n).padStart(2,"0");
-      const localDt = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-
-      document.getElementById("emEditId").value      = eventId;
-      document.getElementById("emEditTitle").value   = ev.title || "";
-      document.getElementById("emEditDate").value    = localDt;
-      document.getElementById("emEditModal").style.display = "flex";
+      const ev=_emEvents[eventId];
+      if (!ev) { toast("Evento não encontrado no cache. Recarregue a lista.","error"); return; }
+      const d=new Date(ev.scheduledAt), pad=n=>String(n).padStart(2,"0");
+      const localDt=`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      document.getElementById("emEditId").value=eventId;
+      document.getElementById("emEditTitle").value=ev.title||"";
+      document.getElementById("emEditDate").value=localDt;
+      document.getElementById("emEditModal").classList.add("open");
     }
 
-    document.getElementById("emEditModal").addEventListener("click", e => {
-      if (e.target === document.getElementById("emEditModal")) emCloseEditModal();
-    });
+    document.getElementById("emEditModal").addEventListener("click",e=>{ if(e.target===document.getElementById("emEditModal")) emCloseEditModal(); });
+    document.getElementById("emDetailsModal").addEventListener("click",e=>{ if(e.target===document.getElementById("emDetailsModal")) document.getElementById("emDetailsModal").classList.remove("open"); });
 
-    function emCloseEditModal() {
-      document.getElementById("emEditModal").style.display = "none";
-    }
+    function emCloseEditModal() { document.getElementById("emEditModal").classList.remove("open"); }
 
     async function emSaveEdit() {
-      const eventId     = document.getElementById("emEditId").value;
-      const title       = document.getElementById("emEditTitle").value.trim();
-      const dateVal     = document.getElementById("emEditDate").value;
-      if (!dateVal) { alert("Selecione uma data."); return; }
-      const scheduledAt = new Date(dateVal).getTime();
-      if (isNaN(scheduledAt)) { alert("Data inválida."); return; }
-      const body = {};
-      if (title)       body.title       = title;
-      if (scheduledAt) body.scheduledAt = scheduledAt;
-      try {
-        await emApi(`/encontro/admin/eventos/${eventId}`, "PUT", body);
-        emCloseEditModal();
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro ao salvar: " + err.message);
-      }
+      const eventId=document.getElementById("emEditId").value;
+      const title=document.getElementById("emEditTitle").value.trim();
+      const dateVal=document.getElementById("emEditDate").value;
+      if (!dateVal) { toast("Selecione uma data.","error"); return; }
+      const scheduledAt=new Date(dateVal).getTime();
+      if (isNaN(scheduledAt)) { toast("Data inválida.","error"); return; }
+      const body={}; if (title) body.title=title; if (scheduledAt) body.scheduledAt=scheduledAt;
+      try { await emApi(`/encontro/admin/eventos/${eventId}`,"PUT",body); emCloseEditModal(); toast("Evento atualizado."); emLoadEvents(); }
+      catch(err) { toast("Erro ao salvar: "+err.message,"error"); }
     }
 
     async function emDeleteEvent(eventId) {
       if (!confirm(`Excluir evento ${eventId}? Esta ação não pode ser desfeita.`)) return;
+      try { await emApi(`/encontro/admin/eventos/${eventId}`,"DELETE"); toast("Evento excluído."); emLoadEvents(); }
+      catch(err) { toast("Erro ao excluir: "+err.message,"error"); }
+    }
+
+    // ─── Segurança ───
+    async function secLoadReports(status) {
+      const c=document.getElementById("secContent");
+      c.innerHTML='<p style="color:var(--muted);font-size:12px">Carregando...</p>';
       try {
-        await emApi(`/encontro/admin/eventos/${eventId}`, "DELETE");
-        alert("Evento excluído.");
-        emLoadEvents();
-      } catch (err) {
-        alert("Erro ao excluir: " + err.message);
-      }
+        const data=await emApi(`/admin/security/reports?status=${status}&limit=50`);
+        if (!data.reports?.length) { c.innerHTML=`<div class="emptyState">Nenhuma denúncia com status "${escapeHtml(status)}".</div>`; return; }
+        c.innerHTML=data.reports.map(r=>`
+          <div class="sec-report-card">
+            <div class="sec-report-header">
+              <div>
+                <div class="sec-report-meta">
+                  <span class="sec-report-reason">${escapeHtml(r.reason)}</span>
+                  · Reported: <strong style="color:var(--text)">${escapeHtml(r.reportedUid)}</strong>
+                  · By: ${escapeHtml(r.reporterUid)}
+                </div>
+                ${r.comment?`<div style="font-size:11px;color:var(--muted);margin-top:3px">${escapeHtml(r.comment)}</div>`:""}
+                <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:2px">${escapeHtml(r.id||"")} · ${escapeHtml(formatDate(r.createdAt?.toDate?.()??r.createdAt))}</div>
+              </div>
+              <div class="sec-report-actions">
+                ${r.status==="pending"?`
+                  <button class="btn" onclick="secReviewReport('${escapeHtml(r.id)}','reviewed')" style="font-size:10px;padding:2px 7px">Revisar</button>
+                  <button class="btn" onclick="secReviewReport('${escapeHtml(r.id)}','dismissed')" style="font-size:10px;padding:2px 7px">Dispensar</button>
+                  <button class="btn btnDanger" onclick="secBanReported('${escapeHtml(r.reportedUid)}','${escapeHtml(r.reason)}')" style="font-size:10px;padding:2px 7px">Banir</button>
+                `:`<span class="badge">${escapeHtml(r.status)}</span>`}
+              </div>
+            </div>
+          </div>`).join("");
+      } catch(err) { c.innerHTML=`<p style="color:var(--danger);font-size:12px">Erro: ${escapeHtml(err.message)}</p>`; }
+    }
+
+    async function secLoadBans(showAll) {
+      const c=document.getElementById("secContent");
+      c.innerHTML='<p style="color:var(--muted);font-size:12px">Carregando...</p>';
+      try {
+        const data=await emApi(`/admin/security/bans${showAll?"?all=true":""}`);
+        if (!data.bans?.length) { c.innerHTML=`<div class="emptyState">Nenhum banimento ${showAll?"":"ativo"} encontrado.</div>`; return; }
+        c.innerHTML=data.bans.map(b=>`
+          <div class="sec-ban-card">
+            <div>
+              <div class="sec-ban-uid">${escapeHtml(b.uid||b.id||"—")}</div>
+              <div class="sec-ban-reason">${escapeHtml(b.reason||"—")}${b.note?" · "+escapeHtml(b.note):""}</div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:1px">Por: ${escapeHtml(b.bannedBy||"—")} · ${escapeHtml(formatDate(b.bannedAt?.toDate?.()??b.bannedAt))}</div>
+            </div>
+            ${b.active!==false?`<button class="btn" onclick="secUnban('${escapeHtml(b.uid||b.id)}')" style="font-size:10px;padding:3px 8px;flex-shrink:0">Desbanir</button>`:`<span class="badge">Inativo</span>`}
+          </div>`).join("");
+      } catch(err) { c.innerHTML=`<p style="color:var(--danger);font-size:12px">Erro: ${escapeHtml(err.message)}</p>`; }
+    }
+
+    async function secReviewReport(reportId, status) {
+      try { await emApi(`/admin/security/reports/${reportId}`,"PUT",{status}); toast(`Denúncia marcada como "${status}".`); secLoadReports("pending"); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
+    }
+
+    async function secBanUser() {
+      const uid=document.getElementById("secBanUid").value.trim();
+      const reason=document.getElementById("secBanReason").value.trim();
+      const note=document.getElementById("secBanNote").value.trim();
+      if (!uid||!reason) { toast("UID e motivo são obrigatórios.","error"); return; }
+      if (!confirm(`Banir usuário ${uid}?`)) return;
+      try {
+        await emApi("/admin/security/banir","POST",{uid,reason,note});
+        toast(`Usuário ${uid} banido.`);
+        document.getElementById("secBanUid").value="";
+        document.getElementById("secBanReason").value="";
+        document.getElementById("secBanNote").value="";
+      } catch(err) { toast("Erro: "+err.message,"error"); }
+    }
+
+    async function secBanReported(uid, reason) {
+      if (!confirm(`Banir usuário ${uid} por ${reason}?`)) return;
+      try { await emApi("/admin/security/banir","POST",{uid,reason}); toast(`Usuário ${uid} banido.`); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
+    }
+
+    async function secUnban(uid) {
+      if (!confirm(`Desbanir usuário ${uid}?`)) return;
+      try { await emApi(`/admin/security/banir/${uid}`,"DELETE"); toast(`Usuário ${uid} desbanido.`); secLoadBans(false); }
+      catch(err) { toast("Erro: "+err.message,"error"); }
     }
   </script>
-
-<!-- Modal de edição de evento -->
-<div id="emEditModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;padding:16px">
-  <div style="background:#1a1a2e;border:1px solid rgba(232,123,143,.25);border-radius:20px;padding:28px;width:min(420px,100%);display:flex;flex-direction:column;gap:16px">
-    <div style="font-size:16px;font-weight:700;color:#e7fff7">✏️ Editar Evento</div>
-    <input type="hidden" id="emEditId" />
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <label style="font-size:12px;font-weight:600;color:#9a7e84;text-transform:uppercase;letter-spacing:.08em">Título</label>
-      <input id="emEditTitle" type="text" placeholder="Deixe vazio para manter o atual"
-        style="background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.25);border-radius:10px;padding:10px 14px;font-size:14px;color:#f5e8ec;outline:none" />
-    </div>
-    <div style="display:flex;flex-direction:column;gap:6px">
-      <label style="font-size:12px;font-weight:600;color:#9a7e84;text-transform:uppercase;letter-spacing:.08em">Data e Hora</label>
-      <input id="emEditDate" type="datetime-local"
-        style="background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.25);border-radius:10px;padding:10px 14px;font-size:14px;color:#f5e8ec;outline:none;color-scheme:dark" />
-    </div>
-    <div style="display:flex;gap:10px;margin-top:4px">
-      <button onclick="emSaveEdit()" style="flex:1;padding:12px;background:linear-gradient(135deg,#c96b7a,#e87b8f);border:none;border-radius:12px;font-size:14px;font-weight:700;color:#fff;cursor:pointer">Salvar</button>
-      <button onclick="emCloseEditModal()" style="flex:1;padding:12px;background:rgba(255,255,255,.06);border:1px solid rgba(232,123,143,.2);border-radius:12px;font-size:14px;color:#9a7e84;cursor:pointer">Cancelar</button>
-    </div>
-  </div>
-</div>
 </body>
 </html>
