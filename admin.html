@@ -869,11 +869,6 @@
         </button>
       </nav>
 
-      <div class="sidebar-secret">
-        <div class="sidebar-secret-label">Admin Secret</div>
-        <input type="password" id="emSecret" class="field-input" placeholder="ADMIN_SECRET" style="font-size:11px;padding:5px 9px" />
-      </div>
-
       <div class="sidebar-info">
         <span id="serverUrl" style="color:var(--text)"></span>
         <span>Atualizado: <span id="lastUpdated">—</span></span>
@@ -1074,41 +1069,61 @@
   <div id="toastContainer"></div>
 
   <script>
-    // ── Senha do painel (altere aqui) ──────────────────────
-    const PANEL_PASSWORD = "preludio@admin";
-    const PANEL_SESSION_KEY = "osl_panel_auth";
+    const SERVER = "https://osl-video-server-production.up.railway.app";
+    const PANEL_SESSION_KEY = "osl_panel_token";
 
-    (function initLock() {
-      const lock = document.getElementById("lockScreen");
-      if (sessionStorage.getItem(PANEL_SESSION_KEY) === "1") {
-        lock.style.display = "none";
-        return;
+    // ── Auth do painel ─────────────────────────────────────
+    // A senha é validada pelo server (env PANEL_PASSWORD).
+    // O browser nunca vê nenhuma senha — só o token de sessão derivado.
+
+    function getPanelToken() { return sessionStorage.getItem(PANEL_SESSION_KEY) || ""; }
+
+    async function initLock() {
+      const lock  = document.getElementById("lockScreen");
+      const token = getPanelToken();
+      if (token) {
+        try {
+          const res = await fetch(SERVER + "/admin/panel/verify", {
+            headers: { "Authorization": "Bearer " + token },
+            cache: "no-store"
+          });
+          if (res.ok) { lock.style.display = "none"; initPanel(); return; }
+        } catch {}
+        sessionStorage.removeItem(PANEL_SESSION_KEY);
       }
       document.getElementById("lockInput").addEventListener("keydown", e => {
         if (e.key === "Enter") lockSubmit();
       });
-    })();
+    }
 
-    function lockSubmit() {
+    async function lockSubmit() {
       const input = document.getElementById("lockInput");
       const error = document.getElementById("lockError");
-      if (input.value === PANEL_PASSWORD) {
-        sessionStorage.setItem(PANEL_SESSION_KEY, "1");
+      const password = input.value;
+      input.value = "";
+      try {
+        const res  = await fetch(SERVER + "/admin/panel/auth", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+          cache: "no-store"
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json?.error || "SENHA_INCORRETA");
+        sessionStorage.setItem(PANEL_SESSION_KEY, json.token);
         document.getElementById("lockScreen").style.display = "none";
-        input.value = "";
         error.textContent = "";
-      } else {
+        initPanel();
+      } catch {
         error.textContent = "Senha incorreta.";
         input.classList.remove("shake");
-        void input.offsetWidth; // reflow para reiniciar animação
+        void input.offsetWidth;
         input.classList.add("shake");
-        input.value = "";
         input.focus();
       }
     }
 
-    // ───────────────────────────────────────────────────────
-    const SERVER = "https://osl-video-server-production.up.railway.app";
+    initLock();
 
     const state = {
       autoRefresh: true,
@@ -1476,17 +1491,25 @@
       logVisual("Eventos limpos pelo operador.","warn");
     });
 
-    refreshAll(); loadLogsSnapshot(); connectLogStream(); startAutoRefresh();
+    function initPanel() {
+      refreshAll(); loadLogsSnapshot(); connectLogStream(); startAutoRefresh();
+    }
 
-    // ─── Encontro Marcado ───
-    function emSecret() { return document.getElementById("emSecret").value.trim(); }
-
+    // ─── Admin API (Bearer panel token — sem secrets no browser) ───
     async function emApi(path, method="GET", body=null) {
-      const sec=emSecret();
-      if (!sec) { toast("Digite o Admin Secret primeiro.","error"); throw new Error("NO_SECRET"); }
-      const opts={ method, headers:{"Content-Type":"application/json","x-admin-secret":sec}, cache:"no-store" };
+      const token = getPanelToken();
+      if (!token) {
+        toast("Sessão expirada. Recarregue a página.","error");
+        throw new Error("NO_TOKEN");
+      }
+      const opts={ method, headers:{"Content-Type":"application/json","Authorization":"Bearer "+token}, cache:"no-store" };
       if (body) opts.body=JSON.stringify(body);
       const res=await fetch(SERVER+path,opts);
+      if (res.status===401||res.status===403) {
+        sessionStorage.removeItem(PANEL_SESSION_KEY);
+        location.reload();
+        throw new Error("SESSION_EXPIRED");
+      }
       const json=await res.json().catch(()=>({}));
       if (!res.ok) throw new Error((json?.detail?`${json.error}: ${json.detail}`:json?.error)||`HTTP_${res.status}`);
       return json;

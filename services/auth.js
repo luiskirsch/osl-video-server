@@ -127,13 +127,36 @@ function requireGameAccess(req, res, next) {
   next();
 }
 
+// Panel session token: TTL de 8h, assinado com ADMIN_SECRET.
+// Nunca expõe o ADMIN_SECRET ao browser — o painel recebe só o token derivado.
+const PANEL_TOKEN_TTL_MS = 8 * 60 * 60_000;
+
+function generatePanelToken() {
+  if (!ADMIN_SECRET) throw new Error("ADMIN_SECRET_NAO_CONFIGURADO");
+  return signPayload(
+    { token_type: "panel_session", exp: Date.now() + PANEL_TOKEN_TTL_MS },
+    ADMIN_SECRET
+  );
+}
+
+function _isPanelToken(req) {
+  const token = getBearerToken(req);
+  if (!token) return false;
+  const r = verifySignedToken(token, ADMIN_SECRET || "");
+  return r.valid && r.payload?.token_type === "panel_session";
+}
+
 function requireAdmin(req, res, next) {
   if (!ADMIN_SECRET) return sendError(res, 503, "ADMIN_NAO_CONFIGURADO");
-  // Só header — secret em req.body fica sujeito a ferramentas de observabilidade
-  // (Sentry, APM) que costumam capturar o body em erros 4xx/5xx por padrão.
+
+  // Caminho 1: x-admin-secret header (acesso direto / ferramentas externas)
   const provided = String(req.headers["x-admin-secret"] || "").trim();
-  if (!provided || !timingSafeStringEqual(provided, ADMIN_SECRET)) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
-  next();
+  if (provided && timingSafeStringEqual(provided, ADMIN_SECRET)) return next();
+
+  // Caminho 2: Bearer panel session token (painel web)
+  if (_isPanelToken(req)) return next();
+
+  return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
 }
 
 async function verifyFirebaseToken(req, res) {
@@ -165,5 +188,6 @@ module.exports = {
   signPayload, verifySignedToken,
   getBearerToken, timingSafeStringEqual,
   requireGameAccess, requireAdmin, verifyFirebaseToken,
-  generateLicenseCode, generateExternalReference
+  generateLicenseCode, generateExternalReference,
+  generatePanelToken,
 };

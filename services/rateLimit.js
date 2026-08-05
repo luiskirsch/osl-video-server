@@ -74,4 +74,13 @@ const roomLimiter = rateLimit({
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
 });
 
-module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter };
+// Login do painel: 5 tentativas por 15min por IP — anti brute-force
+const panelLoginLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: makeHandler("MUITAS_TENTATIVAS_DE_LOGIN"),
+});
+
+module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter };

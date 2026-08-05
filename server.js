@@ -65,6 +65,7 @@ const therapyRouter   = require("./routes/therapy");
 const baggioRouter    = require("./routes/baggio");
 const encontroRouter  = require("./routes/encontro");
 const securityRouter  = require("./routes/security");
+const panelRouter     = require("./routes/panel");
 
 const { globalLimiter } = require("./services/rateLimit");
 
@@ -155,6 +156,7 @@ app.use(therapyRouter);
 app.use(baggioRouter);
 app.use(encontroRouter);
 app.use(securityRouter);
+app.use(panelRouter);
 
 // --- 404 ---
 app.use((req, res) => {
