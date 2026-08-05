@@ -62,129 +62,129 @@ const BACKEND_BASE_URL  = process.env.BACKEND_BASE_URL  || "https://osl-video-se
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://preludiojogos.com";
 
 const PRODUCT_ID       = "osl_ritual_completo";
-const PRODUCT_TITLE    = "O SextoLugar — Ritual Completo";
+const PRODUCT_TITLE    = "SEXTOLUGAR — Ritual Completo";
 const PRODUCT_PRICE    = 29.9;
 const PRODUCT_CURRENCY = "BRL";
 
 const PRODUCT_CATALOG = {
   "osl_ritual_completo": {
-    title: "O SextoLugar — Ritual Completo",
+    title: "SEXTOLUGAR — Ritual Completo",
     description: "Experiência digital imersiva com cartas psicológicas e interação em grupo ao vivo",
     price: 29.90,
     type: "license"
   },
   "carta-bloqueada": {
-    title: "O SextoLugar — Carta Desbloqueada",
+    title: "SEXTOLUGAR — Carta Desbloqueada",
     description: "Desbloqueie a próxima carta da sessão",
     price: 2.90,
     type: "consumable"
   },
   "carta-final": {
-    title: "O SextoLugar — Carta de Revelação Final",
+    title: "SEXTOLUGAR — Carta de Revelação Final",
     description: "Carta especial de revelação final para a sessão",
     price: 4.90,
     type: "consumable"
   },
   "segunda-chance": {
-    title: "O SextoLugar — Segunda Chance",
+    title: "SEXTOLUGAR — Segunda Chance",
     description: "Continue a sessão com mais 3 cartas",
     price: 1.90,
     type: "consumable"
   },
   "gravacao-download": {
-    title: "O SextoLugar — Gravação + Download",
+    title: "SEXTOLUGAR — Gravação + Download",
     description: "Grave sua sessão e baixe o arquivo MP4",
     price: 6.90,
     type: "consumable"
   },
   "gravacao-mensal": {
-    title: "O SextoLugar — Gravação Livre Mensal",
+    title: "SEXTOLUGAR — Gravação Livre Mensal",
     description: "Grave sessões ilimitadas por 30 dias",
     price: 14.90,
     type: "subscription"
   },
   "streaming-mensal": {
-    title: "O SextoLugar — Stream Pass Mensal",
+    title: "SEXTOLUGAR — Stream Pass Mensal",
     description: "Transmita ao vivo (YouTube, Twitch, Facebook, Kick, TikTok) sem limite por 30 dias",
     price: 14.90,
     type: "subscription"
   },
   "sala-premium": {
-    title: "O SextoLugar — Sala Premium",
+    title: "SEXTOLUGAR — Sala Premium",
     description: "Sala premium com recursos avançados",
     price: 4.90,
     type: "consumable"
   },
   "modo-ritual": {
-    title: "O SextoLugar — Modo Ritual",
+    title: "SEXTOLUGAR — Modo Ritual",
     description: "Sessão em Modo Ritual com trilha e rituais guiados",
     price: 6.90,
     type: "consumable"
   },
   "pacote-conexao": {
-    title: "O SextoLugar — Pacote Conexão",
+    title: "SEXTOLUGAR — Pacote Conexão",
     description: "12 cartas leves e emocionais para conexão genuína",
     price: 9.90,
     type: "pack"
   },
   "pacote-verdades": {
-    title: "O SextoLugar — Pacote Verdades",
+    title: "SEXTOLUGAR — Pacote Verdades",
     description: "15 cartas de verdades com desconforto leve",
     price: 12.90,
     type: "pack"
   },
   "pacote-conflito": {
-    title: "O SextoLugar — Pacote Conflito",
+    title: "SEXTOLUGAR — Pacote Conflito",
     description: "15 cartas de provocações e conflito honesto",
     price: 14.90,
     type: "pack"
   },
   "pacote-segredos": {
-    title: "O SextoLugar — Pacote Segredos",
+    title: "SEXTOLUGAR — Pacote Segredos",
     description: "18 cartas intensas e psicológicas",
     price: 19.90,
     type: "pack"
   },
   "pacote-casais": {
-    title: "O SextoLugar — Pacote Casais",
+    title: "SEXTOLUGAR — Pacote Casais",
     description: "18 cartas nichadas para casais",
     price: 300.00,
     type: "pack"
   },
   "tema-sala": {
-    title: "O SextoLugar — Tema da Sala",
+    title: "SEXTOLUGAR — Tema da Sala",
     description: "Personalização visual da sala",
     price: 4.90,
     type: "cosmetic"
   },
   "estilo-carta": {
-    title: "O SextoLugar — Estilo das Cartas",
+    title: "SEXTOLUGAR — Estilo das Cartas",
     description: "Estilo visual personalizado para as cartas",
     price: 3.90,
     type: "cosmetic"
   },
   "efeitos-visuais": {
-    title: "O SextoLugar — Efeitos Visuais",
+    title: "SEXTOLUGAR — Efeitos Visuais",
     description: "Efeitos visuais especiais na sala",
     price: 2.90,
     type: "cosmetic"
   },
   "coins_150": {
-    title: "O SextoLugar — Pacote Explorador",
+    title: "SEXTOLUGAR — Pacote Explorador",
     description: "150 moedas para usar na loja do jogo",
     price: 4.90,
     type: "coins",
     coins: 150
   },
   "coins_500": {
-    title: "O SextoLugar — Pacote Aliado",
+    title: "SEXTOLUGAR — Pacote Aliado",
     description: "500 moedas para usar na loja do jogo",
     price: 12.90,
     type: "coins",
     coins: 500
   },
   "coins_1500": {
-    title: "O SextoLugar — Pacote Mestre",
+    title: "SEXTOLUGAR — Pacote Mestre",
     description: "1.500 moedas para usar na loja do jogo",
     price: 29.90,
     type: "coins",
