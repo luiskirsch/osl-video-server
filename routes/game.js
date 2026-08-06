@@ -1,6 +1,6 @@
 const express = require("express");
-const { logError } = require("../logger");
-const { sendError, nowIso } = require("../utils");
+const { logError, logInfo } = require("../logger");
+const { asyncHandler, sendError, nowIso } = require("../utils");
 const {
   panelRooms, panelClients, roomHostSseClients, pendingJoinRequests,
   serializePanelRoom, broadcastPanelUpdate, notifyRoomHost
@@ -12,8 +12,10 @@ const {
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
 const { roomLimiter, joinLimiter } = require("../services/rateLimit");
-const { verifySignedToken, signHostToken, requireAdmin } = require("../services/auth");
+const { verifySignedToken, signHostToken, requireAdmin, getBearerToken } = require("../services/auth");
 const { ADMIN_SECRET, ACCESS_TOKEN_SECRET } = require("../config");
+const { getDb } = require("../services/firestore");
+const admin = require("firebase-admin");
 
 const router = express.Router();
 
@@ -383,5 +385,51 @@ router.post("/game/cleanup", requireAdmin, (req, res) => {
     return sendError(res, 500, "ERRO_GAME_CLEANUP");
   }
 });
+
+// Migra perfil do usuário do UID antigo (osl_user_id) para Firebase UID.
+// Chamado uma vez por ensureUserProfile() quando o doc novo não existe mas o antigo sim.
+router.post("/game/migrar-perfil", asyncHandler(async (req, res) => {
+  const token = getBearerToken(req);
+  if (!token) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
+
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(token);
+  } catch (_) {
+    return sendError(res, 401, "FIREBASE_TOKEN_INVALIDO");
+  }
+
+  const newUid = decoded.uid;
+  const { oldUserId } = req.body;
+
+  // Valida formato do oldUserId: deve ser "u_" + 10-20 chars alfanuméricos
+  if (!oldUserId || typeof oldUserId !== "string" || !/^u_[a-z0-9]{5,30}$/.test(oldUserId)) {
+    return sendError(res, 400, "INVALID_OLD_USER_ID");
+  }
+  if (oldUserId === newUid) return res.json({ ok: true, skipped: "same_uid" });
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "FIRESTORE_UNAVAILABLE");
+
+  const oldRef = db.collection("users").doc(oldUserId);
+  const newRef = db.collection("users").doc(newUid);
+
+  const [oldSnap, newSnap] = await Promise.all([oldRef.get(), newRef.get()]);
+
+  if (!oldSnap.exists) return res.json({ ok: true, skipped: "old_not_found" });
+
+  // Se novo perfil já tem dados de progressão, não sobrescreve
+  if (newSnap.exists) {
+    const d = newSnap.data();
+    if ((d.xp || 0) > 0 || (d.coins || 0) > 0 || Object.keys(d.achievements || {}).length > 0) {
+      return res.json({ ok: true, skipped: "new_has_data" });
+    }
+  }
+
+  await newRef.set(oldSnap.data(), { merge: true });
+  logInfo("profile_migrated", { oldUserId, newUid });
+
+  return res.json({ ok: true, migrated: true });
+}));
 
 module.exports = router;
