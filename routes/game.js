@@ -12,7 +12,7 @@ const {
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
 const { roomLimiter, joinLimiter } = require("../services/rateLimit");
-const { verifySignedToken } = require("../services/auth");
+const { verifySignedToken, signHostToken } = require("../services/auth");
 const { ADMIN_SECRET } = require("../config");
 
 const router = express.Router();
@@ -71,7 +71,11 @@ router.post("/game/room/create", roomLimiter, (req, res) => {
 
     const room = getOrCreatePanelRoom(roomId, name, host);
     broadcastPanelUpdate();
-    return res.json({ ok: true, room: serializePanelRoom(room) });
+
+    let hostToken = null;
+    try { hostToken = signHostToken(roomId); } catch (_) { /* ACCESS_TOKEN_SECRET não configurado */ }
+
+    return res.json({ ok: true, room: serializePanelRoom(room), hostToken });
   } catch (error) {
     logError("game_room_create_error", error);
     return sendError(res, 500, "ERRO_GAME_ROOM_CREATE");

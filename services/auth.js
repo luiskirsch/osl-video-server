@@ -171,6 +171,23 @@ async function verifyFirebaseToken(req, res) {
   }
 }
 
+// Host token: identifica quem criou a sala, autoriza ações de ritual.
+// TTL de 12h. Assinado com ACCESS_TOKEN_SECRET.
+const HOST_TOKEN_TTL_MS = 12 * 60 * 60_000;
+
+function signHostToken(roomId) {
+  if (!ACCESS_TOKEN_SECRET) throw new Error("ACCESS_TOKEN_SECRET_NAO_CONFIGURADO");
+  return signPayload({ token_type: "host", roomId, exp: Date.now() + HOST_TOKEN_TTL_MS }, ACCESS_TOKEN_SECRET);
+}
+
+function verifyHostToken(token, roomId) {
+  if (!token || !ACCESS_TOKEN_SECRET) return false;
+  const r = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  if (!r.valid) return false;
+  const p = r.payload;
+  return p.token_type === "host" && p.roomId === roomId;
+}
+
 // --- Geração de código de licença ---
 
 function generateLicenseCode(paymentId, externalReference, email) {
@@ -190,4 +207,5 @@ module.exports = {
   requireGameAccess, requireAdmin, verifyFirebaseToken,
   generateLicenseCode, generateExternalReference,
   generatePanelToken,
+  signHostToken, verifyHostToken,
 };

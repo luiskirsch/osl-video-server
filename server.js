@@ -66,6 +66,7 @@ const baggioRouter    = require("./routes/baggio");
 const encontroRouter  = require("./routes/encontro");
 const securityRouter  = require("./routes/security");
 const panelRouter     = require("./routes/panel");
+const ritualRouter    = require("./routes/ritual");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -179,6 +180,7 @@ app.use(baggioRouter);
 app.use(encontroRouter);
 app.use(securityRouter);
 app.use(panelRouter);
+app.use(ritualRouter);
 
 // --- 404 ---
 app.use((req, res) => {
