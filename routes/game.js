@@ -114,8 +114,8 @@ router.post("/game/player/join", joinLimiter, (req, res) => {
       if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) {
         return res.status(409).json({ ok: false, code: "SALA_CHEIA" });
       }
-      if (isPlayerNameTaken(playerName, playerId)) {
-        const suggestion = suggestPlayerName(playerName);
+      if (isPlayerNameTaken(playerName, playerId, roomId)) {
+        const suggestion = suggestPlayerName(playerName, roomId);
         return res.status(409).json({ ok: false, code: "NOME_JA_EM_USO", suggestion });
       }
     }
@@ -202,8 +202,8 @@ router.post("/game/room/request-join", (req, res) => {
     if (roomName.toLowerCase() !== (room.name || "").toLowerCase()) {
       return res.status(403).json({ ok: false, code: "NOME_SALA_INCORRETO" });
     }
-    if (isPlayerNameTaken(playerName, playerId)) {
-      const suggestion = suggestPlayerName(playerName);
+    if (isPlayerNameTaken(playerName, playerId, roomId)) {
+      const suggestion = suggestPlayerName(playerName, roomId);
       return res.status(409).json({ ok: false, code: "NOME_JA_EM_USO", suggestion });
     }
 

@@ -3,6 +3,13 @@ const crypto  = require("crypto");
 const admin   = require("firebase-admin");
 const { getDb }                         = require("../services/firestore");
 const { verifyHostToken }               = require("../services/auth");
+const { panelRooms }                    = require("../game/state");
+
+// Retorna o playerName verificado a partir do panelRooms (imune a spoofing do body).
+function resolvedPlayerName(roomId, uid, fallback) {
+  return panelRooms.get(roomId)?.players?.[uid]?.playerName
+    || String(fallback || "Jogador").slice(0, 80);
+}
 const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_PACK_IDS, levelFromXP } = require("../data/cards");
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
@@ -310,8 +317,8 @@ router.post("/game/ritual/react", asyncHandler(async (req, res) => {
   const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
   if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
 
-  const safeEmoji  = String(emoji      || "👋").slice(0, 8);
-  const safeName   = String(playerName || "Jogador").slice(0, 80);
+  const safeEmoji  = String(emoji || "👋").slice(0, 8);
+  const safeName   = resolvedPlayerName(roomId, uid, playerName);
   const ts = Date.now();
 
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -336,7 +343,7 @@ router.post("/game/ritual/ai-detect", asyncHandler(async (req, res) => {
 
   const validSources = ["voice", "chat"];
   const safeSource   = validSources.includes(source) ? source : "chat";
-  const safeName     = String(playerName || "Jogador").slice(0, 80);
+  const safeName     = resolvedPlayerName(roomId, uid, playerName);
   const safeMessage  = message ? String(message).slice(0, 500) : null;
 
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -358,7 +365,7 @@ router.post("/game/ritual/social-pressure", asyncHandler(async (req, res) => {
   const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
   if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
 
-  const safeName = String(playerName || "Jogador").slice(0, 80);
+  const safeName = resolvedPlayerName(roomId, uid, playerName);
 
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
   await ritualRef.set({

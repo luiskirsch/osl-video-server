@@ -16,9 +16,14 @@ function normalizePlayerName(value) { return String(value || "").trim().slice(0,
 
 // --- Lógica de jogadores ---
 
-function isPlayerNameTaken(name, excludePlayerId = null) {
+// roomId obrigatório: unicidade de nome é por sala, não global.
+// Antes era global → DoS: registrar nomes-alvo em qualquer sala bloqueava outros jogadores.
+function isPlayerNameTaken(name, excludePlayerId = null, roomId = null) {
   const lower = name.toLowerCase();
-  for (const room of panelRooms.values()) {
+  const rooms = roomId
+    ? (panelRooms.has(roomId) ? [panelRooms.get(roomId)] : [])
+    : Array.from(panelRooms.values());
+  for (const room of rooms) {
     for (const player of Object.values(room.players)) {
       if (player.playerName.toLowerCase() === lower && player.playerId !== excludePlayerId) {
         return true;
@@ -28,9 +33,9 @@ function isPlayerNameTaken(name, excludePlayerId = null) {
   return false;
 }
 
-function suggestPlayerName(name) {
+function suggestPlayerName(name, roomId = null) {
   let i = 2;
-  while (isPlayerNameTaken(`${name}${i}`)) i++;
+  while (isPlayerNameTaken(`${name}${i}`, null, roomId)) i++;
   return `${name}${i}`;
 }
 
