@@ -9,7 +9,7 @@ const express = require("express");
 const { requireAdmin, generatePanelToken, timingSafeStringEqual } = require("../services/auth");
 const { panelLoginLimiter } = require("../services/rateLimit");
 const { totpVerify } = require("../services/totp");
-const { PANEL_TOTP_SECRET } = require("../config");
+const { PANEL_TOTP_SECRET, IS_PRODUCTION } = require("../config");
 const { logWarn, logInfo } = require("../logger");
 
 const router = express.Router();
@@ -37,7 +37,11 @@ router.post("/admin/panel/auth", panelLoginLimiter, (req, res) => {
     return res.status(401).json({ ok: false, error: "AUTENTICACAO_FALHOU" });
   }
 
-  // 2FA: só verifica se PANEL_TOTP_SECRET estiver configurado no Railway
+  // 2FA: obrigatório em produção — sem PANEL_TOTP_SECRET configurado, bloqueia login.
+  if (IS_PRODUCTION && !PANEL_TOTP_SECRET) {
+    logWarn("panel_login_blocked_no_totp", { ip });
+    return res.status(503).json({ ok: false, error: "2FA_OBRIGATORIO_EM_PRODUCAO" });
+  }
   if (PANEL_TOTP_SECRET) {
     const code = String(req.body?.totp || "").replace(/\s/g, "");
     if (!totpVerify(PANEL_TOTP_SECRET, code)) {

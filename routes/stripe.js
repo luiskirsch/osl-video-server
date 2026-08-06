@@ -39,7 +39,17 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
     email = snap.data()?.email || undefined;
   } catch (_) { /* best-effort */ }
 
-  const origin = (req.headers.origin || "https://espacopreludio.com.br").replace(/\/$/, "");
+  const STRIPE_ALLOWED_ORIGINS = [
+    "https://espacopreludio.com.br",
+    "https://www.espacopreludio.com.br",
+    "https://staging.espacopreludio.com.br",
+    "http://localhost:3000",
+    "http://localhost:5173",
+  ];
+  const rawOrigin = (req.headers.origin || "").replace(/\/$/, "");
+  const origin = STRIPE_ALLOWED_ORIGINS.includes(rawOrigin)
+    ? rawOrigin
+    : "https://espacopreludio.com.br";
   const { url } = await stripeSvc.createCheckoutSession({
     tier,
     billingCycle,

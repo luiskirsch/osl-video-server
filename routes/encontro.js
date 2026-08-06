@@ -105,6 +105,13 @@ router.post("/encontro/match", requireFirebaseToken, voteLimiter, requireNotBann
   if (!eventId || !targetUid) return sendError(res, 400, "PARAMETROS_INVALIDOS");
   if (targetUid === req.firebaseUid) return sendError(res, 400, "VOTO_PROPRIO_NAO_PERMITIDO");
 
+  // A8: check-in obrigatório antes de aceitar votos
+  const db = getDb();
+  if (db) {
+    const checkinDoc = await db.collection("encontro_checkins").doc(`${eventId}_${req.firebaseUid}`).get();
+    if (!checkinDoc.exists) return sendError(res, 403, "CHECKIN_OBRIGATORIO");
+  }
+
   const result = await voteInterest(eventId, req.firebaseUid, targetUid, liked);
   return res.json({ ok: true, ...result });
 }));

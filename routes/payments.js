@@ -87,6 +87,16 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   if (!nome)  return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
 
+  // A10: ingresso de encontro exige roomId válido (evento existente no Firestore)
+  if (produtoInput === "encontro-ingresso") {
+    if (!roomIdInput) return sendError(res, 400, "ROOM_ID_OBRIGATORIO_PARA_INGRESSO");
+    const db = getDb();
+    if (db) {
+      const eventDoc = await db.collection("encontro_eventos").doc(roomIdInput).get();
+      if (!eventDoc.exists) return sendError(res, 400, "EVENTO_NAO_ENCONTRADO");
+    }
+  }
+
   const catalogEntry   = PRODUCT_CATALOG[produtoInput] || PRODUCT_CATALOG[PRODUCT_ID];
   const productId      = produtoInput && PRODUCT_CATALOG[produtoInput] ? produtoInput : PRODUCT_ID;
   // i18n: title/description vão pra checkout do Mercado Pago localizados
@@ -233,7 +243,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
       }
 
       const productIdFromWebhook = String(payment.metadata?.product_id || PRODUCT_ID);
-      const approvedEmail        = String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase();
+      const approvedEmail        = String(payment.metadata?.customer_email || payment.payer?.email || "").trim().toLowerCase();
       const approvedRoomId       = String(payment.metadata?.room_id || "").trim().toUpperCase();
 
       const { getDb } = require("../services/firestore");
