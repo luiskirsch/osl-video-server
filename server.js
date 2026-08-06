@@ -70,6 +70,7 @@ const ritualRouter    = require("./routes/ritual");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
+const { auditLog } = require("./middleware/auditLog");
 
 // --- App ---
 const app = express();
@@ -94,8 +95,25 @@ app.use(helmet({
       baseUri: ["'self'"],
       formAction: ["'self'"],
     }
-  }
+  },
+  // HSTS 2 anos + preload (padrão profissional; Railway já usa HTTPS obrigatório)
+  strictTransportSecurity: {
+    maxAge: 63072000,
+    includeSubDomains: true,
+    preload: true
+  },
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  xFrameOptions: { action: "deny" },
 }));
+
+// Permissions-Policy: desabilita tudo que a API não usa
+app.use((req, res, next) => {
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+  );
+  next();
+});
 
 // CORS restrito (security fix #8)
 const ALLOWED_ORIGINS = [
@@ -164,23 +182,33 @@ app.use(morgan(":method :url :status :response-time ms reqId=:request-id", {
   skip: () => process.env.NODE_ENV === "production"
 }));
 
+// --- Disclosure responsável ---
+app.get("/.well-known/security.txt", (req, res) => {
+  res.type("text/plain").send(
+    "Contact: mailto:luishenriquekirsch@hotmail.com\n" +
+    "Preferred-Languages: pt, en\n" +
+    "Policy: https://github.com/luiskirsch/osl-video-server/blob/luiskirsch.github.io/SECURITY.md\n" +
+    "Expires: " + new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString() + "\n"
+  );
+});
+
 // --- Montagem de rotas ---
 app.use(healthRouter);
 app.use(gameRouter);
-app.use(recordingRouter);
+app.use(auditLog("recording"), recordingRouter);
 app.use(streamingRouter);
 app.use(discordRouter);
-app.use(paymentsRouter);
-app.use(licenseRouter);
-app.use(affiliateRouter);
-app.use(adminRouter);
+app.use(auditLog("payment"), paymentsRouter);
+app.use(auditLog("license"), licenseRouter);
+app.use(auditLog("affiliate"), affiliateRouter);
+app.use(auditLog("admin"), adminRouter);
 app.use(aiRouter);
-app.use(therapyRouter);
+app.use(auditLog("therapy"), therapyRouter);
 app.use(baggioRouter);
-app.use(encontroRouter);
+app.use(auditLog("encontro"), encontroRouter);
 app.use(securityRouter);
-app.use(panelRouter);
-app.use(ritualRouter);
+app.use(auditLog("panel"), panelRouter);
+app.use(auditLog("ritual"), ritualRouter);
 
 // --- 404 ---
 app.use((req, res) => {

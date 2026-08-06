@@ -1,0 +1,45 @@
+name: SAST – Semgrep
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  schedule:
+    - cron: '0 8 * * 1'  # Segunda-feira 8h — scan completo semanal
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep scan
+        id: semgrep
+        run: |
+          semgrep \
+            --config=p/nodejs \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --config=p/jwt \
+            --config=p/express \
+            --sarif \
+            --output=semgrep.sarif \
+            --exclude=node_modules \
+            --exclude=.git \
+            .
+        continue-on-error: true
+
+      - name: Upload SARIF ao GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Falhar build se há findings
+        if: steps.semgrep.outcome == 'failure'
+        run: |
+          echo "Semgrep encontrou vulnerabilidades — veja a aba Security > Code scanning alerts."
+          exit 1

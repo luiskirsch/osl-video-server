@@ -1,0 +1,28 @@
+name: DAST – OWASP ZAP
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Segunda-feira 9h (após SAST)
+  workflow_dispatch:      # Trigger manual para rodar sob demanda
+
+jobs:
+  zap-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: ${{ secrets.ZAP_TARGET_URL || 'https://osl-video-server-production.up.railway.app' }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-I'   # -I = não falha o build, só gera relatório
+          allow_issue_writing: false
+
+      - name: Upload relatório ZAP
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: report_html.html
+          retention-days: 30
