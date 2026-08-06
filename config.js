@@ -212,6 +212,11 @@ const REFERRAL_COMMISSION_PERCENT  = 0.31;
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
+// TOTP (2FA) para o painel admin. Gere um secret com:
+//   node -e "console.log(require('crypto').randomBytes(20).toString('base64url'))"
+// e converta para base32. Sem essa var, o 2FA é ignorado (backward-compat).
+const PANEL_TOTP_SECRET = process.env.PANEL_TOTP_SECRET || "";
+
 // Allowlist de e-mails admin do Espaço Prelúdio (verificação de CRP/CRM, etc).
 // Comma-separated. Ex.: "luis@x.com,ops@y.com". Validado contra decoded.email
 // do Firebase ID Token. Sem essa env, ninguém é admin (rejeita 403).
@@ -322,7 +327,7 @@ module.exports = {
   LICENSE_VALIDITY_MS, ACCESS_VALIDITY_MS, PASS_VALIDITY_MS,
   FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM, MAX_COMPLETED_RECORDINGS_IN_MEMORY,
   REFERRAL_REWARD_COINS, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE, REFERRAL_COMMISSION_PERCENT,
-  ADMIN_SECRET,
+  ADMIN_SECRET, PANEL_TOTP_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
   THERAPY_PLAN_ANNUAL_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT,

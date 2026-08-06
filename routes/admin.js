@@ -187,10 +187,27 @@ router.get("/admin/env-check", adminLimiter, requireAdmin, asyncHandler(async (r
   return res.json({ ok: true, env: status, nodeEnv: process.env.NODE_ENV, appEnv: process.env.APP_ENV });
 }));
 
-// GET /system-core — serve o painel admin como HTML estático.
-// Sem auth no arquivo em si (é só HTML); as chamadas de API dentro dele
-// requerem ADMIN_SECRET — segurança está nas rotas, não no acesso ao HTML.
-router.get("/system-core", (req, res) => {
+// CSP específica pro admin.html — mais permissiva que a API (permite inline scripts
+// do painel), mas ainda restrita: só 'self' e a URL do próprio backend em connect-src.
+const ADMIN_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "connect-src 'self' https://osl-video-server-production.up.railway.app",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
+
+// GET /system-core — serve o painel admin.
+// adminLimiter (3 req/10min) protege contra varredura de URL.
+router.get("/system-core", adminLimiter, (req, res) => {
+  res.setHeader("Content-Security-Policy", ADMIN_CSP);
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.sendFile(path.join(__dirname, "..", "admin.html"));
 });
 

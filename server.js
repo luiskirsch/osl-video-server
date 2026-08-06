@@ -68,6 +68,7 @@ const securityRouter  = require("./routes/security");
 const panelRouter     = require("./routes/panel");
 
 const { globalLimiter } = require("./services/rateLimit");
+const waf = require("./middleware/waf");
 
 // --- App ---
 const app = express();
@@ -118,6 +119,9 @@ app.use(cors({
   },
   credentials: false
 }));
+// WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
+app.use(waf);
+
 // Stripe webhook ANTES do express.json() — precisa de raw body para validar HMAC.
 // express.raw() aplicado só na rota /stripe/webhook dentro do router.
 app.use(stripeWebhookRouter);

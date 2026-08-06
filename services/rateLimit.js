@@ -83,4 +83,13 @@ const panelLoginLimiter = rateLimit({
   handler: makeHandler("MUITAS_TENTATIVAS_DE_LOGIN"),
 });
 
-module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter };
+// Join de jogador: 60 por minuto por IP — freia bots de flooding de sala
+const joinLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
+});
+
+module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter, joinLimiter };

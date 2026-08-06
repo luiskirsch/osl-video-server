@@ -800,6 +800,8 @@
       <div class="lock-form">
         <label class="lock-label" for="lockInput">Senha do painel</label>
         <input id="lockInput" type="password" class="lock-input" placeholder="••••••••" autocomplete="current-password" />
+        <label class="lock-label" id="totpLabel" for="totpInput" style="display:none;margin-top:4px">Código 2FA — Autenticador</label>
+        <input id="totpInput" type="text" class="lock-input" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="one-time-code" style="display:none;letter-spacing:.25em;text-align:center" />
         <div class="lock-error" id="lockError"></div>
         <button class="lock-btn" onclick="lockSubmit()">Entrar</button>
       </div>
@@ -1091,34 +1093,50 @@
         } catch {}
         sessionStorage.removeItem(PANEL_SESSION_KEY);
       }
+      // Verifica se 2FA está habilitado; se sim, mostra o campo TOTP
+      try {
+        const st = await fetch(SERVER + "/admin/panel/status", { cache: "no-store" });
+        const sj = await st.json().catch(() => ({}));
+        if (sj.totpEnabled) {
+          document.getElementById("totpLabel").style.display = "";
+          document.getElementById("totpInput").style.display = "";
+        }
+      } catch {}
       document.getElementById("lockInput").addEventListener("keydown", e => {
+        if (e.key === "Enter") lockSubmit();
+      });
+      document.getElementById("totpInput").addEventListener("keydown", e => {
         if (e.key === "Enter") lockSubmit();
       });
     }
 
     async function lockSubmit() {
-      const input = document.getElementById("lockInput");
-      const error = document.getElementById("lockError");
-      const password = input.value;
-      input.value = "";
+      const input     = document.getElementById("lockInput");
+      const totpInput = document.getElementById("totpInput");
+      const error     = document.getElementById("lockError");
+      const password  = input.value;
+      const totp      = totpInput.value.replace(/\s/g, "");
+      input.value = ""; totpInput.value = "";
       try {
         const res  = await fetch(SERVER + "/admin/panel/auth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ password, totp }),
           cache: "no-store"
         });
         const json = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(json?.error || "SENHA_INCORRETA");
+        if (!res.ok) throw new Error(json?.error || "AUTENTICACAO_FALHOU");
         sessionStorage.setItem(PANEL_SESSION_KEY, json.token);
         document.getElementById("lockScreen").style.display = "none";
         error.textContent = "";
         initPanel();
       } catch {
-        error.textContent = "Senha incorreta.";
-        input.classList.remove("shake");
-        void input.offsetWidth;
-        input.classList.add("shake");
+        error.textContent = "Autenticação falhou.";
+        [input, totpInput].forEach(el => {
+          el.classList.remove("shake");
+          void el.offsetWidth;
+          el.classList.add("shake");
+        });
         input.focus();
       }
     }

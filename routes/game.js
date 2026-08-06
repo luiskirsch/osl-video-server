@@ -11,7 +11,7 @@ const {
   getOrCreatePanelRoom, cleanupPanelRooms, closeRoom
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
-const { roomLimiter } = require("../services/rateLimit");
+const { roomLimiter, joinLimiter } = require("../services/rateLimit");
 const { verifySignedToken } = require("../services/auth");
 const { ADMIN_SECRET } = require("../config");
 
@@ -78,7 +78,7 @@ router.post("/game/room/create", roomLimiter, (req, res) => {
   }
 });
 
-router.post("/game/player/join", (req, res) => {
+router.post("/game/player/join", joinLimiter, (req, res) => {
   try {
     const roomId     = normalizeRoomId(req.body?.roomId);
     const playerId   = normalizePlayerId(req.body?.playerId);
