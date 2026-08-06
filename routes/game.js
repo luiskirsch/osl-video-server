@@ -12,8 +12,8 @@ const {
 } = require("../game/rooms");
 const { MAX_ROOM_PLAYERS } = require("../game/state");
 const { roomLimiter, joinLimiter } = require("../services/rateLimit");
-const { verifySignedToken, signHostToken } = require("../services/auth");
-const { ADMIN_SECRET } = require("../config");
+const { verifySignedToken, signHostToken, requireAdmin } = require("../services/auth");
+const { ADMIN_SECRET, ACCESS_TOKEN_SECRET } = require("../config");
 
 const router = express.Router();
 
@@ -26,6 +26,15 @@ function checkPanelToken(req) {
   if (!token || !ADMIN_SECRET) return false;
   const r = verifySignedToken(token, ADMIN_SECRET);
   return r.valid && r.payload?.token_type === "panel_session";
+}
+
+// Verifica hostToken para uma sala específica.
+// Aceita o token no body (hostToken) ou no header x-host-token.
+function verifyHostToken(req, roomId) {
+  const token = String(req.body?.hostToken || req.headers["x-host-token"] || "").trim();
+  if (!token || !ACCESS_TOKEN_SECRET) return false;
+  const r = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  return r.valid && r.payload?.token_type === "host" && r.payload?.room_id === normalizeRoomId(roomId);
 }
 
 // --- SSE do painel ---
@@ -95,6 +104,12 @@ router.post("/game/player/join", joinLimiter, (req, res) => {
 
     const isRejoin = !!room.players[playerId];
 
+    // Novos jogadores só podem entrar via approve-join (que já os adiciona a room.players)
+    // OU se trouxerem o hostToken (caso do próprio host entrando na sala que criou).
+    if (!isRejoin && !verifyHostToken(req, roomId)) {
+      return res.status(403).json({ ok: false, code: "APROVACAO_NECESSARIA" });
+    }
+
     if (!isRejoin) {
       if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) {
         return res.status(409).json({ ok: false, code: "SALA_CHEIA" });
@@ -124,7 +139,8 @@ router.post("/game/player/leave", (req, res) => {
   try {
     const roomId       = normalizeRoomId(req.body?.roomId);
     const playerId     = normalizePlayerId(req.body?.playerId);
-    const isHostLeaving = req.body?.isHost === true;
+    // isHost verificado via hostToken — nunca confiado do body (VULN-02 fix)
+    const isHostLeaving = verifyHostToken(req, roomId);
 
     if (!roomId || !playerId) return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
 
@@ -208,6 +224,7 @@ router.post("/game/room/approve-join", (req, res) => {
     const playerId = normalizePlayerId(req.body?.playerId);
 
     if (!roomId || !playerId) return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
 
     const key     = `${roomId}:${playerId}`;
     const pending = pendingJoinRequests.get(key);
@@ -234,6 +251,7 @@ router.post("/game/room/deny-join", (req, res) => {
     const roomId   = normalizeRoomId(req.body?.roomId);
     const playerId = normalizePlayerId(req.body?.playerId);
     if (!roomId || !playerId) return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     const existed = pendingJoinRequests.delete(`${roomId}:${playerId}`);
     return res.json({ ok: true, removed: existed });
   } catch (error) {
@@ -261,6 +279,7 @@ router.post("/game/session/start", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive = true;
@@ -277,6 +296,7 @@ router.post("/game/session/end", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.body?.roomId);
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive  = false;
@@ -296,6 +316,7 @@ router.post("/game/video", (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
     const active = !!req.body?.active;
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.videoActive = active;
@@ -313,6 +334,7 @@ router.post("/game/recording", (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
     const active = !!req.body?.active;
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
     room.recordingActive = active;
@@ -326,6 +348,7 @@ router.post("/game/recording", (req, res) => {
 });
 
 router.get("/game/room/:roomId", (req, res) => {
+  if (!checkPanelToken(req)) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
   try {
     const roomId = normalizeRoomId(req.params.roomId);
     const room   = panelRooms.get(roomId);
@@ -338,6 +361,7 @@ router.get("/game/room/:roomId", (req, res) => {
 });
 
 router.get("/game/rooms", (req, res) => {
+  if (!checkPanelToken(req)) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
   try {
     cleanupPanelRooms();
     const rooms = Array.from(panelRooms.values())
@@ -350,7 +374,7 @@ router.get("/game/rooms", (req, res) => {
   }
 });
 
-router.post("/game/cleanup", (req, res) => {
+router.post("/game/cleanup", requireAdmin, (req, res) => {
   try {
     cleanupPanelRooms();
     return res.json({ ok: true, totalRooms: panelRooms.size });

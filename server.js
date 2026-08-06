@@ -76,7 +76,11 @@ const { auditLog } = require("./middleware/auditLog");
 const app = express();
 
 app.disable("x-powered-by");
-app.set("trust proxy", true);
+// trust proxy: 1 — confiar em exatamente 1 hop (Railway).
+// Com "true", Express usa o IP mais à esquerda do XFF (controlado pelo cliente),
+// o que permite bypassar rate limiting via X-Forwarded-For spoofing.
+// Com 1, Express usa o penúltimo valor que Railway inseriu = IP real do cliente.
+app.set("trust proxy", 1);
 
 app.use(helmet({
   crossOriginResourcePolicy: false,

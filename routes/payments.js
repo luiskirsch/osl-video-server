@@ -5,7 +5,7 @@ const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
 const { ensureDb } = require("../services/firestore");
 const { mercadoPagoFetch } = require("../services/payments");
-const { generateExternalReference, requireAdmin } = require("../services/auth");
+const { generateExternalReference, requireAdmin, verifyFirebaseToken } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
 const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS, IS_PRODUCTION } = require("../config");
@@ -150,8 +150,10 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   return res.json({ ok: true, url: data.init_point, sandbox_url: data.sandbox_init_point || null, ref: externalReference, produto: productId, referralApplied: !!referralData });
 }));
 
-// GET /status-pagamento/:ref
-router.get("/status-pagamento/:ref", (req, res) => {
+// GET /status-pagamento/:ref — requer Firebase auth (impede enumeração anônima)
+router.get("/status-pagamento/:ref", async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
   try {
     const ref = String(req.params.ref || "").trim();
     if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");
@@ -166,8 +168,10 @@ router.get("/status-pagamento/:ref", (req, res) => {
   }
 });
 
-// GET /verificar-compra/:ref
-router.get("/verificar-compra/:ref", (req, res) => {
+// GET /verificar-compra/:ref — requer Firebase auth
+router.get("/verificar-compra/:ref", async (req, res) => {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
   try {
     const ref = String(req.params.ref || "").trim();
     if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");

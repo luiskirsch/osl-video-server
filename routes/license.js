@@ -31,9 +31,12 @@ const {
 
 const router = express.Router();
 
-// POST /emitir-licenca
+// POST /emitir-licenca — requer Firebase auth; email do token deve bater com o pagamento
 router.post("/emitir-licenca", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+
+  const callerUid = await tryDecodeBearerUid(req);
+  if (!callerUid) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
 
   const paymentId = String(req.body?.paymentId || "").trim();
   if (!paymentId) return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");

@@ -5,6 +5,15 @@
 const rateLimit = require("express-rate-limit");
 const { logWarn } = require("../logger");
 
+// Railway appende o IP real do cliente como o último valor no XFF.
+// O cliente só pode injetar valores à ESQUERDA (início), nunca à direita.
+// Usar o valor mais à direita é sempre o IP real — imune a XFF spoofing.
+function getRealIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) return xff.split(",").pop().trim() || req.socket?.remoteAddress || "unknown";
+  return req.socket?.remoteAddress || "unknown";
+}
+
 function makeHandler(errorCode) {
   return (req, res) => {
     logWarn("rate_limit_hit", {
@@ -21,6 +30,7 @@ function makeHandler(errorCode) {
 const globalLimiter = rateLimit({
   windowMs: 60_000,
   limit: 300,
+  keyGenerator: getRealIp,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -30,6 +40,7 @@ const globalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 5 * 60_000,
   limit: 20,
+  keyGenerator: getRealIp,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("MUITAS_TENTATIVAS"),
@@ -69,6 +80,7 @@ const reportLimiter = rateLimit({
 const roomLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 20,
+  keyGenerator: getRealIp,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -78,6 +90,7 @@ const roomLimiter = rateLimit({
 const panelLoginLimiter = rateLimit({
   windowMs: 15 * 60_000,
   limit: 5,
+  keyGenerator: getRealIp,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("MUITAS_TENTATIVAS_DE_LOGIN"),
@@ -87,6 +100,7 @@ const panelLoginLimiter = rateLimit({
 const joinLimiter = rateLimit({
   windowMs: 60_000,
   limit: 60,
+  keyGenerator: getRealIp,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),

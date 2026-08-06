@@ -5,14 +5,46 @@ const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, 
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken } = require("../video/webrtc");
 const { getDb, isPrestige, isPassActive } = require("../services/firestore");
-const { requireAdmin } = require("../services/auth");
+const { requireAdmin, verifySignedToken, getBearerToken } = require("../services/auth");
+const { ACCESS_TOKEN_SECRET } = require("../config");
+const admin = require("firebase-admin");
+
+function verifyHostTokenRecording(req, roomId) {
+  const { normalizeRoomId: norm } = require("../game/rooms");
+  const token = String(req.body?.hostToken || req.headers["x-host-token"] || "").trim();
+  if (!token || !ACCESS_TOKEN_SECRET) return false;
+  const r = verifySignedToken(token, ACCESS_TOKEN_SECRET);
+  return r.valid && r.payload?.token_type === "host" && r.payload?.room_id === norm(roomId);
+}
+
+async function verifyFirebaseBearer(req, res) {
+  const token = getBearerToken(req);
+  if (!token) { res.status(401).json({ ok: false, error: "FIREBASE_TOKEN_OBRIGATORIO" }); return null; }
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    return decoded;
+  } catch (_) {
+    res.status(401).json({ ok: false, error: "FIREBASE_TOKEN_INVALIDO" });
+    return null;
+  }
+}
 const { LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL } = require("../config");
 
 const router = express.Router();
 
 // GET /spectate-token — token LiveKit subscriber-only para espectador (sem câmera/mic)
-// Requer que a sala exista no sistema (criada pelo fluxo do jogo).
+// Requer panel token (admin) para evitar que qualquer pessoa assista qualquer sala.
 router.get("/spectate-token", asyncHandler(async (req, res) => {
+  const fromQuery  = req.query.token || "";
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const t = fromQuery || fromHeader;
+  const { verifySignedToken: vst } = require("../services/auth");
+  const { ADMIN_SECRET: AS } = require("../config");
+  const r = t && AS ? vst(t, AS) : { valid: false };
+  if (!r.valid || r.payload?.token_type !== "panel_session") {
+    return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
+  }
+
   const { room, user } = req.query;
   if (!room || !user) return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
@@ -25,13 +57,18 @@ router.get("/spectate-token", asyncHandler(async (req, res) => {
 }));
 
 // GET /token — gera token LiveKit para WebRTC
-// Requer que a sala exista E que o jogador já tenha sido aprovado (está em room.players).
+// IDOR fix: verifica Firebase ID token e confirma que uid == user solicitado.
 router.get("/token", asyncHandler(async (req, res) => {
   const room = req.query.room;
   const user = req.query.user;
 
   if (!room || !user) return sendError(res, 400, "ROOM_E_USER_OBRIGATORIOS");
   if (!LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) return sendError(res, 500, "LIVEKIT_NAO_CONFIGURADO");
+
+  // Autenticar caller via Firebase ID token
+  const decoded = await verifyFirebaseBearer(req, res);
+  if (!decoded) return;
+  if (decoded.uid !== user) return sendError(res, 403, "IDENTIDADE_NAO_CORRESPONDE");
 
   const normalizedRoom = normalizeRoomId(room);
   const panelRoom = panelRooms.get(normalizedRoom);
@@ -42,10 +79,15 @@ router.get("/token", asyncHandler(async (req, res) => {
   return res.json({ ok: true, token });
 }));
 
-// GET /recording/pass/:email — verifica passe mensal ativo
+// GET /recording/pass/:email — verifica passe mensal ativo (requer Firebase auth com email correspondente)
 router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
+  const decoded = await verifyFirebaseBearer(req, res);
+  if (!decoded) return;
   const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
+  // Só pode verificar o próprio email — ou admin
+  const tokenEmail = (decoded.email || "").toLowerCase();
+  if (tokenEmail !== email) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
 
   if (await isPrestige(email)) {
     return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
@@ -55,10 +97,11 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
 }));
 
 // POST /recording/auto-start — inicia gravação automaticamente quando o ritual começa
-// Requer que a sala exista e tenha sessão ativa (impede abuso de Egress por IDs aleatórios).
+// Requer hostToken da sala para evitar que qualquer pessoa dispare Egress LiveKit.
 router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
   const room = panelRooms.get(roomId);
@@ -139,10 +182,16 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
 }));
 
 // POST /recording/start — inicia gravação após pagamento confirmado
+// Firebase auth obrigatório: email do token deve corresponder ao email do passe/pagamento.
 router.post("/recording/start", asyncHandler(async (req, res) => {
+  const decoded = await verifyFirebaseBearer(req, res);
+  if (!decoded) return;
+  const callerEmail = (decoded.email || "").toLowerCase();
+
   const roomId = normalizeRoomId(req.body?.roomId);
   const ref    = String(req.body?.ref   || "").trim();
-  const email  = String(req.body?.email || "").trim().toLowerCase();
+  // email do body ignorado — usa o do Firebase token para evitar abuse de passe alheio
+  const email  = callerEmail;
 
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
@@ -203,8 +252,17 @@ router.post("/recording/stop", requireAdmin, asyncHandler(async (req, res) => {
   }
 }));
 
-// GET /recording/status/:roomId
+// GET /recording/status/:roomId — requer panel token (expõe downloadUrl)
 router.get("/recording/status/:roomId", (req, res) => {
+  const fromQuery  = req.query.token || "";
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const t = fromQuery || fromHeader;
+  const r = t && require("../config").ADMIN_SECRET
+    ? require("../services/auth").verifySignedToken(t, require("../config").ADMIN_SECRET)
+    : { valid: false };
+  if (!r.valid || r.payload?.token_type !== "panel_session") {
+    return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
+  }
   try {
     const roomId    = normalizeRoomId(req.params.roomId);
     const active    = activeRecordings.get(roomId);
