@@ -253,4 +253,147 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   return res.json({ ok: true, deckSize: deck.length });
 }));
 
+// ── Helpers de autenticação de participantes ──────────────────────────────────
+
+async function uidFromFirebaseToken(firebaseIdToken) {
+  if (!firebaseIdToken) return null;
+  try {
+    const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+    return decoded.uid;
+  } catch (_) { return null; }
+}
+
+async function verifyParticipant(db, roomId, participantId) {
+  if (!participantId) return null;
+  try {
+    const snap = await db.collection("salas").doc(roomId).collection("players").doc(participantId).get();
+    return snap.exists ? participantId : null;
+  } catch (_) { return null; }
+}
+
+async function resolveParticipantId(db, roomId, firebaseIdToken, participantId) {
+  // Firebase ID token tem precedência (mais seguro).
+  const uid = await uidFromFirebaseToken(firebaseIdToken);
+  if (uid) return uid;
+  // Fallback: verifica se o participantId está na coleção de players da sala.
+  return verifyParticipant(db, roomId, participantId);
+}
+
+// ── POST /game/ritual/vote ────────────────────────────────────────────────────
+router.post("/game/ritual/vote", asyncHandler(async (req, res) => {
+  const { roomId, participantId, firebaseIdToken, option } = req.body || {};
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const safeOption = String(option || "").slice(0, 100);
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  try {
+    await ritualRef.update({ [`activeEffect.votes.${uid}`]: safeOption });
+  } catch (_) { /* documento não existe ainda — ignora silenciosamente */ }
+
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/ritual/react ───────────────────────────────────────────────────
+router.post("/game/ritual/react", asyncHandler(async (req, res) => {
+  const { roomId, participantId, firebaseIdToken, emoji, playerName } = req.body || {};
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const safeEmoji  = String(emoji      || "👋").slice(0, 8);
+  const safeName   = String(playerName || "Jogador").slice(0, 80);
+  const ts = Date.now();
+
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  await ritualRef.set({
+    [`reactions.${uid}`]:      { emoji: safeEmoji, name: safeName, ts },
+    [`reactionCounts.${uid}`]: admin.firestore.FieldValue.increment(1)
+  }, { merge: true });
+
+  return res.json({ ok: true, ts });
+}));
+
+// ── POST /game/ritual/ai-detect ───────────────────────────────────────────────
+router.post("/game/ritual/ai-detect", asyncHandler(async (req, res) => {
+  const { roomId, participantId, firebaseIdToken, source, playerName, message } = req.body || {};
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const validSources = ["voice", "chat"];
+  const safeSource   = validSources.includes(source) ? source : "chat";
+  const safeName     = String(playerName || "Jogador").slice(0, 80);
+  const safeMessage  = message ? String(message).slice(0, 500) : null;
+
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  await ritualRef.set({
+    aiDetection: { source: safeSource, playerName: safeName, message: safeMessage, detectedAt: Date.now() }
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/ritual/social-pressure ────────────────────────────────────────
+router.post("/game/ritual/social-pressure", asyncHandler(async (req, res) => {
+  const { roomId, participantId, firebaseIdToken, playerName } = req.body || {};
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const safeName = String(playerName || "Jogador").slice(0, 80);
+
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  await ritualRef.set({
+    socialPressure: { ts: Date.now(), votedBy: safeName, roomCode: String(roomId).slice(0, 50) }
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/ritual/resolve-effect (host only) ──────────────────────────────
+router.post("/game/ritual/resolve-effect", asyncHandler(async (req, res) => {
+  const { roomId, hostToken, winner, dismissOnly } = req.body || {};
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!verifyHostToken(hostToken, roomId)) {
+    logWarn("ritual_resolve_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
+    return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
+  }
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+
+  if (dismissOnly) {
+    // dismissAIDetection: limpa aiDetection sem resolver o efeito ativo
+    await ritualRef.set({ aiDetection: null }, { merge: true });
+  } else {
+    // resolveActiveEffect: limpa efeito ativo + AI detection + registra voto vencedor
+    const update = { activeEffect: null, aiDetection: null };
+    if (winner) update.voteResult = { winner: String(winner).slice(0, 200), resolvedAt: Date.now() };
+    await ritualRef.set(update, { merge: true });
+  }
+
+  logInfo("ritual_resolve_effect", { roomId, winner: winner || null, dismissOnly: !!dismissOnly });
+  return res.json({ ok: true });
+}));
+
 module.exports = router;
