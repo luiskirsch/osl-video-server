@@ -1,10 +1,34 @@
 const express = require("express");
-const router = express.Router();
+const crypto  = require("crypto");
+const router  = express.Router();
 
 const BAGGIO_API = () => process.env.BAGGIO_API_URL || "http://localhost:3001";
 
+function baggioAuth(req, res, next) {
+  const expected = process.env.BAGGIO_ACCESS_KEY || "";
+  if (!expected) {
+    return res.status(503).json({ error: "BAGGIO_ACCESS_KEY nao configurado" });
+  }
+  const auth = req.headers.authorization || "";
+  if (!auth.startsWith("Basic ")) {
+    res.setHeader("WWW-Authenticate", 'Basic realm="Baggio Gestão"');
+    return res.status(401).send("Autenticação necessária");
+  }
+  const decoded = Buffer.from(auth.slice(6), "base64").toString();
+  const pass = decoded.slice(decoded.indexOf(":") + 1);
+  try {
+    const a = crypto.createHash("sha256").update(pass).digest();
+    const b = crypto.createHash("sha256").update(expected).digest();
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw new Error();
+  } catch {
+    res.setHeader("WWW-Authenticate", 'Basic realm="Baggio Gestão"');
+    return res.status(401).send("Credenciais inválidas");
+  }
+  next();
+}
+
 // Proxy: /baggio/api/* → BAGGIO_API_URL/api/*
-router.get("/baggio/api/*", async (req, res) => {
+router.get("/baggio/api/*", baggioAuth, async (req, res) => {
   try {
     const apiPath = req.originalUrl.replace(/^\/baggio/, "");
     const url = `${BAGGIO_API()}${apiPath}`;
@@ -17,7 +41,7 @@ router.get("/baggio/api/*", async (req, res) => {
 });
 
 // Dashboard
-router.get("/baggio", (req, res) => {
+router.get("/baggio", baggioAuth, (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(HTML);
 });

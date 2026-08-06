@@ -14,7 +14,7 @@ function verifyHostTokenRecording(req, roomId) {
   const token = String(req.body?.hostToken || req.headers["x-host-token"] || "").trim();
   if (!token || !ACCESS_TOKEN_SECRET) return false;
   const r = verifySignedToken(token, ACCESS_TOKEN_SECRET);
-  return r.valid && r.payload?.token_type === "host" && r.payload?.room_id === norm(roomId);
+  return r.valid && r.payload?.token_type === "host" && r.payload?.roomId === norm(roomId);
 }
 
 async function verifyFirebaseBearer(req, res) {
