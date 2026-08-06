@@ -71,6 +71,7 @@ const ritualRouter    = require("./routes/ritual");
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
 const { auditLog } = require("./middleware/auditLog");
+const { scheduleAuditLogCleanup } = require("./jobs/auditLogCleanup");
 
 // --- App ---
 const app = express();
@@ -266,6 +267,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
   startCleanupLoop();
   startSchedulerLoop();
+  scheduleAuditLogCleanup();
 });
 
 async function gracefullyStopAllEgress() {
