@@ -225,7 +225,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
     const ref    = String(payment.external_reference || "").trim();
 
     if (status === "approved" && ref) {
-      // Idempotência: se já processamos esse paymentId, não re-processa.
+      // Idempotência camada 1 (in-memory): sobrevive a replays dentro do mesmo processo.
       const existing = pagamentosAprovados.get(ref);
       if (existing && existing.paymentId === String(payment.id)) {
         logInfo("mp_webhook_duplicate_ignored", { ref, paymentId: payment.id });
@@ -236,13 +236,36 @@ router.post("/webhook", asyncHandler(async (req, res) => {
       const approvedEmail        = String(payment.payer?.email || payment.metadata?.customer_email || "").trim().toLowerCase();
       const approvedRoomId       = String(payment.metadata?.room_id || "").trim().toUpperCase();
 
+      const { getDb } = require("../services/firestore");
+      const db = getDb();
+
+      // Idempotência camada 2 (Firestore): sobrevive a restarts do Railway.
+      // Transação garante que dois webhooks concorrentes não processam o mesmo ref.
+      if (db) {
+        try {
+          const processedRef = db.collection("processed_payments").doc(ref);
+          await db.runTransaction(async (tx) => {
+            const snap = await tx.get(processedRef);
+            if (snap.exists) throw new Error("ALREADY_PROCESSED");
+            tx.set(processedRef, {
+              paymentId: String(payment.id), ref, produto: productIdFromWebhook,
+              email: approvedEmail, processedAt: Date.now()
+            });
+          });
+        } catch (err) {
+          if (err.message === "ALREADY_PROCESSED") {
+            logInfo("mp_webhook_duplicate_firestore", { ref, paymentId: payment.id });
+            return res.sendStatus(200);
+          }
+          logWarn("mp_webhook_idempotency_error", { ref, error: err.message });
+          // Firestore indisponível: continua com in-memory como fallback
+        }
+      }
+
       pagamentosAprovados.set(ref, {
         approved: true, paymentId: String(payment.id), status, ref,
         produto: productIdFromWebhook, email: approvedEmail, roomId: approvedRoomId, updatedAt: Date.now()
       });
-
-      const { getDb } = require("../services/firestore");
-      const db = getDb();
 
       // Passe mensal — salva no Firestore com validade configurada (PASS_VALIDITY_MS).
       // merge:true preserva campos não-relacionados se o doc já existir (correção P1).

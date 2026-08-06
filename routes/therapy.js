@@ -1737,7 +1737,16 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────
 const RECURRENCE_MAX_WEEKS = 52;
 
-router.post("/therapy/sessao/criar", asyncHandler(async (req, res) => {
+const sessaoCriarLimiter = rateLimit({
+  windowMs: 60 * 60_000,
+  limit: 30,
+  keyGenerator: (req) => req.firebaseUid || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({ ok: false, error: "SESSOES_LIMITE_EXCEDIDO" }),
+});
+
+router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;

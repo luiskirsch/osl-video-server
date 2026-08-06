@@ -8,6 +8,9 @@ on:
 jobs:
   zap-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
@@ -16,7 +19,7 @@ jobs:
         with:
           target: ${{ secrets.ZAP_TARGET_URL || 'https://osl-video-server-production.up.railway.app' }}
           rules_file_name: '.zap/rules.tsv'
-          cmd_options: '-I'   # -I = não falha o build, só gera relatório
+          cmd_options: ''
           allow_issue_writing: false
 
       - name: Upload relatório ZAP

@@ -145,16 +145,22 @@ router.post("/recording/discard", requireAdmin, asyncHandler(async (req, res) =>
 
 // POST /recording/claim — para a gravação e libera URL de download após pagamento confirmado
 router.post("/recording/claim", asyncHandler(async (req, res) => {
+  const decoded = await verifyFirebaseBearer(req, res);
+  if (!decoded) return;
+  const callerEmail = (decoded.email || "").toLowerCase();
+
   const roomId = normalizeRoomId(req.body?.roomId);
   const ref    = String(req.body?.ref   || "").trim();
-  const email  = String(req.body?.email || "").trim().toLowerCase();
   const type   = String(req.body?.type  || "gravacao-download").trim();
+  // email do body ignorado — usa o do Firebase token para evitar reivindicação de pagamento alheio
+  const email  = callerEmail;
 
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
 
   const pag = pagamentosAprovados.get(ref);
   if (!pag || !pag.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
+  if (pag.email && callerEmail && pag.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
 
   if (activeRecordings.has(roomId)) {
     const job = activeRecordings.get(roomId);

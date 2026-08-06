@@ -11,12 +11,14 @@ on:
 jobs:
   npm-audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Instalar dependências
@@ -49,7 +51,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Verificar secrets obrigatórios no Railway
         run: node scripts/validate-env.js --ci

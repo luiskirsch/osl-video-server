@@ -15,6 +15,7 @@ const CRITICAL = [
   "LIVEKIT_API_SECRET",
   "MP_ACCESS_TOKEN_JOGO",
   "MP_WEBHOOK_SECRET_JOGO",
+  "FIREBASE_SERVICE_ACCOUNT_JSON",
 ];
 
 // Ausência degrada funcionalidade mas não compromete segurança

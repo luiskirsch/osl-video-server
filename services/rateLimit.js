@@ -106,4 +106,14 @@ const joinLimiter = rateLimit({
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
 });
 
-module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter, joinLimiter };
+// Criação de sessão terapêutica: 30 por hora por uid — impede criação em massa
+const sessaoCriarLimiter = rateLimit({
+  windowMs: 60 * 60_000,
+  limit: 30,
+  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: makeHandler("SESSOES_LIMITE_EXCEDIDO"),
+});
+
+module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter, joinLimiter, sessaoCriarLimiter };
