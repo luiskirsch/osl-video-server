@@ -3,7 +3,7 @@ const crypto  = require("crypto");
 const admin   = require("firebase-admin");
 const { getDb }                         = require("../services/firestore");
 const { verifyHostToken }               = require("../services/auth");
-const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS } = require("../data/cards");
+const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_PACK_IDS, levelFromXP } = require("../data/cards");
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
 
@@ -66,6 +66,54 @@ function prepareCard(card, players) {
   };
 }
 
+async function buildVerifiedDeck(db, firebaseIdToken, players) {
+  // Valida compras e prestige server-side a partir do Firebase ID token
+  let verifiedPackIds = new Set();
+  let isPrestige = false;
+
+  if (firebaseIdToken) {
+    try {
+      const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+      const uid = decoded.uid;
+      const userSnap = await db.collection("users").doc(uid).get();
+      if (userSnap.exists) {
+        const data = userSnap.data();
+        isPrestige = levelFromXP(data.xp || 0) >= 50;
+        for (const c of (data.compras || [])) {
+          if (OSL_PACK_IDS.includes(c.produto)) verifiedPackIds.add(c.produto);
+        }
+      }
+    } catch (_) { /* token inválido — sem pacotes extras */ }
+  }
+
+  // Cartas customizadas dos jogadores (carregadas do Firestore — não do cliente)
+  const customContributions = [];
+  for (const p of players) {
+    if (p.userId && p.activeDeckId) {
+      try {
+        const snap = await db.collection("users").doc(p.userId).collection("decks").doc(p.activeDeckId).get();
+        if (snap.exists) {
+          const cards = (snap.data().cards || []).map(sanitizeCard).filter(Boolean).slice(0, 50);
+          customContributions.push(...cards);
+        }
+      } catch (_) {}
+    }
+  }
+
+  if (customContributions.length > 0) {
+    const allCards = [...OSL_BASIC_CARDS, ...customContributions];
+    const seen = new Set();
+    return cryptoShuffle(allCards.filter(c => { if (seen.has(c.title)) return false; seen.add(c.title); return true; }));
+  }
+
+  const packCards = [];
+  const packsToInclude = isPrestige ? OSL_PACK_IDS : [...verifiedPackIds];
+  for (const packId of packsToInclude) {
+    if (OSL_PACK_CARDS[packId]) packCards.push(...OSL_PACK_CARDS[packId]);
+  }
+  return cryptoShuffle([...OSL_BASIC_CARDS, ...packCards]);
+}
+
 function sanitizeCard(c) {
   if (!c || typeof c !== "object") return null;
   return {
@@ -89,7 +137,7 @@ function sanitizePlayers(players) {
 
 // ── POST /game/ritual/start ───────────────────────────────────────────────────
 router.post("/game/ritual/start", asyncHandler(async (req, res) => {
-  const { roomId, hostToken, deckCards, players: rawPlayers } = req.body || {};
+  const { roomId, hostToken, firebaseIdToken, players: rawPlayers } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!verifyHostToken(hostToken, roomId)) {
     logWarn("ritual_start_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
@@ -99,8 +147,10 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
-  const deckInput = Array.isArray(deckCards) && deckCards.length > 0 ? deckCards : OSL_BASIC_CARDS;
-  const deck = cryptoShuffle(deckInput.map(sanitizeCard).filter(Boolean));
+  const players = sanitizePlayers(rawPlayers);
+  // Deck construído inteiramente pelo servidor: compras e prestige verificados
+  // via Firebase Admin SDK — cliente não tem como injetar pacotes não comprados.
+  const deck = await buildVerifiedDeck(db, firebaseIdToken || null, players);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -170,7 +220,7 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
 
 // ── POST /game/ritual/reset ───────────────────────────────────────────────────
 router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
-  const { roomId, hostToken, deckCards } = req.body || {};
+  const { roomId, hostToken, firebaseIdToken, players: rawPlayers } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!verifyHostToken(hostToken, roomId)) {
     logWarn("ritual_reset_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
@@ -180,8 +230,8 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
-  const deckInput = Array.isArray(deckCards) && deckCards.length > 0 ? deckCards : OSL_BASIC_CARDS;
-  const deck = cryptoShuffle(deckInput.map(sanitizeCard).filter(Boolean));
+  const players = sanitizePlayers(rawPlayers);
+  const deck = await buildVerifiedDeck(db, firebaseIdToken || null, players);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
