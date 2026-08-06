@@ -46,7 +46,7 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT, APP_ENV } = require("./config");
+const { PORT, APP_ENV, IS_PRODUCTION } = require("./config");
 const { createRequestId } = require("./utils");
 
 // --- Rotas ---
@@ -72,6 +72,10 @@ const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
 const { auditLog } = require("./middleware/auditLog");
 const { scheduleAuditLogCleanup } = require("./jobs/auditLogCleanup");
+
+// Valida secrets críticos no startup — exit em prod se ausentes, warn em dev
+const { checkSecrets } = require("./scripts/validate-env");
+checkSecrets({ exitOnError: IS_PRODUCTION });
 
 // --- App ---
 const app = express();
