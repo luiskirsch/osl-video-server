@@ -68,7 +68,7 @@ router.get("/token", asyncHandler(async (req, res) => {
   // Autenticar caller via Firebase ID token
   const decoded = await verifyFirebaseBearer(req, res);
   if (!decoded) return;
-  if (decoded.uid !== user) return sendError(res, 403, "IDENTIDADE_NAO_CORRESPONDE");
+  // participantId é aleatório (p_abc123), não há UID a comparar — room membership é o gate real
 
   const normalizedRoom = normalizeRoomId(room);
   const panelRoom = panelRooms.get(normalizedRoom);
