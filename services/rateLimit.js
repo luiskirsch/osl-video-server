@@ -50,7 +50,7 @@ const authLimiter = rateLimit({
 const voteLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 120,
-  keyGenerator: (req) => req.firebaseUid || req.ip,
+  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("VOTOS_EXCEDIDOS"),
@@ -60,7 +60,7 @@ const voteLimiter = rateLimit({
 const photoLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
-  keyGenerator: (req) => req.firebaseUid || req.ip,
+  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -70,7 +70,7 @@ const photoLimiter = rateLimit({
 const reportLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 10,
-  keyGenerator: (req) => req.firebaseUid || req.ip,
+  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("DENUNCIAS_EXCEDIDAS"),
