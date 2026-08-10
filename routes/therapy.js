@@ -14,7 +14,7 @@
 //   therapy_audit/{eventId}       — quem acessou o quê, quando, IP
 
 const express = require("express");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const admin   = require("firebase-admin");
 const crypto  = require("crypto");
 const geoipCountry = require("geoip-country");
@@ -1740,7 +1740,7 @@ const RECURRENCE_MAX_WEEKS = 52;
 const sessaoCriarLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 30,
-  keyGenerator: (req) => req.firebaseUid || req.ip,
+  keyGenerator: (req) => req.firebaseUid || ipKeyGenerator(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).json({ ok: false, error: "SESSOES_LIMITE_EXCEDIDO" }),
