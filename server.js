@@ -66,6 +66,7 @@ const encontroRouter  = require("./routes/encontro");
 const securityRouter  = require("./routes/security");
 const panelRouter     = require("./routes/panel");
 const ritualRouter    = require("./routes/ritual");
+const analyticsRouter = require("./routes/analytics");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -216,6 +217,7 @@ app.use(auditLog("encontro"), encontroRouter);
 app.use(securityRouter);
 app.use(auditLog("panel"), panelRouter);
 app.use(auditLog("ritual"), ritualRouter);
+app.use(analyticsRouter);
 
 // --- 404 ---
 app.use((req, res) => {
