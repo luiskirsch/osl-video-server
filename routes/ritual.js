@@ -597,7 +597,7 @@ router.post("/game/session/player-heartbeat", asyncHandler(async (req, res) => {
 }));
 
 // ── POST /game/session/end-game ──────────────────────────────────────────────
-// Encerra a sessão de jogo. Apenas o host pode chamar.
+// Encerra a sessão de jogo. Computa summary durável a partir dos eventos.
 router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   const { roomId, sessionId, hostToken } = req.body || {};
   if (!roomId || !sessionId) return sendError(res, 400, "ROOM_ID_OU_SESSION_ID_OBRIGATORIO");
@@ -611,14 +611,95 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   const now     = admin.firestore.FieldValue.serverTimestamp();
   const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
 
+  // Lê sessão e eventos em paralelo para computar summary
+  const [sessSnap, eventsSnap] = await Promise.all([
+    sessRef.get(),
+    sessRef.collection("events").get(),
+  ]).catch(() => [null, null]);
+
+  const sessData      = sessSnap?.exists ? sessSnap.data() : {};
+  const createdMs     = sessData.createdAt?.toMillis?.() || Date.now();
+  const durationSec   = Math.round((Date.now() - createdMs) / 1000);
+  const sessionPlayers = sessData.players || [];
+
+  const reactionsByActor = {};
+  const emojiTally       = {};
+  let cardsRevealed = 0, votesTotal = 0, missionsCompleted = 0;
+
+  for (const doc of (eventsSnap?.docs || [])) {
+    const e = doc.data();
+    if (e.type === "CARD_REVEALED")        cardsRevealed++;
+    if (e.type === "VOTE_CAST")            votesTotal++;
+    if (e.type === "MISSION_COMPLETED")    missionsCompleted++;
+    if (e.type === "REACTION_SENT") {
+      if (e.actor) reactionsByActor[e.actor] = (reactionsByActor[e.actor] || 0) + 1;
+      const emoji = e.payload?.emoji;
+      if (emoji) emojiTally[emoji] = (emojiTally[emoji] || 0) + 1;
+    }
+  }
+
+  const topReactorEntry = Object.entries(reactionsByActor).sort((a, b) => b[1] - a[1])[0];
+  let topReactor = null;
+  if (topReactorEntry) {
+    const [uid, count] = topReactorEntry;
+    const match = sessionPlayers.find(p => p.userId === uid || p.playerId === uid);
+    if (match) topReactor = { nickname: match.nickname, count };
+  }
+
+  const summary = {
+    cardsRevealed,
+    durationSec,
+    topReactor,
+    emojiTally,
+    votesTotal,
+    missionsCompleted,
+    playerCount: sessionPlayers.length,
+  };
+
   await Promise.all([
     sessRef.collection("events").add({ type: "GAME_ENDED", ts: now, actor: "server", payload: {} }),
-    sessRef.update({ status: "ended", endedAt: now }),
+    sessRef.update({ status: "ended", endedAt: now, summary }),
     db.collection("salas").doc(roomId).update({ currentSessionId: null }).catch(() => {}),
   ]).catch(() => {});
 
-  logInfo("session_ended", { roomId, sessionId });
-  return res.json({ ok: true });
+  logInfo("session_ended", { roomId, sessionId, cardsRevealed, durationSec });
+  return res.json({ ok: true, summary });
+}));
+
+// ── GET /game/room/:roomId/sessions ──────────────────────────────────────────
+// Lista as últimas sessões encerradas de uma sala (auth: Firebase ID token).
+router.get("/game/room/:roomId/sessions", asyncHandler(async (req, res) => {
+  const { roomId } = req.params;
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!token)  return sendError(res, 401, "TOKEN_OBRIGATORIO");
+
+  try { await admin.auth().verifyIdToken(token); } catch (_) {
+    return sendError(res, 403, "TOKEN_INVALIDO");
+  }
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const snap = await db.collection("salas").doc(roomId)
+    .collection("sessions")
+    .orderBy("createdAt", "desc")
+    .limit(12)
+    .get();
+
+  const sessions = snap.docs
+    .map(d => ({ sessionId: d.id, ...d.data() }))
+    .filter(s => s.status === "ended")
+    .slice(0, 10)
+    .map(s => ({
+      sessionId:   s.sessionId,
+      createdAt:   s.createdAt?.toMillis?.()  || null,
+      endedAt:     s.endedAt?.toMillis?.()    || null,
+      summary:     s.summary || null,
+      playerCount: (s.players || []).length,
+    }));
+
+  return res.json({ ok: true, sessions });
 }));
 
 module.exports = router;
