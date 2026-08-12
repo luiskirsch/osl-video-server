@@ -155,12 +155,17 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const players = sanitizePlayers(rawPlayers);
-  // Deck construído inteiramente pelo servidor: compras e prestige verificados
-  // via Firebase Admin SDK — cliente não tem como injetar pacotes não comprados.
-  const deck = await buildVerifiedDeck(db, firebaseIdToken || null, players);
+  const [deck, hostUid] = await Promise.all([
+    buildVerifiedDeck(db, firebaseIdToken || null, players),
+    uidFromFirebaseToken(firebaseIdToken),
+  ]);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+
+  // Gera session antes de escrever o ritual para incluir sessionId no doc
+  const sessRef   = db.collection("salas").doc(roomId).collection("sessions").doc();
+  const sessionId = sessRef.id;
 
   await ritualRef.set({
     started: true,
@@ -169,16 +174,29 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     activeEffect: null,
     pendingDeathrattle: null,
     cardsRevealedCount: 0,
+    sessionId,
     updatedAt: now,
     updatedBy: "server",
     sessionStartedAt: Date.now()
   });
 
-  await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi iniciado.", createdAt: now });
-  await db.collection("salas").doc(roomId).update({ arenaActive: true, updatedAt: now });
+  // Cria doc de sessão e evento inicial via Admin SDK (bypass Firestore rules)
+  await sessRef.set({
+    sessionId,
+    roomId,
+    hostId: hostUid || null,
+    status: "active",
+    createdAt: now,
+    players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
+    gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
+  });
+  sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
 
-  logInfo("ritual_started", { roomId, deckSize: deck.length });
-  return res.json({ ok: true, deckSize: deck.length });
+  await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi iniciado.", createdAt: now });
+  await db.collection("salas").doc(roomId).update({ arenaActive: true, currentSessionId: sessionId, updatedAt: now });
+
+  logInfo("ritual_started", { roomId, deckSize: deck.length, sessionId });
+  return res.json({ ok: true, deckSize: deck.length, sessionId });
 }));
 
 // ── POST /game/ritual/next-card ───────────────────────────────────────────────
@@ -208,6 +226,8 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
   const { battlecry, deathrattle } = prepareCard(card, players);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
+  const currentSessionId = data.sessionId || null;
+
   await ritualRef.set({
     started: true,
     remainingDeck: deck,
@@ -220,6 +240,18 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
   }, { merge: true });
 
   await ritualRef.collection("history").add({ type: card.type || "Ritual", text: card.title || "Carta", createdAt: now });
+
+  // Registra evento e atualiza gameState na sessão via Admin SDK
+  if (currentSessionId) {
+    const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(currentSessionId);
+    sessRef.collection("events").add({
+      type: "CARD_REVEALED", ts: now, actor: "server",
+      payload: { title: card.title || null, type: card.type || null, count: cardsRevealedCount },
+    }).catch(() => {});
+    sessRef.update({
+      gameState: { cardsRevealedCount, currentCardTitle: card.title || null, phase: "playing" },
+    }).catch(() => {});
+  }
 
   logInfo("ritual_next_card", { roomId, cardTitle: card.title, cardsRevealedCount, remaining: deck.length });
   return res.json({ ok: true, card, cardsRevealedCount, remaining: deck.length });
@@ -238,10 +270,21 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const players = sanitizePlayers(rawPlayers);
-  const deck = await buildVerifiedDeck(db, firebaseIdToken || null, players);
+  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+
+  // Lê sessionId anterior antes de sobrescrever
+  const [oldSnap, deck, hostUid] = await Promise.all([
+    ritualRef.get(),
+    buildVerifiedDeck(db, firebaseIdToken || null, players),
+    uidFromFirebaseToken(firebaseIdToken),
+  ]);
+  const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
 
   const now = admin.firestore.FieldValue.serverTimestamp();
-  const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+
+  // Gera nova sessão
+  const sessRef   = db.collection("salas").doc(roomId).collection("sessions").doc();
+  const sessionId = sessRef.id;
 
   await ritualRef.set({
     started: true,
@@ -250,14 +293,37 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
     activeEffect: null,
     pendingDeathrattle: null,
     cardsRevealedCount: 0,
+    sessionId,
     updatedAt: now,
     updatedBy: "server"
   }, { merge: true });
 
+  // Encerra sessão antiga assíncronamente
+  if (oldSessionId) {
+    const oldSessRef = db.collection("salas").doc(roomId).collection("sessions").doc(oldSessionId);
+    Promise.all([
+      oldSessRef.update({ status: "ended", endedAt: now }),
+      oldSessRef.collection("events").add({ type: "GAME_RESET", ts: now, actor: "server", payload: {} }),
+    ]).catch(() => {});
+  }
+
+  // Cria nova sessão
+  await sessRef.set({
+    sessionId,
+    roomId,
+    hostId: hostUid || null,
+    status: "active",
+    createdAt: now,
+    players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
+    gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
+  });
+  sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
+  db.collection("salas").doc(roomId).update({ currentSessionId: sessionId }).catch(() => {});
+
   await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi reiniciado.", createdAt: now });
 
-  logInfo("ritual_reset", { roomId, deckSize: deck.length });
-  return res.json({ ok: true, deckSize: deck.length });
+  logInfo("ritual_reset", { roomId, deckSize: deck.length, sessionId });
+  return res.json({ ok: true, deckSize: deck.length, sessionId });
 }));
 
 // ── Helpers de autenticação de participantes ──────────────────────────────────
@@ -400,6 +466,97 @@ router.post("/game/ritual/resolve-effect", asyncHandler(async (req, res) => {
   }
 
   logInfo("ritual_resolve_effect", { roomId, winner: winner || null, dismissOnly: !!dismissOnly });
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/session/player-join ───────────────────────────────────────────
+// Registra presença do jogador na sessão. Detecta reconnect automaticamente.
+router.post("/game/session/player-join", asyncHandler(async (req, res) => {
+  const { roomId, sessionId, participantId, firebaseIdToken, nickname } = req.body || {};
+  if (!roomId || !sessionId) return sendError(res, 400, "ROOM_ID_OU_SESSION_ID_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const safeName = resolvedPlayerName(roomId, uid, nickname);
+  const now      = admin.firestore.FieldValue.serverTimestamp();
+  const sessRef  = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
+  const sessSnap = await sessRef.get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSION_NAO_ENCONTRADA");
+
+  const playerRef  = sessRef.collection("players").doc(uid);
+  const playerSnap = await playerRef.get();
+  const isReconnect = playerSnap.exists;
+
+  const playerData = { playerId: uid, nickname: safeName, connected: true, lastSeenAt: now };
+  if (!isReconnect) {
+    playerData.joinedAt = now;
+  } else {
+    playerData.reconnectCount    = (playerSnap.data().reconnectCount || 0) + 1;
+    playerData.lastReconnectedAt = now;
+  }
+  await playerRef.set(playerData, { merge: true });
+
+  const eventType = isReconnect ? "PLAYER_RECONNECTED" : "PLAYER_JOINED";
+  sessRef.collection("events").add({ type: eventType, ts: now, actor: uid, payload: { nickname: safeName } }).catch(() => {});
+
+  // Notifica todos via room doc (campo efêmero observado pelo bindRoom)
+  if (isReconnect) {
+    db.collection("salas").doc(roomId).update({
+      reconnectNotification: { nickname: safeName, participantId: uid, ts: Date.now() }
+    }).catch(() => {});
+  }
+
+  return res.json({ ok: true, isReconnect });
+}));
+
+// ── POST /game/session/player-heartbeat ──────────────────────────────────────
+// Atualiza presença do jogador (conectado/desconectado). Chamado a cada 15s.
+router.post("/game/session/player-heartbeat", asyncHandler(async (req, res) => {
+  const { roomId, sessionId, firebaseIdToken, connected } = req.body || {};
+  if (!roomId || !sessionId) return sendError(res, 400, "ROOM_ID_OU_SESSION_ID_OBRIGATORIO");
+
+  const db  = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await uidFromFirebaseToken(firebaseIdToken);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  db.collection("salas").doc(roomId)
+    .collection("sessions").doc(sessionId)
+    .collection("players").doc(uid)
+    .set({ connected: connected !== false, lastSeenAt: now }, { merge: true })
+    .catch(() => {});
+
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/session/end-game ──────────────────────────────────────────────
+// Encerra a sessão de jogo. Apenas o host pode chamar.
+router.post("/game/session/end-game", asyncHandler(async (req, res) => {
+  const { roomId, sessionId, hostToken } = req.body || {};
+  if (!roomId || !sessionId) return sendError(res, 400, "ROOM_ID_OU_SESSION_ID_OBRIGATORIO");
+  if (!verifyHostToken(hostToken, roomId)) {
+    return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
+  }
+
+  const db  = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const now     = admin.firestore.FieldValue.serverTimestamp();
+  const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
+
+  await Promise.all([
+    sessRef.collection("events").add({ type: "GAME_ENDED", ts: now, actor: "server", payload: {} }),
+    sessRef.update({ status: "ended", endedAt: now }),
+    db.collection("salas").doc(roomId).update({ currentSessionId: null }).catch(() => {}),
+  ]).catch(() => {});
+
+  logInfo("session_ended", { roomId, sessionId });
   return res.json({ ok: true });
 }));
 
