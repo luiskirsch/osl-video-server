@@ -142,6 +142,29 @@ function sanitizePlayers(players) {
   }));
 }
 
+// Sanitiza payload de evento: apenas primitivos, chaves ≤50 chars, strings ≤500 chars
+function sanitizeEventPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  const safe = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (k.length > 50) continue;
+    if (typeof v === "string")                                       safe[k] = v.slice(0, 500);
+    else if (typeof v === "number" || typeof v === "boolean" || v === null) safe[k] = v;
+  }
+  return safe;
+}
+
+// Helper: adiciona evento à sessão de forma fire-and-forget (não bloqueia resposta)
+function logSessionEvent(db, roomId, sessionId, type, actor, payload = {}) {
+  if (!sessionId) return;
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  db.collection("salas").doc(roomId)
+    .collection("sessions").doc(sessionId)
+    .collection("events")
+    .add({ type, ts: now, actor, payload })
+    .catch(() => {});
+}
+
 // ── POST /game/ritual/start ───────────────────────────────────────────────────
 router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const { roomId, hostToken, firebaseIdToken, players: rawPlayers } = req.body || {};
@@ -241,13 +264,19 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
 
   await ritualRef.collection("history").add({ type: card.type || "Ritual", text: card.title || "Carta", createdAt: now });
 
-  // Registra evento e atualiza gameState na sessão via Admin SDK
+  // Registra eventos e atualiza gameState na sessão via Admin SDK
   if (currentSessionId) {
     const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(currentSessionId);
     sessRef.collection("events").add({
       type: "CARD_REVEALED", ts: now, actor: "server",
       payload: { title: card.title || null, type: card.type || null, count: cardsRevealedCount },
     }).catch(() => {});
+    if (battlecry) {
+      sessRef.collection("events").add({
+        type: "EFFECT_TRIGGERED", ts: now, actor: "server",
+        payload: { effectId: battlecry.id, effectType: battlecry.type, phase: "battlecry", cardTitle: card.title || null },
+      }).catch(() => {});
+    }
     sessRef.update({
       gameState: { cardsRevealedCount, currentCardTitle: card.title || null, phase: "playing" },
     }).catch(() => {});
@@ -354,7 +383,7 @@ async function resolveParticipantId(db, roomId, firebaseIdToken, participantId) 
 
 // ── POST /game/ritual/vote ────────────────────────────────────────────────────
 router.post("/game/ritual/vote", asyncHandler(async (req, res) => {
-  const { roomId, participantId, firebaseIdToken, option } = req.body || {};
+  const { roomId, participantId, firebaseIdToken, option, sessionId } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
   const db = getDb();
@@ -369,12 +398,14 @@ router.post("/game/ritual/vote", asyncHandler(async (req, res) => {
     await ritualRef.update({ [`activeEffect.votes.${uid}`]: safeOption });
   } catch (_) { /* documento não existe ainda — ignora silenciosamente */ }
 
+  logSessionEvent(db, roomId, sessionId, "VOTE_CAST", uid, { option: safeOption });
+
   return res.json({ ok: true });
 }));
 
 // ── POST /game/ritual/react ───────────────────────────────────────────────────
 router.post("/game/ritual/react", asyncHandler(async (req, res) => {
-  const { roomId, participantId, firebaseIdToken, emoji, playerName } = req.body || {};
+  const { roomId, participantId, firebaseIdToken, emoji, playerName, sessionId } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
   const db = getDb();
@@ -393,12 +424,14 @@ router.post("/game/ritual/react", asyncHandler(async (req, res) => {
     [`reactionCounts.${uid}`]: admin.firestore.FieldValue.increment(1)
   }, { merge: true });
 
+  logSessionEvent(db, roomId, sessionId, "REACTION_SENT", uid, { emoji: safeEmoji, name: safeName });
+
   return res.json({ ok: true, ts });
 }));
 
 // ── POST /game/ritual/ai-detect ───────────────────────────────────────────────
 router.post("/game/ritual/ai-detect", asyncHandler(async (req, res) => {
-  const { roomId, participantId, firebaseIdToken, source, playerName, message } = req.body || {};
+  const { roomId, participantId, firebaseIdToken, source, playerName, message, sessionId } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
   const db = getDb();
@@ -417,12 +450,14 @@ router.post("/game/ritual/ai-detect", asyncHandler(async (req, res) => {
     aiDetection: { source: safeSource, playerName: safeName, message: safeMessage, detectedAt: Date.now() }
   }, { merge: true });
 
+  logSessionEvent(db, roomId, sessionId, "AI_DETECTION_TRIGGERED", uid, { source: safeSource, playerName: safeName });
+
   return res.json({ ok: true });
 }));
 
 // ── POST /game/ritual/social-pressure ────────────────────────────────────────
 router.post("/game/ritual/social-pressure", asyncHandler(async (req, res) => {
-  const { roomId, participantId, firebaseIdToken, playerName } = req.body || {};
+  const { roomId, participantId, firebaseIdToken, playerName, sessionId } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
   const db = getDb();
@@ -438,12 +473,14 @@ router.post("/game/ritual/social-pressure", asyncHandler(async (req, res) => {
     socialPressure: { ts: Date.now(), votedBy: safeName, roomCode: String(roomId).slice(0, 50) }
   }, { merge: true });
 
+  logSessionEvent(db, roomId, sessionId, "SOCIAL_PRESSURE_TRIGGERED", uid, { nickname: safeName });
+
   return res.json({ ok: true });
 }));
 
 // ── POST /game/ritual/resolve-effect (host only) ──────────────────────────────
 router.post("/game/ritual/resolve-effect", asyncHandler(async (req, res) => {
-  const { roomId, hostToken, winner, dismissOnly } = req.body || {};
+  const { roomId, hostToken, winner, dismissOnly, sessionId } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!verifyHostToken(hostToken, roomId)) {
     logWarn("ritual_resolve_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
@@ -458,14 +495,38 @@ router.post("/game/ritual/resolve-effect", asyncHandler(async (req, res) => {
   if (dismissOnly) {
     // dismissAIDetection: limpa aiDetection sem resolver o efeito ativo
     await ritualRef.set({ aiDetection: null }, { merge: true });
+    logSessionEvent(db, roomId, sessionId, "AI_DETECTION_DISMISSED", "server", {});
   } else {
     // resolveActiveEffect: limpa efeito ativo + AI detection + registra voto vencedor
     const update = { activeEffect: null, aiDetection: null };
     if (winner) update.voteResult = { winner: String(winner).slice(0, 200), resolvedAt: Date.now() };
     await ritualRef.set(update, { merge: true });
+    logSessionEvent(db, roomId, sessionId, "EFFECT_RESOLVED", "server", { winner: winner || null });
   }
 
   logInfo("ritual_resolve_effect", { roomId, winner: winner || null, dismissOnly: !!dismissOnly });
+  return res.json({ ok: true });
+}));
+
+// ── POST /game/session/log-event ─────────────────────────────────────────────
+// Eventos gerados pelo cliente com allowlist estrita. Não substitui logs server-side.
+const CLIENT_LOGGABLE_EVENTS = new Set(["PLAYER_LEFT", "MISSION_COMPLETED"]);
+
+router.post("/game/session/log-event", asyncHandler(async (req, res) => {
+  const { roomId, sessionId, participantId, firebaseIdToken, type, payload } = req.body || {};
+  if (!roomId || !sessionId || !type) return sendError(res, 400, "CAMPOS_OBRIGATORIOS");
+  if (!CLIENT_LOGGABLE_EVENTS.has(type)) return sendError(res, 403, "EVENTO_NAO_PERMITIDO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const uid = await resolveParticipantId(db, roomId, firebaseIdToken, participantId);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  await db.collection("salas").doc(roomId).collection("sessions").doc(sessionId)
+    .collection("events").add({ type, ts: now, actor: uid, payload: sanitizeEventPayload(payload) });
+
   return res.json({ ok: true });
 }));
 
