@@ -148,7 +148,7 @@ const PRODUCT_CATALOG = {
   "pacote-casais": {
     title: "SEXTOLUGAR — Pacote Casais",
     description: "18 cartas nichadas para casais",
-    price: 300.00,
+    price: 19.90,
     type: "pack"
   },
   "tema-sala": {

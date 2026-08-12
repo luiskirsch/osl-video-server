@@ -432,4 +432,47 @@ router.post("/game/migrar-perfil", asyncHandler(async (req, res) => {
   return res.json({ ok: true, migrated: true });
 }));
 
+// ── POST /game/redeem-pending-coins ──────────────────────────────────────────
+// Aplica moedas pendentes (compra MP sem perfil ativo) ao usuário autenticado.
+// Idempotente: pending_coins/{email} é deletado na transação.
+router.post("/game/redeem-pending-coins", asyncHandler(async (req, res) => {
+  const { firebaseIdToken } = req.body || {};
+  if (!firebaseIdToken) return sendError(res, 400, "TOKEN_OBRIGATORIO");
+
+  let uid, email;
+  try {
+    const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+    uid   = decoded.uid;
+    email = decoded.email || null;
+  } catch (_) {
+    return sendError(res, 403, "TOKEN_INVALIDO");
+  }
+
+  if (!email) return res.json({ ok: true, coinsAdded: 0 });
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  const pendingRef = db.collection("pending_coins").doc(email);
+  const userRef    = db.collection("users").doc(uid);
+
+  try {
+    let coinsAdded = 0;
+    await db.runTransaction(async (tx) => {
+      const pendingSnap = await tx.get(pendingRef);
+      if (!pendingSnap.exists) return;
+      const coins = pendingSnap.data().coins || 0;
+      if (coins <= 0) { tx.delete(pendingRef); return; }
+      coinsAdded = coins;
+      tx.update(userRef, { coins: admin.firestore.FieldValue.increment(coinsAdded) });
+      tx.delete(pendingRef);
+    });
+    if (coinsAdded > 0) logInfo("pending_coins_redeemed", { uid, email, coinsAdded });
+    return res.json({ ok: true, coinsAdded });
+  } catch (e) {
+    logError("redeem_pending_coins_error", { uid, email, error: e.message });
+    return res.json({ ok: true, coinsAdded: 0 });
+  }
+}));
+
 module.exports = router;
