@@ -28,8 +28,9 @@
 
 const logger = require('../logger');
 
-const ALPHA      = 0.20;
-const FLAG       = 'compatibility_v1';
+const ALPHA          = 0.20;
+const HALF_LIFE_DAYS = 30; // meia-vida do playStyle em dias (decay temporal)
+const FLAG           = 'compatibility_v1';
 
 // Emojis de risada (parcial — não exaustivo)
 const LAUGH_EMOJI = new Set(['😂','🤣','😄','😆','😅','😁','😀','haha','kkk','rsrs','lol']);
@@ -101,7 +102,7 @@ function deriveSessionStyle(summary) {
   const cardTypeCounts = summary.cardTypeCounts || {};
   const emojiTally     = summary.emojiTally     || {};
   const totalCards     = Object.values(cardTypeCounts).reduce((s, v) => s + v, 0) || 1;
-  const totalReactions = Object.values(summary.reactionsByActor || {}).reduce((s, v) => s + v, 0) || 0;
+  const totalReactions = Object.values(emojiTally).reduce((s, v) => s + v, 0) || 0;
   const cardsRevealed  = summary.cardsRevealed || 1;
   const durationSec    = summary.durationSec   || 0;
 
@@ -120,12 +121,19 @@ function deriveSessionStyle(summary) {
   };
 }
 
-function _emaUpdate(existing = {}, session = {}) {
+// Fator de decay exponencial: sessão de hoje = 1.0, 30 dias atrás ≈ 0.5
+function _decayFactor(daysSinceUpdate = 0) {
+  if (daysSinceUpdate <= 0) return 1.0;
+  return Math.exp(-Math.LN2 * daysSinceUpdate / HALF_LIFE_DAYS);
+}
+
+function _emaUpdate(existing = {}, session = {}, daysSinceUpdate = 0) {
+  const decay   = _decayFactor(daysSinceUpdate);
   const allKeys = new Set([...Object.keys(existing), ...Object.keys(session)]);
   const updated = {};
   for (const k of allKeys) {
-    const ex  = existing[k] ?? session[k] ?? 0;
-    const ses = session[k]  ?? 0;
+    const ex  = (existing[k] ?? session[k] ?? 0) * decay;
+    const ses = session[k] ?? 0;
     updated[k] = parseFloat(((1 - ALPHA) * ex + ALPHA * ses).toFixed(4));
   }
   return updated;
@@ -245,9 +253,22 @@ function init() {
 
     await Promise.all(snaps.map(async (snap) => {
       if (!snap?.exists) return;
-      const existing = snap.data().playStyle || {};
-      const updated  = _emaUpdate(existing, sessionStyle);
-      try { await db.collection('users').doc(snap.id).update({ playStyle: updated }); } catch (_) {}
+      const data       = snap.data();
+      const existing   = data.playStyle || {};
+      const updatedAt  = data.playStyleUpdatedAt;
+      const lastDate   = updatedAt instanceof Date
+        ? updatedAt
+        : updatedAt?.toDate?.() ?? null;
+      const daysSince  = lastDate
+        ? (Date.now() - lastDate.getTime()) / 86400000
+        : 0;
+      const updated    = _emaUpdate(existing, sessionStyle, daysSince);
+      try {
+        await db.collection('users').doc(snap.id).update({
+          playStyle:          updated,
+          playStyleUpdatedAt: new Date(),
+        });
+      } catch (_) {}
     }));
 
     logger.info({ count: authedUids.length }, 'play_style_updated');
