@@ -70,10 +70,11 @@ router.get('/hub', asyncHandler(async (req, res) => {
 
   const friends = (connections || []).map(c => ({
     uid:          c.uid,
-    displayName:  presenceMap[c.uid]?.displayName || null,
-    photoURL:     presenceMap[c.uid]?.photoURL    || null,
-    online:       presenceMap[c.uid]?.online       ?? false,
-    lastSeenMs:   presenceMap[c.uid]?.lastSeenMs  ?? c.lastPlayedAt,
+    displayName:  presenceMap[c.uid]?.displayName  || null,
+    photoURL:     presenceMap[c.uid]?.photoURL      || null,
+    online:       presenceMap[c.uid]?.online         ?? false,
+    lastSeenMs:   presenceMap[c.uid]?.lastSeenMs    ?? c.lastPlayedAt,
+    lastActivity: presenceMap[c.uid]?.lastActivity  || null,
     sessionCount: c.sessionCount,
     lastPlayedAt: c.lastPlayedAt,
   })).sort((a, b) => {

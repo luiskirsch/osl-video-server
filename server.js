@@ -296,6 +296,7 @@ const achievements   = require("./services/achievements");
 const notificationsSvc  = require("./services/notifications");
 const recurringGroups   = require("./services/recurringGroups");
 const worldStateSvc     = require("./services/worldState");
+const activityTracker   = require("./services/activityTracker");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -316,6 +317,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   notificationsSvc.init();
   recurringGroups.init();
   worldStateSvc.init();
+  activityTracker.init();
 });
 
 async function gracefullyStopAllEgress() {

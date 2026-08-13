@@ -119,8 +119,21 @@ function initSocketIo(httpServer, allowedOrigins) {
 
     socket.on("disconnect", () => {
       logInfo("socket_disconnected", { uid: socket.uid });
-      // Sem notificação de offline imediata — evita noise de reconexões.
-      // A presença decai naturalmente via lastSeenAt (TTL 5 min).
+      // Delay de 90s antes de notificar offline — absorve reconexões rápidas
+      // (reload de página, troca de rede). Só emite se o uid ainda não tiver
+      // nenhum socket ativo no momento da verificação.
+      const disconnectedUid = socket.uid;
+      setTimeout(async () => {
+        try {
+          const sockets = await _io.in(disconnectedUid).fetchSockets();
+          if (sockets.length > 0) return; // reconectou
+          const socialGraph = require("./socialGraph");
+          const conns = await socialGraph.getConnections(disconnectedUid, 10);
+          for (const conn of conns) {
+            _io.to(conn.uid).emit("social:friend_offline", { uid: disconnectedUid });
+          }
+        } catch (_) {}
+      }, 90_000);
     });
   });
 
