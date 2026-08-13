@@ -18,6 +18,8 @@ const adaptiveEngine      = require('../services/adaptiveEngine');
 const sessionDna          = require('../services/sessionDna');
 const { panelRooms, panelClients, activeRecordings, activeStreams } = require('../game/state');
 
+const liveService             = require('../services/liveService');
+
 const router = express.Router();
 
 // ── GET /ops/dashboard ────────────────────────────────────────────────────────
@@ -115,6 +117,25 @@ router.get('/ops/adaptive', requireAdmin, asyncHandler(async (_req, res) => {
     enabled: engineEnabled,
     minSessionsRequired: 3,
     rooms: dnaList.filter(Boolean).sort((a, b) => b.sessionCount - a.sessionCount),
+  });
+}));
+
+// ── GET /ops/live ─────────────────────────────────────────────────────────────
+// Estado atual do Live Service: temporada, eventos ativos, ritual do dia.
+
+router.get('/ops/live', requireAdmin, asyncHandler(async (_req, res) => {
+  const [season, activeEvents, daily] = await Promise.all([
+    liveService.getActiveSeason(),
+    liveService.getActiveEvents(),
+    liveService.getDailyRitual(),
+  ]);
+
+  return res.json({
+    ok: true,
+    season:       season || null,
+    activeEvents,
+    daily:        daily  || null,
+    eventCount:   activeEvents.length,
   });
 }));
 

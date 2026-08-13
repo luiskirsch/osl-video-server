@@ -9,6 +9,7 @@ const { requireAdmin, signPayload, generateLicenseCode } = require("../services/
 const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECRET, LICENSE_VALIDITY_MS, ADMIN_SECRET } = require("../config");
 const featureFlags  = require("../services/featureFlags");
 const experiments   = require("../services/experiments");
+const liveService   = require("../services/liveService");
 
 const router = express.Router();
 
@@ -281,5 +282,108 @@ router.get("/system-core", adminLimiter, (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.sendFile(path.join(__dirname, "..", "admin.html"));
 });
+
+// ── Seasons ───────────────────────────────────────────────────────────────────
+
+router.get('/admin/seasons', requireAdmin, asyncHandler(async (_req, res) => {
+  const db   = getDb();
+  const snap = await db.collection('seasons').orderBy('startAt', 'desc').get();
+  const seasons = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  return res.json({ ok: true, seasons });
+}));
+
+router.put('/admin/seasons/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { name, description, theme, startAt, endAt, active, packIds, bonusXpMultiplier } = req.body;
+
+  const doc = {
+    name:              String(name || '').slice(0, 100),
+    description:       String(description || '').slice(0, 500),
+    theme:             String(theme || 'default').slice(0, 50),
+    startAt:           startAt ? new Date(startAt) : new Date(),
+    endAt:             endAt   ? new Date(endAt)   : new Date(Date.now() + 30 * 86400000),
+    active:            active !== false,
+    packIds:           Array.isArray(packIds) ? packIds.map(String) : [],
+    bonusXpMultiplier: Number(bonusXpMultiplier) || 1.0,
+    updatedAt:         new Date(),
+  };
+
+  const db  = getDb();
+  const ref = db.collection('seasons').doc(id);
+  const existing = await ref.get();
+  if (existing.exists) {
+    await ref.update(doc);
+  } else {
+    await ref.set({ ...doc, createdAt: new Date() });
+  }
+
+  liveService.invalidate('season');
+  logInfo('admin_season_saved', { id });
+  return res.json({ ok: true, id });
+}));
+
+router.delete('/admin/seasons/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const db = getDb();
+  await db.collection('seasons').doc(req.params.id).delete();
+  liveService.invalidate('season');
+  logInfo('admin_season_deleted', { id: req.params.id });
+  return res.json({ ok: true });
+}));
+
+// ── Live Events ───────────────────────────────────────────────────────────────
+
+router.get('/admin/live-events', requireAdmin, asyncHandler(async (_req, res) => {
+  const db   = getDb();
+  const snap = await db.collection('live_events').orderBy('startAt', 'desc').get();
+  const events = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  return res.json({ ok: true, events });
+}));
+
+router.put('/admin/live-events/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { name, description, type, startAt, endAt, active, bonusCardPackId, bonusXp } = req.body;
+
+  const doc = {
+    name:            String(name || '').slice(0, 100),
+    description:     String(description || '').slice(0, 500),
+    type:            String(type || 'timed').slice(0, 50),
+    startAt:         startAt ? new Date(startAt) : new Date(),
+    endAt:           endAt   ? new Date(endAt)   : new Date(Date.now() + 7 * 86400000),
+    active:          active !== false,
+    bonusCardPackId: bonusCardPackId ? String(bonusCardPackId).slice(0, 100) : null,
+    bonusXp:         Number(bonusXp) || 0,
+    updatedAt:       new Date(),
+  };
+
+  const db  = getDb();
+  const ref = db.collection('live_events').doc(id);
+  const existing = await ref.get();
+  if (existing.exists) {
+    await ref.update(doc);
+  } else {
+    await ref.set({ ...doc, createdAt: new Date() });
+  }
+
+  liveService.invalidate('events');
+  logInfo('admin_live_event_saved', { id });
+  return res.json({ ok: true, id });
+}));
+
+router.delete('/admin/live-events/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const db = getDb();
+  await db.collection('live_events').doc(req.params.id).delete();
+  liveService.invalidate('events');
+  logInfo('admin_live_event_deleted', { id: req.params.id });
+  return res.json({ ok: true });
+}));
+
+// ── Daily Ritual ──────────────────────────────────────────────────────────────
+
+// Força geração do ritual de hoje (útil pra testar sem esperar a primeira request)
+router.post('/admin/daily-ritual/generate', requireAdmin, asyncHandler(async (_req, res) => {
+  liveService.invalidate('daily');
+  const daily = await liveService.getDailyRitual();
+  return res.json({ ok: true, daily });
+}));
 
 module.exports = router;

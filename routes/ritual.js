@@ -17,6 +17,7 @@ const events                            = require("../services/events");
 const entitlements                      = require("../services/entitlements");
 const { GameEngine }                    = require("../game/engine");
 const adaptiveEngine                    = require("../services/adaptiveEngine");
+const liveService                       = require("../services/liveService");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
@@ -35,10 +36,14 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
   const ent = hostUid ? await entitlements.getUserEntitlements(hostUid) : null;
   const unlockedPacks = ent?.unlockedPacks ?? [];
 
+  // Pack IDs de temporada/eventos ativos (cache, não bloqueia em falha)
+  const livePackIds   = await liveService.getLivePackIds().catch(() => []);
+  const allPackIds    = [...new Set([...unlockedPacks, ...livePackIds])];
+
   // Conteúdo via ContentEngine (Firestore > fallback estático, cached 5min)
   const [basicCards, packCards] = await Promise.all([
     contentEngine.getBasicCards(),
-    contentEngine.getCardsByPackIds(unlockedPacks),
+    contentEngine.getCardsByPackIds(allPackIds),
   ]);
 
   // Cartas customizadas dos jogadores (carregadas do Firestore — não do cliente)
