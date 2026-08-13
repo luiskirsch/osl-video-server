@@ -98,12 +98,14 @@ async function _persist(event) {
 }
 
 // ── Catálogo de tópicos (documentação viva) ───────────────────────────────────
-// Prefixo   → domínio
-// ritual.*  → estado do ritual (cartas, efeitos, votos, reações)
-// room.*    → ciclo de vida da sala (criação, join, leave, close)
-// session.* → sessão de jogo (início, fim, jogadores)
-// payment.* → pagamentos (aprovado, estornado)
-// user.*    → perfil do jogador (xp, moedas, conquistas)
-// flag.*    → feature flags (criação, atualização)
+// Prefixo    → domínio
+// ritual.*   → estado do ritual (cartas, efeitos, votos, reações)
+// room.*     → ciclo de vida da sala (criação, join, leave, close)
+// session.*  → sessão de jogo (início, fim, jogadores)
+// payment.*  → pagamentos (aprovado, estornado)
+// user.*     → perfil do jogador (xp, moedas, conquistas)
+// flag.*     → feature flags (criação, atualização)
+// content.*  → cartas e packs (criação, atualização, remoção)
+// engine.*   → game engine (adaptive_applied, etc.)
 
 module.exports = { emit, on, once };

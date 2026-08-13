@@ -16,6 +16,7 @@ const { asyncHandler, sendError }       = require("../utils");
 const events                            = require("../services/events");
 const entitlements                      = require("../services/entitlements");
 const { GameEngine }                    = require("../game/engine");
+const adaptiveEngine                    = require("../services/adaptiveEngine");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
@@ -101,10 +102,11 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const players = sanitizePlayers(rawPlayers);
-  const [{ deck }, hostUid] = await Promise.all([
+  const [{ deck: rawDeck }, hostUid] = await Promise.all([
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),
   ]);
+  const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -245,12 +247,13 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
 
   // Lê sessionId anterior antes de sobrescrever
-  const [oldSnap, { deck }, hostUid] = await Promise.all([
+  const [oldSnap, { deck: rawDeck }, hostUid] = await Promise.all([
     ritualRef.get(),
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),
   ]);
   const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
+  const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
 
   const now = admin.firestore.FieldValue.serverTimestamp();
 

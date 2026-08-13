@@ -14,6 +14,8 @@ const express    = require('express');
 const { requireAdmin }    = require('../services/auth');
 const { asyncHandler }    = require('../utils');
 const telemetry           = require('../services/telemetry');
+const adaptiveEngine      = require('../services/adaptiveEngine');
+const sessionDna          = require('../services/sessionDna');
 const { panelRooms, panelClients, activeRecordings, activeStreams } = require('../game/state');
 
 const router = express.Router();
@@ -84,5 +86,36 @@ router.get('/ops/rooms', requireAdmin, (_req, res) => {
 
   return res.json({ ok: true, rooms, total: rooms.length });
 });
+
+// ── GET /ops/adaptive ─────────────────────────────────────────────────────────
+// Status do Adaptive Ritual Engine: flag ativa + DNA de salas rastreadas.
+
+router.get('/ops/adaptive', requireAdmin, asyncHandler(async (_req, res) => {
+  const engineEnabled = await adaptiveEngine.isEnabled(null);
+
+  // Salas rastreadas em memória com DNA disponível
+  const roomIds  = Array.from(panelRooms.keys());
+  const dnaList  = await Promise.all(
+    roomIds.map(async (roomId) => {
+      const dna = await sessionDna.getRoomDna(roomId).catch(() => null);
+      return dna ? {
+        roomId,
+        sessionCount:      dna.sessionCount      || 0,
+        eligibleForEngine: (dna.sessionCount || 0) >= 3,
+        avgCardsPerSession: dna.avgCardsPerSession || 0,
+        topCardType: Object.entries(dna.cardTypeCounts || {})
+          .sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+      } : null;
+    })
+  );
+
+  return res.json({
+    ok: true,
+    flag:    'adaptive_ritual_engine',
+    enabled: engineEnabled,
+    minSessionsRequired: 3,
+    rooms: dnaList.filter(Boolean).sort((a, b) => b.sessionCount - a.sessionCount),
+  });
+}));
 
 module.exports = router;
