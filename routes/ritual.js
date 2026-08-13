@@ -10,7 +10,8 @@ function resolvedPlayerName(roomId, uid, fallback) {
   return panelRooms.get(roomId)?.players?.[uid]?.playerName
     || String(fallback || "Jogador").slice(0, 80);
 }
-const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_PACK_IDS, levelFromXP } = require("../data/cards");
+const { levelFromXP } = require("../data/cards");
+const contentEngine = require("../services/contentEngine");
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
 const events                            = require("../services/events");
@@ -65,10 +66,10 @@ function prepareEffect(effect, players) {
   return base;
 }
 
-function prepareCard(card, players) {
+function prepareCard(card, players, effectsMap = {}) {
   if (!card) return { battlecry: null, deathrattle: null };
   const key = card._origTitle || card.title;
-  const effects = OSL_CARD_EFFECTS[key] || {};
+  const effects = card.effects || effectsMap[key] || {};
   return {
     battlecry:   effects.battlecry   ? prepareEffect({ ...effects.battlecry,   phase: "battlecry" },   players) : null,
     deathrattle: effects.deathrattle ? prepareEffect({ ...effects.deathrattle, phase: "deathrattle" }, players) : null,
@@ -89,6 +90,13 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
   const ent = hostUid ? await entitlements.getUserEntitlements(hostUid) : null;
   const unlockedPacks = ent?.unlockedPacks ?? [];
 
+  // Conteúdo via ContentEngine (Firestore > fallback estático, cached 5min)
+  const [basicCards, packCards, effectsMap] = await Promise.all([
+    contentEngine.getBasicCards(),
+    contentEngine.getCardsByPackIds(unlockedPacks),
+    contentEngine.getCardEffectsMap(),
+  ]);
+
   // Cartas customizadas dos jogadores (carregadas do Firestore — não do cliente)
   const customContributions = [];
   for (const p of players) {
@@ -104,16 +112,12 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
   }
 
   if (customContributions.length > 0) {
-    const allCards = [...OSL_BASIC_CARDS, ...customContributions];
+    const allCards = [...basicCards, ...customContributions];
     const seen = new Set();
-    return cryptoShuffle(allCards.filter(c => { if (seen.has(c.title)) return false; seen.add(c.title); return true; }));
+    return { deck: cryptoShuffle(allCards.filter(c => { if (seen.has(c.title)) return false; seen.add(c.title); return true; })), effectsMap };
   }
 
-  const packCards = [];
-  for (const packId of unlockedPacks) {
-    if (OSL_PACK_CARDS[packId]) packCards.push(...OSL_PACK_CARDS[packId]);
-  }
-  return cryptoShuffle([...OSL_BASIC_CARDS, ...packCards]);
+  return { deck: cryptoShuffle([...basicCards, ...packCards]), effectsMap };
 }
 
 function sanitizeCard(c) {
@@ -173,10 +177,11 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const players = sanitizePlayers(rawPlayers);
-  const [deck, hostUid] = await Promise.all([
+  const [{ deck, effectsMap: _effectsMap }, hostUid] = await Promise.all([
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),
   ]);
+  void _effectsMap;  // effectsMap é carregado pelo ContentEngine no next-card
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -248,7 +253,8 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
 
   const card = deck.shift();
   const cardsRevealedCount = (data.cardsRevealedCount || 0) + 1;
-  const { battlecry, deathrattle } = prepareCard(card, players);
+  const effectsMap = await contentEngine.getCardEffectsMap();
+  const { battlecry, deathrattle } = prepareCard(card, players, effectsMap);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const currentSessionId = data.sessionId || null;
@@ -316,7 +322,7 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
 
   // Lê sessionId anterior antes de sobrescrever
-  const [oldSnap, deck, hostUid] = await Promise.all([
+  const [oldSnap, { deck }, hostUid] = await Promise.all([
     ritualRef.get(),
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),

@@ -70,6 +70,7 @@ const analyticsRouter  = require("./routes/analytics");
 const socialRouter     = require("./routes/social");
 const cosmeticsRouter  = require("./routes/cosmetics");
 const platformRouter   = require("./routes/platform");
+const contentRouter    = require("./routes/content");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -224,6 +225,7 @@ app.use(analyticsRouter);
 app.use(socialRouter);
 app.use(cosmeticsRouter);
 app.use(platformRouter);
+app.use(contentRouter);
 
 // --- 404 ---
 app.use((req, res) => {
