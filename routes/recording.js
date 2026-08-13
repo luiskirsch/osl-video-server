@@ -4,7 +4,8 @@ const { asyncHandler, sendError, nowIso, normalizePathEmail } = require("../util
 const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, broadcastPanelUpdate } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken } = require("../video/webrtc");
-const { getDb, isPrestige, isPassActive } = require("../services/firestore");
+const { getDb } = require("../services/firestore");
+const entitlements = require("../services/entitlements");
 const { requireAdmin, verifySignedToken, getBearerToken } = require("../services/auth");
 const { ACCESS_TOKEN_SECRET } = require("../config");
 const admin = require("firebase-admin");
@@ -89,11 +90,11 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
   const tokenEmail = (decoded.email || "").toLowerCase();
   if (tokenEmail !== email) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
 
-  if (await isPrestige(email)) {
+  const ent = await entitlements.getUserEntitlements(decoded.uid);
+  if (ent.isPrestige) {
     return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
   }
-  const pass = await isPassActive("recording_passes", email);
-  return res.json({ ok: true, active: pass.active, expiresAt: pass.expiresAt, type: pass.type || "gravacao-mensal" });
+  return res.json({ ok: true, active: ent.hasRecordingPass, expiresAt: ent.recordingPassExpiresAt, type: "gravacao-mensal" });
 }));
 
 // POST /recording/auto-start — inicia gravação automaticamente quando o ritual começa

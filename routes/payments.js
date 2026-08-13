@@ -8,6 +8,7 @@ const { mercadoPagoFetch } = require("../services/payments");
 const { generateExternalReference, requireAdmin, verifyFirebaseToken } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
+const entitlements = require("../services/entitlements");
 const { PRODUCT_ID, PRODUCT_CATALOG, PRODUCT_CURRENCY, FRONTEND_BASE_URL, BACKEND_BASE_URL, MP_WEBHOOK_SECRET, PASS_VALIDITY_MS, IS_PRODUCTION } = require("../config");
 const { t: i18nT, detectLocale } = require("../services/i18n");
 
@@ -60,6 +61,17 @@ function verifyMercadoPagoSignature(req, paymentId) {
 const { FieldValue } = require("firebase-admin/firestore");
 
 const router = express.Router();
+
+// Invalida cache de entitlements pelo email do comprador buscando o uid no Firestore.
+// Fire-and-forget — não bloqueia o webhook.
+function _invalidateEntitlementsByEmail(email) {
+  const { getDb } = require('../services/firestore');
+  const db = getDb();
+  if (!db || !email) return;
+  db.collection('users').where('email', '==', email).limit(1).get()
+    .then(snap => { if (!snap.empty) entitlements.invalidate(snap.docs[0].id); })
+    .catch(() => {});
+}
 
 // Security #11: rate limit em /criar-pagamento pra evitar abuso de criação de cobranças MP
 const paymentLimiter = rateLimit({
@@ -287,6 +299,8 @@ router.post("/webhook", asyncHandler(async (req, res) => {
             activatedAt: Date.now(), expiresAt, type: "gravacao-mensal"
           }, { merge: true });
           logInfo("recording_pass_activated", { email: approvedEmail, expiresAt });
+          // Invalida cache de entitlements — usuário pode iniciar gravação imediatamente
+          _invalidateEntitlementsByEmail(approvedEmail);
         } catch (err) {
           logError("recording_pass_save_error", err, { email: approvedEmail });
         }
@@ -300,6 +314,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
             activatedAt: Date.now(), expiresAt, type: "streaming-mensal"
           }, { merge: true });
           logInfo("streaming_pass_activated", { email: approvedEmail, expiresAt });
+          _invalidateEntitlementsByEmail(approvedEmail);
         } catch (err) {
           logError("streaming_pass_save_error", err, { email: approvedEmail });
         }

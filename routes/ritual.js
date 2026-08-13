@@ -14,6 +14,7 @@ const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_PACK_IDS, levelFr
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
 const events                            = require("../services/events");
+const entitlements                      = require("../services/entitlements");
 
 const router = express.Router();
 
@@ -75,24 +76,18 @@ function prepareCard(card, players) {
 }
 
 async function buildVerifiedDeck(db, firebaseIdToken, players) {
-  // Valida compras e prestige server-side a partir do Firebase ID token
-  let verifiedPackIds = new Set();
-  let isPrestige = false;
-
+  // Resolve uid do host a partir do Firebase ID token
+  let hostUid = null;
   if (firebaseIdToken) {
     try {
       const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
-      const uid = decoded.uid;
-      const userSnap = await db.collection("users").doc(uid).get();
-      if (userSnap.exists) {
-        const data = userSnap.data();
-        isPrestige = levelFromXP(data.xp || 0) >= 50;
-        for (const c of (data.compras || [])) {
-          if (OSL_PACK_IDS.includes(c.produto)) verifiedPackIds.add(c.produto);
-        }
-      }
+      hostUid = decoded.uid;
     } catch (_) { /* token inválido — sem pacotes extras */ }
   }
+
+  // Entitlements do host via serviço centralizado (cached, uma leitura Firestore)
+  const ent = hostUid ? await entitlements.getUserEntitlements(hostUid) : null;
+  const unlockedPacks = ent?.unlockedPacks ?? [];
 
   // Cartas customizadas dos jogadores (carregadas do Firestore — não do cliente)
   const customContributions = [];
@@ -115,8 +110,7 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
   }
 
   const packCards = [];
-  const packsToInclude = isPrestige ? OSL_PACK_IDS : [...verifiedPackIds];
-  for (const packId of packsToInclude) {
+  for (const packId of unlockedPacks) {
     if (OSL_PACK_CARDS[packId]) packCards.push(...OSL_PACK_CARDS[packId]);
   }
   return cryptoShuffle([...OSL_BASIC_CARDS, ...packCards]);

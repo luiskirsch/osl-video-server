@@ -6,7 +6,8 @@ const { asyncHandler, sendError, normalizePathEmail } = require("../utils");
 const { activeStreams, pagamentosAprovados } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomStreaming, stopRoomStreaming, egressClient } = require("../video/webrtc");
-const { getDb, requireFirebaseAuth, requireEmailMatchesToken, isPrestige, isPassActive } = require("../services/firestore");
+const { getDb, requireFirebaseAuth, requireEmailMatchesToken } = require("../services/firestore");
+const entitlements = require("../services/entitlements");
 const { FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM } = require("../config");
 
 const router = express.Router();
@@ -40,11 +41,11 @@ router.get("/streaming/pass/:email", readLimiter, requireFirebaseAuth, requireEm
   const email = normalizePathEmail(req);
   if (!email) return sendError(res, 400, "EMAIL_OBRIGATORIO");
 
-  if (await isPrestige(email)) {
+  const ent = await entitlements.getUserEntitlements(req.firebaseUser.uid);
+  if (ent.isPrestige) {
     return res.json({ ok: true, active: true, expiresAt: null, type: "prestige" });
   }
-  const pass = await isPassActive("streaming_passes", email);
-  return res.json({ ok: true, active: pass.active, expiresAt: pass.expiresAt, type: pass.type || "streaming-mensal" });
+  return res.json({ ok: true, active: ent.hasStreamingPass, expiresAt: ent.streamingPassExpiresAt, type: "streaming-mensal" });
 }));
 
 function todayKey() {
@@ -53,21 +54,23 @@ function todayKey() {
 
 // Security #5: pré-debita upfront o pior caso (toda quota restante) numa transaction
 // pra que N starts concorrentes sejam serializados. /stop refunda o tempo não usado.
-async function checkAuthAndReserve(email) {
+async function checkAuthAndReserve(email, uid = null) {
   if (!email) return { allowed: false, reason: "EMAIL_OBRIGATORIO" };
   const db = getDb();
   if (!db) return { allowed: true, type: "no-firestore" };
 
   try {
-    // 1. Prestige (sem reserva, sem limite de quota)
-    if (await isPrestige(email)) {
-      return { allowed: true, type: "prestige", reservedMin: 0 };
-    }
-
-    // 2. Pass mensal ativo
-    const pass = await isPassActive("streaming_passes", email);
-    if (pass.active) {
-      return { allowed: true, type: "pass", reservedMin: 0, expiresAt: pass.expiresAt };
+    // 1. Prestige e pass via entitlements (cached, uma leitura Firestore)
+    if (uid) {
+      const ent = await entitlements.getUserEntitlements(uid);
+      if (ent.isPrestige) return { allowed: true, type: "prestige", reservedMin: 0 };
+      if (ent.hasStreamingPass) return { allowed: true, type: "pass", reservedMin: 0, expiresAt: ent.streamingPassExpiresAt };
+    } else {
+      // Fallback sem uid: caminho legado (raro, apenas clientes antigos sem Bearer token)
+      const { isPrestige: _isPrestige, isPassActive: _isPassActive } = require('../services/firestore');
+      if (await _isPrestige(email)) return { allowed: true, type: "prestige", reservedMin: 0 };
+      const pass = await _isPassActive("streaming_passes", email);
+      if (pass.active) return { allowed: true, type: "pass", reservedMin: 0, expiresAt: pass.expiresAt };
     }
 
     // 3. Free tier: transação atomica check + reserve
@@ -123,7 +126,7 @@ router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(
   }
 
   // Security #5: gate atomico + reserva de quota
-  const auth = await checkAuthAndReserve(email);
+  const auth = await checkAuthAndReserve(email, req.firebaseUser?.uid ?? null);
   if (!auth.allowed) {
     return sendError(res, 402, auth.reason || "ACESSO_NEGADO", {
       usedMin: auth.usedMin,
