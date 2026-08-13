@@ -113,6 +113,18 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   ]);
   const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
 
+  // Injeta fragmento do ritual diário anterior (pessoal do host)
+  if (hostUid) {
+    try {
+      const fragmentEngine = require('../services/fragmentEngine');
+      const fragment = await fragmentEngine.consumeFragment(hostUid);
+      if (fragment) {
+        const pos = Math.max(1, Math.floor(deck.length / 3));
+        deck.splice(pos, 0, fragment);
+      }
+    } catch (_) {}
+  }
+
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
 
@@ -259,6 +271,18 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   ]);
   const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
   const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+
+  // Injeta fragmento do ritual diário anterior (pessoal do host)
+  if (hostUid) {
+    try {
+      const fragmentEngine = require('../services/fragmentEngine');
+      const fragment = await fragmentEngine.consumeFragment(hostUid);
+      if (fragment) {
+        const pos = Math.max(1, Math.floor(deck.length / 3));
+        deck.splice(pos, 0, fragment);
+      }
+    } catch (_) {}
+  }
 
   const now = admin.firestore.FieldValue.serverTimestamp();
 

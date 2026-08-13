@@ -98,6 +98,18 @@ router.get('/hub', asyncHandler(async (req, res) => {
     userSessionCount: rep?.totalSessions       || 0,
   }).catch(() => ({ available: [], teasers: [], totalDiscoveries: 0 }));
 
+  // Fragmento pendente (já lido no userDoc — zero custo extra)
+  let fragment = null;
+  if (userDoc?.pendingFragment) {
+    const pf        = userDoc.pendingFragment;
+    const expiresAt = pf.expiresAt instanceof Date
+      ? pf.expiresAt
+      : pf.expiresAt?.toDate?.() ?? null;
+    if (expiresAt && expiresAt > new Date()) {
+      fragment = { card: pf.card, expiresAt: expiresAt.getTime() };
+    }
+  }
+
   return res.json({
     ok:           true,
     uid,
@@ -109,6 +121,7 @@ router.get('/hub', asyncHandler(async (req, res) => {
     myGroups,
     lastSession,
     discoveries:  discoveryResult,
+    fragment,
     unread:       unread ?? 0,
   });
 }));
