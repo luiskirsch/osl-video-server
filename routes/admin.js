@@ -10,6 +10,7 @@ const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECR
 const featureFlags  = require("../services/featureFlags");
 const experiments   = require("../services/experiments");
 const liveService   = require("../services/liveService");
+const worldState    = require("../services/worldState");
 
 const router = express.Router();
 
@@ -384,6 +385,53 @@ router.post('/admin/daily-ritual/generate', requireAdmin, asyncHandler(async (_r
   liveService.invalidate('daily');
   const daily = await liveService.getDailyRitual();
   return res.json({ ok: true, daily });
+}));
+
+// ── World State ───────────────────────────────────────────────────────────────
+
+router.get('/admin/world', requireAdmin, asyncHandler(async (_req, res) => {
+  const state = await worldState.getWorldState();
+  return res.json({ ok: true, world: state });
+}));
+
+router.put('/admin/world', requireAdmin, asyncHandler(async (req, res) => {
+  const { communityProgress, currentMissionId, unlockedContent } = req.body || {};
+  const patch = {};
+  if (communityProgress  !== undefined) patch.communityProgress  = Math.min(1, Math.max(0, Number(communityProgress)));
+  if (currentMissionId   !== undefined) patch.currentMissionId   = currentMissionId ? String(currentMissionId) : null;
+  if (Array.isArray(unlockedContent))   patch.unlockedContent    = unlockedContent;
+  await worldState.setWorldState(patch);
+  worldState.invalidate();
+  logInfo('admin_world_state_updated', patch);
+  return res.json({ ok: true });
+}));
+
+// ── Community Missions ────────────────────────────────────────────────────────
+
+router.get('/admin/world/missions', requireAdmin, asyncHandler(async (_req, res) => {
+  const missions = await worldState.listMissions();
+  return res.json({ ok: true, missions });
+}));
+
+router.post('/admin/world/missions', requireAdmin, asyncHandler(async (req, res) => {
+  const { id, name, description, goal, unit, rewardContent } = req.body || {};
+  try {
+    await worldState.createMission({ id, name, description, goal, unit, rewardContent });
+    logInfo('admin_mission_created', { id });
+    return res.status(201).json({ ok: true, id });
+  } catch (e) {
+    if (e.code === 400) return sendError(res, 400, e.message);
+    throw e;
+  }
+}));
+
+router.put('/admin/world/missions/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const patch   = req.body || {};
+  await worldState.updateMission(id, patch);
+  worldState.invalidate();
+  logInfo('admin_mission_updated', { id });
+  return res.json({ ok: true, id });
 }));
 
 module.exports = router;
