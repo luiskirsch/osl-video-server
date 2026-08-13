@@ -71,6 +71,7 @@ const socialRouter     = require("./routes/social");
 const cosmeticsRouter  = require("./routes/cosmetics");
 const platformRouter   = require("./routes/platform");
 const contentRouter    = require("./routes/content");
+const sessionRouter    = require("./routes/session");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -226,6 +227,7 @@ app.use(socialRouter);
 app.use(cosmeticsRouter);
 app.use(platformRouter);
 app.use(contentRouter);
+app.use(sessionRouter);
 
 // --- 404 ---
 app.use((req, res) => {
@@ -268,6 +270,7 @@ app.use((err, req, res, next) => {
 // --- Startup ---
 const { startCleanupLoop, stopCleanupLoop } = require("./services/cleanup");
 const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler");
+const sessionDna = require("./services/sessionDna");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -280,6 +283,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   startCleanupLoop();
   startSchedulerLoop();
   scheduleAuditLogCleanup();
+  sessionDna.init();
 });
 
 async function gracefullyStopAllEgress() {

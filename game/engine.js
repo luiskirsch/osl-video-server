@@ -29,10 +29,11 @@ class GameEngine {
     this.type = type;
   }
 
-  buildDeck(params)                       { return this._def.buildDeck(params); }
-  prepareCard(card, players, effectsMap)  { return this._def.prepareCard(card, players, effectsMap); }
-  sanitizeCard(c)                         { return this._def.sanitizeCard(c); }
-  computeSummary(events, ctx)             { return this._def.computeSummary(events, ctx); }
+  buildDeck(params)                         { return this._def.buildDeck(params); }
+  prepareCard(card, players, effectsMap)    { return this._def.prepareCard(card, players, effectsMap); }
+  sanitizeCard(c)                           { return this._def.sanitizeCard(c); }
+  computeSummary(events, ctx)               { return this._def.computeSummary(events, ctx); }
+  computeHighlights(events, summary)        { return this._def.computeHighlights(events, summary); }
 }
 
 module.exports = { GameEngine };

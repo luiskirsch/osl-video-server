@@ -132,10 +132,18 @@ module.exports = {
     const durationSec      = Math.round((Date.now() - createdMs) / 1000);
     const reactionsByActor = {};
     const emojiTally       = {};
+    const cardTypeCounts   = {};
+    const cardCounts       = {};
     let cardsRevealed = 0, votesTotal = 0, missionsCompleted = 0;
 
     for (const e of events) {
-      if (e.type === 'CARD_REVEALED')     cardsRevealed++;
+      if (e.type === 'CARD_REVEALED') {
+        cardsRevealed++;
+        const cardType  = e.payload?.type  || 'Ritual';
+        const cardTitle = e.payload?.title || '';
+        cardTypeCounts[cardType] = (cardTypeCounts[cardType] || 0) + 1;
+        if (cardTitle) cardCounts[cardTitle] = (cardCounts[cardTitle] || 0) + 1;
+      }
       if (e.type === 'VOTE_CAST')         votesTotal++;
       if (e.type === 'MISSION_COMPLETED') missionsCompleted++;
       if (e.type === 'REACTION_SENT') {
@@ -156,6 +164,60 @@ module.exports = {
     return {
       cardsRevealed, durationSec, topReactor, emojiTally,
       votesTotal, missionsCompleted, playerCount: players.length,
+      cardTypeCounts, cardCounts,
+    };
+  },
+
+  /**
+   * Extrai highlights de uma sessão a partir dos eventos brutos.
+   * @param {object[]} events
+   * @param {object}   summary  resultado de computeSummary
+   * @returns {object} highlights
+   */
+  computeHighlights(events = [], summary = {}) {
+    function tsMs(ts) {
+      if (!ts) return 0;
+      if (typeof ts === 'number') return ts;
+      if (typeof ts.toMillis === 'function') return ts.toMillis();
+      if (ts._seconds) return ts._seconds * 1000;
+      return 0;
+    }
+
+    const cardRevealEvents = events
+      .filter(e => e.type === 'CARD_REVEALED')
+      .sort((a, b) => tsMs(a.ts) - tsMs(b.ts));
+
+    const reactionEvents = events.filter(e => e.type === 'REACTION_SENT');
+
+    const firstCard = cardRevealEvents[0]?.payload?.title || null;
+    const lastCard  = cardRevealEvents[cardRevealEvents.length - 1]?.payload?.title || null;
+
+    const mostPlayedType = Object.entries(summary.cardTypeCounts || {})
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+    const topEmoji = Object.entries(summary.emojiTally || {})
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+    // Janela de 30s com maior concentração de reações
+    let peakReactionCount = 0;
+    const WINDOW_MS = 30_000;
+    for (const e of reactionEvents) {
+      const start = tsMs(e.ts);
+      const end   = start + WINDOW_MS;
+      const count = reactionEvents.filter(r => {
+        const t = tsMs(r.ts);
+        return t >= start && t <= end;
+      }).length;
+      if (count > peakReactionCount) peakReactionCount = count;
+    }
+
+    return {
+      firstCard,
+      lastCard,
+      mostPlayedType,
+      topEmoji,
+      peakReactionCount: peakReactionCount || null,
+      peakReactionWindowSec: peakReactionCount > 0 ? 30 : null,
     };
   },
 };
