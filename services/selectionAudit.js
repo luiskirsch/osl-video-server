@@ -25,20 +25,26 @@ function getDb() {
 function _write(type, payload) {
   const db = getDb();
   if (!db) return;
-  db.collection('selection_audit').add({
+  // Usa auditId como doc ID para permitir update posterior com outcomes reais
+  const ref = payload.auditId
+    ? db.collection('selection_audit').doc(payload.auditId)
+    : db.collection('selection_audit').doc();
+  ref.set({
     type,
-    roomId:      payload.roomId      || null,
-    hostUid:     payload.hostUid     || null,
-    groupSize:   payload.groupSize   || 1,
-    mode:        payload.mode        || 'ritual',
-    temporal:    payload.temporal    || null,
-    selections:  payload.selections  || [],
-    starterCard: payload.starterCard || null,
-    wouldDiffer: payload.wouldDiffer ?? null,     // shadow only
-    legacyTop5:  payload.legacyTop5  || null,     // shadow only
-    shadowTop5:  payload.shadowTop5  || null,     // shadow only
-    ts:          Date.now(),
-    expiresAt:   new Date(Date.now() + AUDIT_TTL_DAYS * 86400000),
+    roomId:          payload.roomId          || null,
+    hostUid:         payload.hostUid         || null,
+    groupSize:       payload.groupSize        || 1,
+    mode:            payload.mode             || 'ritual',
+    temporal:        payload.temporal         || null,
+    confidence:      payload.confidence       ?? null,
+    selections:      payload.selections       || [],
+    starterCard:     payload.starterCard      || null,
+    wouldDiffer:     payload.wouldDiffer      ?? null,     // shadow only
+    rankCorrelation: payload.rankCorrelation  ?? null,     // shadow only
+    legacyTop5:      payload.legacyTop5       || null,     // shadow only
+    shadowTop5:      payload.shadowTop5       || null,     // shadow only
+    ts:              Date.now(),
+    expiresAt:       new Date(Date.now() + AUDIT_TTL_DAYS * 86400000),
   }).catch(() => {});
 }
 

@@ -166,18 +166,20 @@ router.get('/ops/selection-audit', requireAdmin, asyncHandler(async (req, res) =
   const records = snap.docs.map(doc => {
     const d = doc.data();
     return {
-      id:          doc.id,
-      type:        d.type,
-      roomId:      d.roomId,
-      groupSize:   d.groupSize,
-      mode:        d.mode,
-      temporal:    d.temporal,
-      wouldDiffer: d.wouldDiffer ?? null,
-      legacyTop5:  d.legacyTop5  || null,
-      shadowTop5:  d.shadowTop5  || null,
-      starterCard: d.starterCard || null,
-      selections:  d.selections  || [],
-      ts:          d.ts,
+      id:              doc.id,
+      type:            d.type,
+      roomId:          d.roomId,
+      groupSize:       d.groupSize,
+      mode:            d.mode,
+      temporal:        d.temporal,
+      confidence:      d.confidence      ?? null,
+      wouldDiffer:     d.wouldDiffer     ?? null,
+      rankCorrelation: d.rankCorrelation ?? null,
+      legacyTop5:      d.legacyTop5      || null,
+      shadowTop5:      d.shadowTop5      || null,
+      starterCard:     d.starterCard     || null,
+      selections:      d.selections      || [],
+      ts:              d.ts,
     };
   });
 
@@ -187,12 +189,41 @@ router.get('/ops/selection-audit', requireAdmin, asyncHandler(async (req, res) =
   const wouldDiffCount = records.filter(r => r.wouldDiffer === true).length;
   const differRate     = shadowCount > 0 ? +(wouldDiffCount / shadowCount).toFixed(3) : null;
 
+  // Confidence média (sinais inferidos — quanto dado existe por decisão)
+  const confRecords   = records.filter(r => r.confidence != null);
+  const avgConfidence = confRecords.length > 0
+    ? +(confRecords.reduce((s, r) => s + r.confidence, 0) / confRecords.length).toFixed(3)
+    : null;
+
+  // Rank correlation média (shadow) — 1 = idêntico, 0 = sem correlação, -1 = inversão
+  const corrRecords        = records.filter(r => r.rankCorrelation != null);
+  const avgRankCorrelation = corrRecords.length > 0
+    ? +(corrRecords.reduce((s, r) => s + r.rankCorrelation, 0) / corrRecords.length).toFixed(3)
+    : null;
+
+  // Top fatores: agrega contribution de todas as reasons[] dos registros
+  const factorTotals = {};
+  records.forEach(r =>
+    (r.selections || []).forEach(s =>
+      (s.reasons || []).forEach(({ factor, contribution }) => {
+        factorTotals[factor] = (factorTotals[factor] || 0) + contribution;
+      })
+    )
+  );
+  const topFactors = Object.entries(factorTotals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([factor, total]) => ({ factor, total: +total.toFixed(3) }));
+
   return res.json({
     ok: true,
     summary: {
       total, shadowCount, appliedCount,
-      wouldDifferCount: wouldDiffCount,
-      differRate,           // taxa em que o sistema teria divergido do deck legado
+      wouldDifferCount:    wouldDiffCount,
+      differRate,
+      avgConfidence,
+      avgRankCorrelation,
+      topFactors,
       note: 'differRate próximo de 0 = sistema quase sempre concordaria com adaptive engine',
     },
     records,

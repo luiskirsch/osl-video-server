@@ -26,12 +26,19 @@
  *   Emitido em engine.contextual_selection_applied / _shadow para GameOps.
  */
 
+const { randomUUID } = require('crypto');
 const logger = require('../logger');
 
 const FLAG         = 'contextual_selection_v1';
 const PRIME_SLOTS  = 3;
 const ABSENCE_DAYS = 14;
 const NOVELTY_CAP  = 5; // cartas vistas ≥ N vezes ganham penalidade de novidade
+
+let _db = null;
+function getDb() {
+  if (!_db) _db = require('./firestore').db;
+  return _db;
+}
 
 const STARTERS = {
   reunion: [
@@ -51,6 +58,22 @@ const STARTERS = {
 
 function _pick(pool, seed) {
   return { ...pool[seed % pool.length], _contextual: true };
+}
+
+// ── Rank correlation (Spearman) ───────────────────────────────────────────────
+//
+// Mede a intensidade da divergência entre dois rankings (legacyTop5 vs shadowTop5).
+// Items ausentes em uma lista recebem rank = len + 1 (penalidade de ausência).
+// Retorna -1..1: 1 = idêntico, 0 = sem correlação, -1 = inversão total.
+
+function _spearman(a, b) {
+  const all = [...new Set([...a, ...b])];
+  const n   = all.length;
+  if (n < 2) return 1.0;
+  const rA = item => { const i = a.indexOf(item); return i >= 0 ? i + 1 : a.length + 1; };
+  const rB = item => { const i = b.indexOf(item); return i >= 0 ? i + 1 : b.length + 1; };
+  const d2  = all.reduce((s, item) => s + (rA(item) - rB(item)) ** 2, 0);
+  return parseFloat((1 - (6 * d2) / (n * (n * n - 1))).toFixed(3));
 }
 
 // ── Confidence authority ───────────────────────────────────────────────────────
@@ -260,6 +283,12 @@ async function applyPriming(deck, context, { roomId, hostUid } = {}) {
     return deck;
   }
 
+  // ID estável para correlacionar o registro de audit com outcomes futuros
+  const auditId = randomUUID();
+
+  // Confiança bruta nos sinais inferidos (0–1, nunca alcança 1)
+  const rawConf = parseFloat((1 - Math.exp(-(context.player?.totalSessions ?? 0) / 10)).toFixed(3));
+
   // Feature flag determina se aplica ou apenas observa
   let enabled = false;
   try {
@@ -271,20 +300,30 @@ async function applyPriming(deck, context, { roomId, hostUid } = {}) {
 
   if (!enabled) {
     // Shadow mode: emite o que TERIA acontecido, sem alterar o deck real
-    const wouldDiffer = result.primed[0]?.title !== deck[0]?.title
-      || !!result.starterTitle;
+    const legacyTop5      = deck.slice(0, 5).map(c => c.title);
+    const shadowTop5      = result.primed.slice(0, 5).map(c => c.title);
+    const wouldDiffer     = result.primed[0]?.title !== deck[0]?.title || !!result.starterTitle;
+    const rankCorrelation = _spearman(legacyTop5, shadowTop5);
 
     events.emit('engine.contextual_selection_shadow', {
-      roomId, hostUid,
-      groupSize:     context.groupSize,
-      mode:          context.mode,
-      temporal:      context.temporal,
-      legacyTop5:    deck.slice(0, 5).map(c => c.title),
-      shadowTop5:    result.primed.slice(0, 5).map(c => c.title),
-      selections:    result.selections,
-      starterCard:   result.starterTitle,
+      auditId, roomId, hostUid,
+      groupSize:       context.groupSize,
+      mode:            context.mode,
+      temporal:        context.temporal,
+      confidence:      rawConf,
+      legacyTop5,
+      shadowTop5,
+      rankCorrelation,
+      selections:      result.selections,
+      starterCard:     result.starterTitle,
       wouldDiffer,
     });
+
+    // Registra auditId na sala para correlação futura com outcomes
+    if (roomId) {
+      const db = getDb();
+      if (db) db.collection('rooms').doc(roomId).update({ lastSelectionAuditId: auditId }).catch(() => {});
+    }
 
     return deck; // deck original — jogador não percebe nada
   }
@@ -292,13 +331,19 @@ async function applyPriming(deck, context, { roomId, hostUid } = {}) {
   // Feature ON: aplica priming e emite
   if (result.selections.length > 0 || result.starterTitle) {
     events.emit('engine.contextual_selection_applied', {
-      roomId, hostUid,
-      groupSize:  context.groupSize,
-      mode:       context.mode,
-      temporal:   context.temporal,
-      selections: result.selections,
+      auditId, roomId, hostUid,
+      groupSize:   context.groupSize,
+      mode:        context.mode,
+      temporal:    context.temporal,
+      confidence:  rawConf,
+      selections:  result.selections,
       starterCard: result.starterTitle,
     });
+
+    if (roomId) {
+      const db = getDb();
+      if (db) db.collection('rooms').doc(roomId).update({ lastSelectionAuditId: auditId }).catch(() => {});
+    }
   }
 
   return result.primed;
