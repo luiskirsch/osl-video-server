@@ -76,7 +76,8 @@ const opsRouter        = require("./routes/ops");
 const liveRouter         = require("./routes/liveService");
 const notificationsRouter = require("./routes/notifications");
 const inviteLinksRouter  = require("./routes/inviteLinks");
-const roomsRouter        = require("./routes/rooms");
+const roomsRouter           = require("./routes/rooms");
+const recurringGroupsRouter = require("./routes/recurringGroups");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -237,6 +238,7 @@ app.use(liveRouter);
 app.use(notificationsRouter);
 app.use(inviteLinksRouter);
 app.use(roomsRouter);
+app.use(recurringGroupsRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---
@@ -285,7 +287,8 @@ const socialGraph  = require("./services/socialGraph");
 const reputation   = require("./services/reputation");
 const liveService    = require("./services/liveService");
 const achievements   = require("./services/achievements");
-const notificationsSvc = require("./services/notifications");
+const notificationsSvc  = require("./services/notifications");
+const recurringGroups   = require("./services/recurringGroups");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -304,6 +307,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   liveService.init();
   achievements.init();
   notificationsSvc.init();
+  recurringGroups.init();
 });
 
 async function gracefullyStopAllEgress() {
@@ -325,6 +329,7 @@ async function shutdown(signal) {
   logWarn("shutdown_started", { signal });
   stopCleanupLoop();
   stopSchedulerLoop();
+  recurringGroups.stop();
 
   await gracefullyStopAllEgress();
 

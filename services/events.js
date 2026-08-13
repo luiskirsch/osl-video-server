@@ -107,6 +107,6 @@ async function _persist(event) {
 // flag.*     → feature flags (criação, atualização)
 // content.*  → cartas e packs (criação, atualização, remoção)
 // engine.*   → game engine (adaptive_applied, etc.)
-// live.*     → live service (daily_ritual_completed, season_started, etc.)
+// live.*     → live service (daily_ritual_completed, session_reminder_sent, etc.)
 
 module.exports = { emit, on, once };
