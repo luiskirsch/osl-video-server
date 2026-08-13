@@ -72,6 +72,7 @@ const cosmeticsRouter  = require("./routes/cosmetics");
 const platformRouter   = require("./routes/platform");
 const contentRouter    = require("./routes/content");
 const sessionRouter    = require("./routes/session");
+const opsRouter        = require("./routes/ops");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -228,6 +229,7 @@ app.use(cosmeticsRouter);
 app.use(platformRouter);
 app.use(contentRouter);
 app.use(sessionRouter);
+app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---
 app.use((req, res) => {

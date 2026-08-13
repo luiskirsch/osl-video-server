@@ -7,7 +7,8 @@ const { asyncHandler, sendError, normalizeUid, normalizeEmail } = require("../ut
 const { ensureDb, getDb } = require("../services/firestore");
 const { requireAdmin, signPayload, generateLicenseCode } = require("../services/auth");
 const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECRET, LICENSE_VALIDITY_MS, ADMIN_SECRET } = require("../config");
-const featureFlags = require("../services/featureFlags");
+const featureFlags  = require("../services/featureFlags");
+const experiments   = require("../services/experiments");
 
 const router = express.Router();
 
@@ -233,6 +234,42 @@ router.delete("/admin/feature-flags/:name", adminLimiter, requireAdmin, asyncHan
 // POST /admin/feature-flags/cache/invalidate — força limpeza de cache (útil em staging)
 router.post("/admin/feature-flags/cache/invalidate", adminLimiter, requireAdmin, (_req, res) => {
   featureFlags.invalidateCache();
+  return res.json({ ok: true });
+});
+
+// ── Experiments (admin) ───────────────────────────────────────────────────────
+
+// GET /admin/experiments — lista todos os experimentos
+router.get("/admin/experiments", adminLimiter, requireAdmin, asyncHandler(async (_req, res) => {
+  const exps = await experiments.listExperiments();
+  return res.json({ ok: true, experiments: exps });
+}));
+
+// PUT /admin/experiments/:name — cria ou atualiza experimento
+// Body: { description, enabled, variants, allocation, overrides, blacklist }
+router.put("/admin/experiments/:name", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  const name = String(req.params.name || "").trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "");
+  if (!name) return sendError(res, 400, "EXPERIMENT_NAME_INVALIDO");
+
+  const { variants } = req.body || {};
+  if (variants && !Array.isArray(variants)) return sendError(res, 400, "VARIANTS_DEVE_SER_ARRAY");
+
+  await experiments.setExperiment(name, req.body || {});
+  return res.json({ ok: true, name });
+}));
+
+// DELETE /admin/experiments/:name — remove experimento
+router.delete("/admin/experiments/:name", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  const name = String(req.params.name || "").trim();
+  if (!name) return sendError(res, 400, "EXPERIMENT_NAME_INVALIDO");
+
+  await experiments.deleteExperiment(name);
+  return res.json({ ok: true, name });
+}));
+
+// POST /admin/experiments/cache/invalidate
+router.post("/admin/experiments/cache/invalidate", adminLimiter, requireAdmin, (_req, res) => {
+  experiments.invalidateCache();
   return res.json({ ok: true });
 });
 
