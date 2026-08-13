@@ -299,6 +299,7 @@ const worldStateSvc     = require("./services/worldState");
 const activityTracker   = require("./services/activityTracker");
 const fragmentEngine    = require("./services/fragmentEngine");
 const compatibilitySvc  = require("./services/compatibility");
+const selectionAudit    = require("./services/selectionAudit");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -322,6 +323,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   activityTracker.init();
   fragmentEngine.init();
   compatibilitySvc.init();
+  selectionAudit.init();
 });
 
 async function gracefullyStopAllEgress() {

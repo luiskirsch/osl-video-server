@@ -4,44 +4,35 @@
  * services/contextualSelection.js — Seleção de conteúdo por contexto presente
  *
  * Pipeline explícito (pré-sessão):
+ *   DECK (Adaptive Engine) → eligibility → hard constraints →
+ *   context scoring → novelty → ranking → prime deck
  *
- *   DECK ORDENADO (Adaptive Engine)
- *         ↓
- *   1. eligibility     — carta válida (título, tipo)
- *         ↓
- *   2. hard constraints — minPlayers, modo incompatível
- *         ↓
- *   3. context scoring — temporal + grupo + mundo + estilo host
- *         ↓
- *   4. novelty         — penaliza cartas muito vistas pelo grupo (DNA)
- *         ↓
- *   5. final ranking   — ordena candidatos
- *         ↓
- *   6. prime deck      — promove top PRIME_SLOTS para posições iniciais
- *         ↓
- *   DECK FINAL (+ carta de abertura se contexto pede)
+ * Shadow Mode (feature flag OFF):
+ *   Pipeline sempre executa. Se flag desabilitado, o deck ORIGINAL é retornado,
+ *   mas o resultado do pipeline é emitido como engine.contextual_selection_shadow.
+ *   Isso permite coletar evidência antes de ativar para produção.
  *
- * Hard constraints são separados de scoring:
- *   uma carta que falha num constraint é excluída da candidatura imediatamente.
- *   uma carta com score baixo permanece no deck — só sai das primeiras posições.
+ * Confidence com autoridade operacional:
+ *   Sinais baseados em playStyle do host são escalados pela confiança
+ *   (derivada de totalSessions). Pouca evidência → influência mínima.
+ *
+ *   < 0.20  → sinal ignorado      (escala 0.00)
+ *   < 0.50  → influência mínima   (escala 0.25)
+ *   < 0.75  → influência normal   (escala 0.75)
+ *   ≥ 0.75  → influência plena    (escala 1.00)
  *
  * Explainability:
- *   cada candidato retorna reasons[] com os fatores que afetaram o score.
- *   emitido via EventBus → GameOps pode auditar "por que esta carta?"
- *
- * Feature flag: contextual_selection_v1
- *   Desabilitado → retorna deck original sem modificação.
- *   Erro interno → fallback silencioso para deck original.
+ *   reasons[] = [{ factor, contribution }] — contribuição numérica por fator
+ *   Emitido em engine.contextual_selection_applied / _shadow para GameOps.
  */
 
-const logger  = require('../logger');
+const logger = require('../logger');
 
-const FLAG       = 'contextual_selection_v1';
+const FLAG         = 'contextual_selection_v1';
 const PRIME_SLOTS  = 3;
 const ABSENCE_DAYS = 14;
-const NOVELTY_WINDOW = 5; // cartas vistas mais de N vezes ganham penalidade de novidade
+const NOVELTY_CAP  = 5; // cartas vistas ≥ N vezes ganham penalidade de novidade
 
-// Pool de cartas de abertura por situação (ephemeral — não persiste no Firestore)
 const STARTERS = {
   reunion: [
     { title: 'Quanto tempo...',    type: 'contexto', text: 'Faz um tempo. Como você está de verdade?' },
@@ -58,117 +49,120 @@ const STARTERS = {
   ],
 };
 
-function _pickStarter(pool, seed) {
+function _pick(pool, seed) {
   return { ...pool[seed % pool.length], _contextual: true };
+}
+
+// ── Confidence authority ───────────────────────────────────────────────────────
+//
+// Escala com que sinais baseados em aprendizado histórico (playStyle) influenciam
+// a seleção. Sinais temporais e de grupo são sempre aplicados em escala plena —
+// eles dependem de fatos objetivos (hora, tamanho do grupo), não de inferência.
+
+function _confidenceScale(totalSessions = 0) {
+  const conf = 1 - Math.exp(-totalSessions / 10); // ~63% em 10 sessões
+  if (conf < 0.20) return 0;     // ignorar sinal: dado insuficiente
+  if (conf < 0.50) return 0.25;  // influência mínima
+  if (conf < 0.75) return 0.75;  // influência normal
+  return 1.0;                    // influência plena
 }
 
 // ── 1. Eligibility ─────────────────────────────────────────────────────────────
 
 function _isEligible(card) {
-  return !!(card && typeof card === 'object' && card.title && String(card.title).trim().length > 0);
+  return !!(card && typeof card === 'object' && card.title?.trim?.());
 }
 
 // ── 2. Hard Constraints ────────────────────────────────────────────────────────
-//
-// Retorna null se a carta passa, ou string com o motivo da exclusão.
-// Hard constraints não são numéricos — são booleans. Fail = carta sai da candidatura.
 
 function _hardConstraint(card, { groupSize, mode }) {
-  // Exige número mínimo de jogadores (campo opcional nas cartas)
   const minPlayers = card.minPlayers || 1;
   if (groupSize < minPlayers) return `min_players_${minPlayers}`;
 
-  // Modo incompatível (e.g., carta marcada como solo-only em sessão de grupo)
-  if (card.modes && Array.isArray(card.modes) && card.modes.length > 0) {
-    if (!card.modes.includes(mode || 'ritual')) return `mode_mismatch_${mode}`;
+  if (card.modes?.length && !card.modes.includes(mode || 'ritual')) {
+    return `mode_mismatch_${mode}`;
   }
-
-  return null; // passa
+  return null;
 }
 
 // ── 3. Context Scoring ─────────────────────────────────────────────────────────
 //
-// Retorna { delta: float, reasons: string[] }
-// delta é somado ao score base (1.0)
+// Retorna { delta, reasons: [{factor, contribution}] }
+// Sinais temporais e de grupo: escala plena
+// Sinais de playStyle do host: escala pela confidence (totalSessions)
 
 function _contextScore(card, context) {
   const { player, temporal, groupSize = 1, world } = context || {};
-  const hour    = temporal?.hourBrazil ?? 12;
-  const weekday = temporal?.dayOfWeek  ?? 3;
-  const type    = (card.type      || '').toLowerCase();
-  const intens  = (card.intensity || 'medium').toLowerCase();
+  const hour      = temporal?.hourBrazil ?? 12;
+  const weekday   = temporal?.dayOfWeek  ?? 3;
+  const type      = (card.type      || '').toLowerCase();
+  const intens    = (card.intensity || 'medium').toLowerCase();
+
+  const styleScale = _confidenceScale(player?.totalSessions ?? 0);
 
   let delta   = 0;
-  const reasons = [];
+  const reasons = []; // { factor, contribution }
 
-  // ── Temporal ─────────────────────────────────────────────────────────────
+  function add(contribution, factor) {
+    delta += contribution;
+    if (Math.abs(contribution) >= 0.01) reasons.push({ factor, contribution: +contribution.toFixed(3) });
+  }
+
+  // ── Temporal (escala plena — fato objetivo) ────────────────────────────────
 
   if (hour >= 6 && hour < 12) {
-    if (intens === 'light')  { delta += 0.30; reasons.push('morning_light_match'); }
-    if (intens === 'deep')   { delta -= 0.20; reasons.push('morning_deep_penalty'); }
+    if (intens === 'light') add( 0.30, 'morning_light_match');
+    if (intens === 'deep')  add(-0.20, 'morning_deep_penalty');
   } else if (hour >= 21 || hour < 4) {
-    if (intens === 'deep')   { delta += 0.25; reasons.push('late_depth_match'); }
-    if (type.includes('revelacao') || type.includes('reflexao')) {
-      delta += 0.20; reasons.push('late_revelation_match');
-    }
+    if (intens === 'deep')  add( 0.25, 'late_depth_match');
+    if (type.includes('revelacao') || type.includes('reflexao')) add(0.20, 'late_revelation_match');
   }
 
   if (weekday === 0 || weekday === 6) {
-    if (type.includes('desafio')) { delta += 0.15; reasons.push('weekend_challenge'); }
-    if (intens === 'light')       { delta += 0.10; reasons.push('weekend_light'); }
+    if (type.includes('desafio')) add(0.15, 'weekend_challenge');
+    if (intens === 'light')       add(0.10, 'weekend_light');
   }
 
-  // ── Grupo ─────────────────────────────────────────────────────────────────
+  // ── Grupo (escala plena) ───────────────────────────────────────────────────
 
   if (groupSize <= 2) {
-    if (type.includes('conexao') || type.includes('revelacao')) {
-      delta += 0.30; reasons.push('duo_intimacy_match');
-    }
-    if (type.includes('desafio') || type.includes('tensao')) {
-      delta -= 0.15; reasons.push('duo_tension_penalty');
-    }
+    if (type.includes('conexao') || type.includes('revelacao')) add( 0.30, 'duo_intimacy_match');
+    if (type.includes('desafio') || type.includes('tensao'))    add(-0.15, 'duo_tension_penalty');
   } else if (groupSize >= 5) {
-    if (type.includes('desafio') || type.includes('conexao')) {
-      delta += 0.25; reasons.push('large_group_energy');
-    }
-    if (intens === 'light') { delta += 0.10; reasons.push('large_group_light'); }
+    if (type.includes('desafio') || type.includes('conexao'))   add( 0.25, 'large_group_energy');
+    if (intens === 'light')                                     add( 0.10, 'large_group_light');
   }
 
-  // ── Primeira sessão ───────────────────────────────────────────────────────
+  // ── Primeira sessão (escala plena — fato objetivo) ────────────────────────
 
   if (player?.isFirstSession) {
-    if (intens === 'light')  { delta += 0.40; reasons.push('first_session_light'); }
-    if (intens === 'deep')   { delta -= 0.30; reasons.push('first_session_deep_penalty'); }
-    if (type.includes('tensao') || type.includes('conflito')) {
-      delta -= 0.20; reasons.push('first_session_conflict_penalty');
-    }
+    if (intens === 'light')                                            add( 0.40, 'first_session_light');
+    if (intens === 'deep')                                             add(-0.30, 'first_session_deep_penalty');
+    if (type.includes('tensao') || type.includes('conflito'))          add(-0.20, 'first_session_conflict_penalty');
   }
 
-  // ── Estilo histórico do host (playStyle) ───────────────────────────────────
+  // ── playStyle do host (confidence-scaled) ─────────────────────────────────
 
   const style = player?.playStyle;
-  if (style) {
+  if (style && styleScale > 0) {
     if (style.profundidade > 0.6
-      && (type.includes('revelacao') || type.includes('reflexao'))) {
-      delta += 0.15; reasons.push('host_depth_preference');
-    }
-    if (style.intensidade < 0.4 && intens === 'light') {
-      delta += 0.15; reasons.push('host_light_preference');
-    }
-    if (style.intensidade > 0.7 && (intens === 'deep' || type.includes('desafio'))) {
-      delta += 0.15; reasons.push('host_intensity_preference');
-    }
-    if (style.humor > 0.6 && (type.includes('desafio') || intens === 'light')) {
-      delta += 0.10; reasons.push('host_humor_preference');
-    }
+        && (type.includes('revelacao') || type.includes('reflexao')))
+      add(0.15 * styleScale, 'host_depth_preference');
+
+    if (style.intensidade < 0.4 && intens === 'light')
+      add(0.15 * styleScale, 'host_light_preference');
+
+    if (style.intensidade > 0.7 && (intens === 'deep' || type.includes('desafio')))
+      add(0.15 * styleScale, 'host_intensity_preference');
+
+    if (style.humor > 0.6 && (type.includes('desafio') || intens === 'light'))
+      add(0.10 * styleScale, 'host_humor_preference');
   }
 
-  // ── World: missão no clímax ────────────────────────────────────────────────
+  // ── World (escala plena) ───────────────────────────────────────────────────
 
   if ((world?.communityProgress ?? 0) >= 0.85) {
-    if (type.includes('comunidade') || type.includes('conexao')) {
-      delta += 0.20; reasons.push('world_mission_climax');
-    }
+    if (type.includes('comunidade') || type.includes('conexao')) add(0.20, 'world_mission_climax');
   }
 
   return { delta, reasons };
@@ -177,115 +171,137 @@ function _contextScore(card, context) {
 // ── 4. Novelty ────────────────────────────────────────────────────────────────
 
 function _noveltyScore(card, dna) {
-  if (!dna?.cardCounts) return { delta: 0, reason: null };
+  if (!dna?.cardCounts) return { contribution: 0, factor: null };
   const count = dna.cardCounts[card.title] || 0;
-  if (count === 0)          return { delta: 0.15,        reason: 'novelty_bonus' };
-  if (count >= NOVELTY_WINDOW) return { delta: -0.20,   reason: 'overplayed_penalty' };
-  return { delta: -(count * 0.04), reason: `seen_${count}x_penalty` };
+  if (count === 0)            return { contribution:  0.15, factor: 'novelty_bonus'      };
+  if (count >= NOVELTY_CAP)   return { contribution: -0.20, factor: 'overplayed_penalty'  };
+  return { contribution: -(count * 0.04), factor: `seen_${count}x_penalty` };
 }
 
-// ── Pipeline completo ─────────────────────────────────────────────────────────
+// ── Pipeline interno ──────────────────────────────────────────────────────────
+
+function _runPipeline(deck, context) {
+  const dna       = context.group?.dna || null;
+  const seed      = Math.floor(Date.now() / 86400000);
+  const mode      = context.mode    || 'ritual';
+  const groupSize = context.groupSize || 1;
+
+  // Carta de abertura especial
+  let starter     = null;
+  let starterTitle = null;
+  const daysSince = context.player?.daysSinceLast ?? null;
+
+  if (context.player?.isFirstSession) {
+    starter = _pick(STARTERS.first_session, seed);
+  } else if (daysSince !== null && daysSince >= ABSENCE_DAYS) {
+    starter = _pick(STARTERS.reunion, seed);
+  } else if ((context.world?.communityProgress ?? 0) >= 0.90 && context.world?.currentMission) {
+    starter = _pick(STARTERS.mission_climax, seed);
+  }
+  if (starter) starterTitle = starter.title;
+
+  // Pipeline nos primeiros WINDOW cards
+  const WINDOW   = Math.min(12, deck.length);
+  const scored   = [];
+  const excluded = new Set();
+
+  for (let i = 0; i < WINDOW; i++) {
+    const card = deck[i];
+    if (!_isEligible(card))                           { excluded.add(i); continue; }
+    const fail = _hardConstraint(card, { groupSize, mode });
+    if (fail)                                         { excluded.add(i); continue; }
+
+    const { delta: ctxDelta, reasons: ctxReasons } = _contextScore(card, context);
+    const { contribution: novC, factor: novF }      = _noveltyScore(card, dna);
+
+    const reasons = [...ctxReasons];
+    if (novF) reasons.push({ factor: novF, contribution: +novC.toFixed(3) });
+
+    scored.push({ card, idx: i, score: 1.0 + ctxDelta + novC, reasons });
+  }
+
+  const promoted    = scored.sort((a, b) => b.score - a.score).slice(0, PRIME_SLOTS);
+  const promotedIdx = new Set(promoted.map(p => p.idx));
+
+  const primed = [
+    ...promoted.sort((a, b) => b.score - a.score).map(p => p.card),
+    ...deck.filter((_, i) => !promotedIdx.has(i) && !excluded.has(i)),
+    ...Array.from(excluded).sort((a, b) => a - b).map(i => deck[i]),
+  ];
+  if (starter) primed.unshift(starter);
+
+  const selections = promoted.map(p => ({
+    title:   p.card.title,
+    score:   +p.score.toFixed(3),
+    reasons: p.reasons,
+  }));
+
+  return { primed, selections, starterTitle };
+}
+
+// ── API pública ───────────────────────────────────────────────────────────────
 
 /**
- * Aplica priming contextual ao deck já ordenado pelo Adaptive Engine.
+ * Aplica priming contextual (ou shadow) ao deck.
  *
- * @param {object[]} deck     Deck pós-adaptiveEngine
- * @param {object}   context  Saída de playerContext.buildSessionContext
- * @param {string}   [roomId] Para log de GameOps
- * @returns {object[]}         Deck com priming contextual
+ * Sempre executa o pipeline. Se feature flag OFF → shadow mode:
+ *   deck original retornado, decisão registrada em engine.contextual_selection_shadow.
+ * Se flag ON → deck primed retornado + engine.contextual_selection_applied emitido.
  */
 async function applyPriming(deck, context, { roomId, hostUid } = {}) {
   if (!deck?.length || !context) return deck;
 
+  // Executa pipeline independente do flag (shadow mode depende disso)
+  let result;
   try {
-    // Feature flag — skip se desabilitado
-    const featureFlags = require('./featureFlags');
-    const enabled = await featureFlags.isEnabled(FLAG, hostUid || null).catch(() => false);
-    if (!enabled) return deck;
-  } catch (_) {
+    result = _runPipeline(deck, context);
+  } catch (err) {
+    logger.warn({ err: err.message, roomId }, 'contextual_selection_pipeline_error');
     return deck;
   }
 
+  // Feature flag determina se aplica ou apenas observa
+  let enabled = false;
   try {
-    const dna      = context.group?.dna || null;
-    const seed     = Math.floor(Date.now() / 86400000);
-    const mode     = context.mode || 'ritual';
-    const groupSize = context.groupSize || 1;
+    const featureFlags = require('./featureFlags');
+    enabled = await featureFlags.isEnabled(FLAG, hostUid || null).catch(() => false);
+  } catch (_) {}
 
-    // 1. Carta de abertura especial
-    let starter = null;
-    const daysSince = context.player?.daysSinceLast ?? null;
+  const events = require('./events');
 
-    if (context.player?.isFirstSession) {
-      starter = _pickStarter(STARTERS.first_session, seed);
-    } else if (daysSince !== null && daysSince >= ABSENCE_DAYS) {
-      starter = _pickStarter(STARTERS.reunion, seed);
-    } else if ((context.world?.communityProgress ?? 0) >= 0.90 && context.world?.currentMission) {
-      starter = _pickStarter(STARTERS.mission_climax, seed);
-    }
+  if (!enabled) {
+    // Shadow mode: emite o que TERIA acontecido, sem alterar o deck real
+    const wouldDiffer = result.primed[0]?.title !== deck[0]?.title
+      || !!result.starterTitle;
 
-    // 2-5. Pipeline nos primeiros ~12 cards (preserva ordem do Adaptive Engine no restante)
-    const WINDOW  = Math.min(12, deck.length);
-    const scored  = [];
-    const excluded = new Set(); // índices excluídos por hard constraint
+    events.emit('engine.contextual_selection_shadow', {
+      roomId, hostUid,
+      groupSize:     context.groupSize,
+      mode:          context.mode,
+      temporal:      context.temporal,
+      legacyTop5:    deck.slice(0, 5).map(c => c.title),
+      shadowTop5:    result.primed.slice(0, 5).map(c => c.title),
+      selections:    result.selections,
+      starterCard:   result.starterTitle,
+      wouldDiffer,
+    });
 
-    for (let i = 0; i < WINDOW; i++) {
-      const card = deck[i];
-
-      if (!_isEligible(card)) { excluded.add(i); continue; }
-
-      const constraint = _hardConstraint(card, { groupSize, mode });
-      if (constraint) { excluded.add(i); continue; }
-
-      const { delta: ctxDelta, reasons: ctxReasons } = _contextScore(card, context);
-      const { delta: novDelta, reason: novReason }    = _noveltyScore(card, dna);
-
-      const noveltyReasons = novReason ? [novReason] : [];
-      const allReasons     = [...ctxReasons, ...noveltyReasons];
-
-      scored.push({
-        card,
-        idx:     i,
-        score:   1.0 + ctxDelta + novDelta,
-        reasons: allReasons,
-      });
-    }
-
-    // 5. Final ranking — top PRIME_SLOTS candidatos
-    const promoted    = scored.sort((a, b) => b.score - a.score).slice(0, PRIME_SLOTS);
-    const promotedIdx = new Set(promoted.map(p => p.idx));
-
-    // 6. Reconstrói deck: promovidos no topo, restante na ordem original
-    const primed = [
-      ...promoted.sort((a, b) => b.score - a.score).map(p => p.card),
-      ...deck.filter((_, idx) => !promotedIdx.has(idx) && !excluded.has(idx)),
-      ...Array.from(excluded).sort().map(idx => deck[idx]), // excluídos no final
-    ];
-
-    // Injeta starter em posição 0 (após priming)
-    if (starter) primed.unshift(starter);
-
-    // Emite para GameOps (assíncrono, não bloqueia)
-    if (promoted.length > 0) {
-      const events = require('./events');
-      events.emit('engine.contextual_selection_applied', {
-        roomId, hostUid, groupSize, mode,
-        temporal: context.temporal,
-        selections: promoted.map(p => ({
-          title:   p.card.title,
-          score:   parseFloat(p.score.toFixed(3)),
-          reasons: p.reasons,
-        })),
-        starterInjected: !!starter,
-      });
-    }
-
-    return primed;
-
-  } catch (err) {
-    logger.warn({ err: err.message, roomId }, 'contextual_selection_failed_fallback');
-    return deck; // fallback: deck original
+    return deck; // deck original — jogador não percebe nada
   }
+
+  // Feature ON: aplica priming e emite
+  if (result.selections.length > 0 || result.starterTitle) {
+    events.emit('engine.contextual_selection_applied', {
+      roomId, hostUid,
+      groupSize:  context.groupSize,
+      mode:       context.mode,
+      temporal:   context.temporal,
+      selections: result.selections,
+      starterCard: result.starterTitle,
+    });
+  }
+
+  return result.primed;
 }
 
-module.exports = { applyPriming, _contextScore, _hardConstraint };
+module.exports = { applyPriming, _contextScore, _hardConstraint, _confidenceScale };

@@ -139,4 +139,64 @@ router.get('/ops/live', requireAdmin, asyncHandler(async (_req, res) => {
   });
 }));
 
+// ── GET /ops/selection-audit — Por que esta carta? ────────────────────────────
+//
+// Últimas N decisões do Contextual Selection (shadow + applied).
+// Mostra score, reasons[] com contribuições numéricas e se teria divergido do deck legado.
+// Habilita rollout científico: ative contextual_selection_v1 quando os dados derem confiança.
+//
+// ?limit=20  — máximo de 100 registros
+// ?type=shadow|applied — filtro opcional
+
+router.get('/ops/selection-audit', requireAdmin, asyncHandler(async (req, res) => {
+  const db = require('../services/firestore').db;
+  if (!db) return res.status(503).json({ ok: false, error: 'DB_INDISPONIVEL' });
+
+  const limit     = Math.min(Number(req.query.limit || 20), 100);
+  const typeFilter = req.query.type || null;
+
+  let query = db.collection('selection_audit').orderBy('ts', 'desc').limit(limit);
+  if (typeFilter === 'shadow' || typeFilter === 'applied') {
+    query = query.where('type', '==', typeFilter);
+  }
+
+  const snap = await query.get().catch(() => null);
+  if (!snap) return res.status(503).json({ ok: false, error: 'QUERY_FAILED' });
+
+  const records = snap.docs.map(doc => {
+    const d = doc.data();
+    return {
+      id:          doc.id,
+      type:        d.type,
+      roomId:      d.roomId,
+      groupSize:   d.groupSize,
+      mode:        d.mode,
+      temporal:    d.temporal,
+      wouldDiffer: d.wouldDiffer ?? null,
+      legacyTop5:  d.legacyTop5  || null,
+      shadowTop5:  d.shadowTop5  || null,
+      starterCard: d.starterCard || null,
+      selections:  d.selections  || [],
+      ts:          d.ts,
+    };
+  });
+
+  const total          = records.length;
+  const shadowCount    = records.filter(r => r.type === 'shadow').length;
+  const appliedCount   = records.filter(r => r.type === 'applied').length;
+  const wouldDiffCount = records.filter(r => r.wouldDiffer === true).length;
+  const differRate     = shadowCount > 0 ? +(wouldDiffCount / shadowCount).toFixed(3) : null;
+
+  return res.json({
+    ok: true,
+    summary: {
+      total, shadowCount, appliedCount,
+      wouldDifferCount: wouldDiffCount,
+      differRate,           // taxa em que o sistema teria divergido do deck legado
+      note: 'differRate próximo de 0 = sistema quase sempre concordaria com adaptive engine',
+    },
+    records,
+  });
+}));
+
 module.exports = router;
