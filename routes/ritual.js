@@ -1,5 +1,4 @@
 const express = require("express");
-const crypto  = require("crypto");
 const admin   = require("firebase-admin");
 const { getDb }                         = require("../services/firestore");
 const { verifyHostToken }               = require("../services/auth");
@@ -16,65 +15,10 @@ const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
 const events                            = require("../services/events");
 const entitlements                      = require("../services/entitlements");
+const { GameEngine }                    = require("../game/engine");
 
 const router = express.Router();
-
-function cryptoShuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const idx = crypto.randomBytes(4).readUInt32BE(0) % (i + 1);
-    [a[i], a[idx]] = [a[idx], a[i]];
-  }
-  return a;
-}
-
-function pickRandom(arr) {
-  if (!arr?.length) return null;
-  return arr[crypto.randomBytes(4).readUInt32BE(0) % arr.length];
-}
-
-function prepareEffect(effect, players) {
-  if (!effect) return null;
-  const base = {
-    id: crypto.randomBytes(6).toString("hex"),
-    type: effect.type,
-    phase: effect.phase || "battlecry",
-    label: effect.label || null,
-    params: {},
-    votes: {},
-    resolved: false
-  };
-  switch (effect.type) {
-    case "force_player": {
-      if (effect.target === "two_random") {
-        const shuffled = cryptoShuffle(players.filter(p => p.id));
-        const t1 = shuffled[0], t2 = shuffled[1] || shuffled[0];
-        base.params = { targetId: t1?.id || "", targetName: t1?.name || "Jogador", targetId2: t2?.id || t1?.id || "", targetName2: t2?.name || t1?.name || "Jogador" };
-      } else {
-        const pool = players.length > 1 ? players : players;
-        const t = pickRandom(pool);
-        base.params = { targetId: t?.id || "", targetName: t?.name || "Jogador" };
-      }
-      break;
-    }
-    case "set_timer":  { base.params = { duration: effect.duration || 60, startedAt: Date.now() }; break; }
-    case "vote":       { base.params = { question: effect.question || "Vote:", options: effect.options || players.map(p => p.name || "Jogador") }; break; }
-    case "next_category":
-    case "chain_card": { base.params = { category: effect.category || "" }; break; }
-    case "give_xp":    { base.params = { amount: effect.amount || 10 }; break; }
-  }
-  return base;
-}
-
-function prepareCard(card, players, effectsMap = {}) {
-  if (!card) return { battlecry: null, deathrattle: null };
-  const key = card._origTitle || card.title;
-  const effects = card.effects || effectsMap[key] || {};
-  return {
-    battlecry:   effects.battlecry   ? prepareEffect({ ...effects.battlecry,   phase: "battlecry" },   players) : null,
-    deathrattle: effects.deathrattle ? prepareEffect({ ...effects.deathrattle, phase: "deathrattle" }, players) : null,
-  };
-}
+const engine = new GameEngine('ritual');
 
 async function buildVerifiedDeck(db, firebaseIdToken, players) {
   // Resolve uid do host a partir do Firebase ID token
@@ -91,10 +35,9 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
   const unlockedPacks = ent?.unlockedPacks ?? [];
 
   // Conteúdo via ContentEngine (Firestore > fallback estático, cached 5min)
-  const [basicCards, packCards, effectsMap] = await Promise.all([
+  const [basicCards, packCards] = await Promise.all([
     contentEngine.getBasicCards(),
     contentEngine.getCardsByPackIds(unlockedPacks),
-    contentEngine.getCardEffectsMap(),
   ]);
 
   // Cartas customizadas dos jogadores (carregadas do Firestore — não do cliente)
@@ -104,33 +47,14 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
       try {
         const snap = await db.collection("users").doc(p.userId).collection("decks").doc(p.activeDeckId).get();
         if (snap.exists) {
-          const cards = (snap.data().cards || []).map(sanitizeCard).filter(Boolean).slice(0, 50);
+          const cards = (snap.data().cards || []).map(c => engine.sanitizeCard(c)).filter(Boolean).slice(0, 50);
           customContributions.push(...cards);
         }
       } catch (_) {}
     }
   }
 
-  if (customContributions.length > 0) {
-    const allCards = [...basicCards, ...customContributions];
-    const seen = new Set();
-    return { deck: cryptoShuffle(allCards.filter(c => { if (seen.has(c.title)) return false; seen.add(c.title); return true; })), effectsMap };
-  }
-
-  return { deck: cryptoShuffle([...basicCards, ...packCards]), effectsMap };
-}
-
-function sanitizeCard(c) {
-  if (!c || typeof c !== "object") return null;
-  return {
-    title:      String(c.title      || "").slice(0, 200),
-    type:       String(c.type       || "Ritual").slice(0, 50),
-    text:       String(c.text       || "").slice(0, 2000),
-    rule:       c.rule      ? String(c.rule).slice(0, 1000)      : undefined,
-    subrule:    c.subrule   ? String(c.subrule).slice(0, 1000)   : undefined,
-    phrase:     c.phrase    ? String(c.phrase).slice(0, 500)     : undefined,
-    _origTitle: c._origTitle ? String(c._origTitle).slice(0, 200) : undefined,
-  };
+  return engine.buildDeck({ basicCards, packCards, customContributions });
 }
 
 function sanitizePlayers(players) {
@@ -177,11 +101,10 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const players = sanitizePlayers(rawPlayers);
-  const [{ deck, effectsMap: _effectsMap }, hostUid] = await Promise.all([
+  const [{ deck }, hostUid] = await Promise.all([
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),
   ]);
-  void _effectsMap;  // effectsMap é carregado pelo ContentEngine no next-card
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -254,7 +177,7 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
   const card = deck.shift();
   const cardsRevealedCount = (data.cardsRevealedCount || 0) + 1;
   const effectsMap = await contentEngine.getCardEffectsMap();
-  const { battlecry, deathrattle } = prepareCard(card, players, effectsMap);
+  const { battlecry, deathrattle } = engine.prepareCard(card, players, effectsMap);
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const currentSessionId = data.sessionId || null;
@@ -639,44 +562,11 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
     sessRef.collection("events").get(),
   ]).catch(() => [null, null]);
 
-  const sessData      = sessSnap?.exists ? sessSnap.data() : {};
-  const createdMs     = sessData.createdAt?.toMillis?.() || Date.now();
-  const durationSec   = Math.round((Date.now() - createdMs) / 1000);
+  const sessData       = sessSnap?.exists ? sessSnap.data() : {};
+  const createdMs      = sessData.createdAt?.toMillis?.() || Date.now();
   const sessionPlayers = sessData.players || [];
-
-  const reactionsByActor = {};
-  const emojiTally       = {};
-  let cardsRevealed = 0, votesTotal = 0, missionsCompleted = 0;
-
-  for (const doc of (eventsSnap?.docs || [])) {
-    const e = doc.data();
-    if (e.type === "CARD_REVEALED")        cardsRevealed++;
-    if (e.type === "VOTE_CAST")            votesTotal++;
-    if (e.type === "MISSION_COMPLETED")    missionsCompleted++;
-    if (e.type === "REACTION_SENT") {
-      if (e.actor) reactionsByActor[e.actor] = (reactionsByActor[e.actor] || 0) + 1;
-      const emoji = e.payload?.emoji;
-      if (emoji) emojiTally[emoji] = (emojiTally[emoji] || 0) + 1;
-    }
-  }
-
-  const topReactorEntry = Object.entries(reactionsByActor).sort((a, b) => b[1] - a[1])[0];
-  let topReactor = null;
-  if (topReactorEntry) {
-    const [uid, count] = topReactorEntry;
-    const match = sessionPlayers.find(p => p.userId === uid || p.playerId === uid);
-    if (match) topReactor = { nickname: match.nickname, count };
-  }
-
-  const summary = {
-    cardsRevealed,
-    durationSec,
-    topReactor,
-    emojiTally,
-    votesTotal,
-    missionsCompleted,
-    playerCount: sessionPlayers.length,
-  };
+  const rawEvents      = eventsSnap?.docs?.map(d => d.data()) || [];
+  const summary        = engine.computeSummary(rawEvents, { players: sessionPlayers, createdMs });
 
   await Promise.all([
     sessRef.collection("events").add({ type: "GAME_ENDED", ts: now, actor: "server", payload: {} }),
@@ -689,7 +579,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
     playerCount: sessionPlayers.length,
   }, { persist: true });
 
-  logInfo("session_ended", { roomId, sessionId, cardsRevealed, durationSec });
+  logInfo("session_ended", { roomId, sessionId, cardsRevealed: summary.cardsRevealed, durationSec: summary.durationSec });
   return res.json({ ok: true, summary });
 }));
 
