@@ -80,6 +80,7 @@ const roomsRouter           = require("./routes/rooms");
 const recurringGroupsRouter = require("./routes/recurringGroups");
 const hubRouter             = require("./routes/hub");
 const quickRitualRouter     = require("./routes/quickRitual");
+const discoveriesRouter     = require("./routes/discoveries");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -243,6 +244,7 @@ app.use(roomsRouter);
 app.use(recurringGroupsRouter);
 app.use(hubRouter);
 app.use(quickRitualRouter);
+app.use(discoveriesRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---

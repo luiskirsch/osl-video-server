@@ -145,6 +145,8 @@ async function _updateReputations(sessionId, roomId, summary, players) {
         'reputation.topReactorCount':    admin.firestore.FieldValue.increment(isTopReactor ? 1 : 0),
         'reputation.lastUpdatedAt':      now,
         'reputation.lastSessionId':      sessionId,
+        'lastRoomId':                    roomId,
+        'lastSessionAt':                 now,
       });
 
       // Evento para o cliente animar ganho de XP

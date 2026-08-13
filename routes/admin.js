@@ -11,6 +11,7 @@ const featureFlags  = require("../services/featureFlags");
 const experiments   = require("../services/experiments");
 const liveService   = require("../services/liveService");
 const worldState    = require("../services/worldState");
+const discoveriesSvc = require("../services/discoveries");
 
 const router = express.Router();
 
@@ -431,6 +432,31 @@ router.put('/admin/world/missions/:id', requireAdmin, asyncHandler(async (req, r
   await worldState.updateMission(id, patch);
   worldState.invalidate();
   logInfo('admin_mission_updated', { id });
+  return res.json({ ok: true, id });
+}));
+
+// ── Discoveries (Rumores) ─────────────────────────────────────────────────────
+
+router.get('/admin/discoveries', requireAdmin, asyncHandler(async (_req, res) => {
+  const list = await discoveriesSvc.listDiscoveries();
+  return res.json({ ok: true, discoveries: list });
+}));
+
+router.post('/admin/discoveries', requireAdmin, asyncHandler(async (req, res) => {
+  try {
+    await discoveriesSvc.createDiscovery(req.body || {});
+    logInfo('admin_discovery_created', { id: req.body?.id });
+    return res.status(201).json({ ok: true, id: req.body?.id });
+  } catch (e) {
+    if (e.code === 400) return sendError(res, 400, e.message);
+    throw e;
+  }
+}));
+
+router.put('/admin/discoveries/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  await discoveriesSvc.updateDiscovery(id, req.body || {});
+  logInfo('admin_discovery_updated', { id });
   return res.json({ ok: true, id });
 }));
 
