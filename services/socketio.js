@@ -60,6 +60,9 @@ function initSocketIo(httpServer, allowedOrigins) {
     socket.join(socket.uid);
     logInfo("socket_connected", { uid: socket.uid });
 
+    // Notifica amigos que este usuário está online
+    _notifyFriendsOnline(socket.uid).catch(() => {});
+
     // Catch-up: se há rodada ativa para este uid, re-emite round_started com tempo restante
     try {
       const { getRoundCatchupForUser } = require("./encontroService");
@@ -116,12 +119,63 @@ function initSocketIo(httpServer, allowedOrigins) {
 
     socket.on("disconnect", () => {
       logInfo("socket_disconnected", { uid: socket.uid });
+      // Sem notificação de offline imediata — evita noise de reconexões.
+      // A presença decai naturalmente via lastSeenAt (TTL 5 min).
     });
+  });
+
+  // ── World updates em tempo real ───────────────────────────────────────────
+
+  const events = require("./events");
+
+  // Missão comunitária completada → broadcast para todos os conectados
+  events.on("world.mission_completed", async ({ payload }) => {
+    try {
+      const worldState = require("./worldState");
+      const world = await worldState.getWorldState();
+      _io.emit("world:update", { world, reason: "mission_completed", ...payload });
+      logInfo("socket_world_update_broadcast", { reason: "mission_completed", sockets: _io.sockets.size });
+    } catch (err) {
+      logError("socket_world_update_error", err);
+    }
+  });
+
+  // Ritual diário completado → atualiza totalDailyParticipants para todos
+  events.on("live.daily_ritual_completed", async ({ payload }) => {
+    try {
+      const worldState = require("./worldState");
+      const world = await worldState.getWorldState();
+      if (world) _io.emit("world:update", { world, reason: "daily_ritual_completed" });
+    } catch (_) {}
   });
 
   return _io;
 }
 
+/**
+ * Emite social:friend_online para as conexões do usuário que acabou de conectar.
+ * Lazy: carrega socialGraph via require para evitar circular dep no boot.
+ *
+ * Apenas top 10 conexões (as mais frequentes) — sem spam.
+ */
+async function _notifyFriendsOnline(uid) {
+  if (!_io) return;
+  const socialGraph = require("./socialGraph");
+  const connections = await socialGraph.getConnections(uid, 10);
+  for (const conn of connections) {
+    _io.to(conn.uid).emit("social:friend_online", { uid });
+  }
+}
+
+/**
+ * Emite um evento para um usuário específico (por uid).
+ * Usado por outros serviços para push de notificações em tempo real.
+ */
+function emitToUser(uid, event, data) {
+  if (!_io) return;
+  _io.to(uid).emit(event, data);
+}
+
 function getIo() { return _io; }
 
-module.exports = { initSocketIo, getIo };
+module.exports = { initSocketIo, getIo, emitToUser };

@@ -44,6 +44,14 @@ async function createNotification(uid, { type, title, body, data = {} }) {
       createdAt: new Date(),
     });
 
+  // Push em tempo real via socket.io (fire-and-forget)
+  try {
+    const { emitToUser } = require('./socketio');
+    emitToUser(uid, 'notification:new', {
+      id: ref.id, type, title, body, data,
+    });
+  } catch (_) {}
+
   return ref.id;
 }
 

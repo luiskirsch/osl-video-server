@@ -32,6 +32,10 @@ const { logInfo }                 = require('../logger');
 const router = express.Router();
 const engine = new GameEngine('ritual');
 
+// ID do pack especial de cartas Duo — cartas de conexão 1:1 entre dois jogadores.
+// Admin cria via POST /content/packs com id: 'duo' e cards de intimidade/descoberta.
+// Se o pack não existir, o fallback é o pool básico (degradação graciosa).
+const DUO_PACK_ID      = 'duo';
 const QUICK_CARD_COUNT = 4;
 const DUO_CARD_COUNT   = 5;
 
@@ -48,10 +52,10 @@ async function buildQuickDeck(count) {
     liveService.getDailyRitual(),
   ]);
 
-  const basicCards  = basicRes.status  === 'fulfilled' ? (basicRes.value  || []) : [];
-  const dailyRitual = dailyRes.status  === 'fulfilled' ? dailyRes.value           : null;
+  const basicCards  = basicRes.status === 'fulfilled' ? (basicRes.value || []) : [];
+  const dailyRitual = dailyRes.status === 'fulfilled' ? dailyRes.value          : null;
 
-  // Carta do ritual do dia entra primeiro (garante presença no deck curto)
+  // Carta do ritual do dia entra primeiro
   const dailyCard = dailyRitual?.cardTitle
     ? basicCards.find(c => c.title === dailyRitual.cardTitle) || null
     : null;
@@ -60,7 +64,38 @@ async function buildQuickDeck(count) {
     ? [dailyCard, ...basicCards.filter(c => c.title !== dailyCard.title)]
     : [...basicCards];
 
-  // Shuffle Fisher-Yates (apenas a parte pós-daily)
+  const offset = dailyCard ? 1 : 0;
+  for (let i = pool.length - 1; i > offset; i--) {
+    const j = offset + Math.floor(Math.random() * (i - offset + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+
+  return pool.slice(0, count).map(c => engine.sanitizeCard(c)).filter(Boolean);
+}
+
+async function buildDuoDeck(count) {
+  // Tenta carregar pack específico de cartas Duo (conexão 1:1)
+  const [duoRes, basicRes, dailyRes] = await Promise.allSettled([
+    contentEngine.getCardsByPackIds([DUO_PACK_ID]),
+    contentEngine.getBasicCards(),
+    liveService.getDailyRitual(),
+  ]);
+
+  const duoCards   = duoRes.status   === 'fulfilled' ? (duoRes.value   || []) : [];
+  const basicCards = basicRes.status === 'fulfilled' ? (basicRes.value || []) : [];
+  const daily      = dailyRes.status === 'fulfilled' ? dailyRes.value          : null;
+
+  // Pool: pack Duo primeiro (cartas especiais de conexão), depois básicas como fallback
+  const duoPool   = duoCards.length ? duoCards : basicCards;
+  const dailyCard = daily?.cardTitle
+    ? (duoPool.find(c => c.title === daily.cardTitle) || basicCards.find(c => c.title === daily.cardTitle) || null)
+    : null;
+
+  const pool = dailyCard
+    ? [dailyCard, ...duoPool.filter(c => c.title !== dailyCard.title)]
+    : [...duoPool];
+
+  // Shuffle (pós daily)
   const offset = dailyCard ? 1 : 0;
   for (let i = pool.length - 1; i > offset; i--) {
     const j = offset + Math.floor(Math.random() * (i - offset + 1));
@@ -93,8 +128,8 @@ router.post('/game/quick-ritual/start', asyncHandler(async (req, res) => {
   let hostToken = null;
   try { hostToken = signHostToken(roomId); } catch (_) {}
 
-  // Deck curto
-  const deck = await buildQuickDeck(cardCount);
+  // Deck curto — Duo usa pack especial de cartas de conexão 1:1
+  const deck = await (mode === 'duo' ? buildDuoDeck(cardCount) : buildQuickDeck(cardCount));
 
   // Firestore: sala + ritual state + sessão inicial
   const db = getDb();

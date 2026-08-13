@@ -14,6 +14,7 @@
 const express      = require('express');
 const { asyncHandler } = require('../utils');
 const liveService  = require('../services/liveService');
+const worldState   = require('../services/worldState');
 
 const router = express.Router();
 
@@ -36,6 +37,15 @@ router.get('/live/events', asyncHandler(async (_req, res) => {
 router.get('/live/daily', asyncHandler(async (_req, res) => {
   const daily = await liveService.getDailyRitual();
   return res.json({ ok: true, daily });
+}));
+
+// ── GET /live/world ───────────────────────────────────────────────────────────
+// Público — world state global (communityProgress, missão, conteúdo desbloqueado).
+// Usado pelo cliente pré-login para mostrar o "mundo está vivo" na tela inicial.
+
+router.get('/live/world', asyncHandler(async (_req, res) => {
+  const world = await worldState.getWorldState().catch(() => null);
+  return res.json({ ok: true, world });
 }));
 
 module.exports = router;
