@@ -7,6 +7,7 @@ const { asyncHandler, sendError, normalizeUid, normalizeEmail } = require("../ut
 const { ensureDb, getDb } = require("../services/firestore");
 const { requireAdmin, signPayload, generateLicenseCode } = require("../services/auth");
 const { PRODUCT_ID, PRODUCT_PRICE, PRODUCT_CURRENCY, PRODUCT_TITLE, LICENSE_SECRET, LICENSE_VALIDITY_MS, ADMIN_SECRET } = require("../config");
+const featureFlags = require("../services/featureFlags");
 
 const router = express.Router();
 
@@ -201,6 +202,39 @@ const ADMIN_CSP = [
   "frame-src 'none'",
   "frame-ancestors 'none'"
 ].join("; ");
+
+// ── Feature Flags (admin) ─────────────────────────────────────────────────────
+
+// GET /admin/feature-flags — lista todos os flags
+router.get("/admin/feature-flags", adminLimiter, requireAdmin, asyncHandler(async (_req, res) => {
+  const flags = await featureFlags.listFlags();
+  return res.json({ ok: true, flags });
+}));
+
+// PUT /admin/feature-flags/:name — cria ou atualiza um flag
+// Body: { enabled, rollout, whitelist, blacklist, description }
+router.put("/admin/feature-flags/:name", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  const name = String(req.params.name || "").trim().toLowerCase().replace(/[^a-z0-9_.-]/g, "");
+  if (!name) return sendError(res, 400, "FLAG_NAME_INVALIDO");
+
+  await featureFlags.setFlag(name, req.body || {});
+  return res.json({ ok: true, name });
+}));
+
+// DELETE /admin/feature-flags/:name — remove um flag
+router.delete("/admin/feature-flags/:name", adminLimiter, requireAdmin, asyncHandler(async (req, res) => {
+  const name = String(req.params.name || "").trim();
+  if (!name) return sendError(res, 400, "FLAG_NAME_INVALIDO");
+
+  await featureFlags.deleteFlag(name);
+  return res.json({ ok: true, name });
+}));
+
+// POST /admin/feature-flags/cache/invalidate — força limpeza de cache (útil em staging)
+router.post("/admin/feature-flags/cache/invalidate", adminLimiter, requireAdmin, (_req, res) => {
+  featureFlags.invalidateCache();
+  return res.json({ ok: true });
+});
 
 // GET /system-core — serve o painel admin.
 // adminLimiter (3 req/10min) protege contra varredura de URL.

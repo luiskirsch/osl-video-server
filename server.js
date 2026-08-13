@@ -69,6 +69,7 @@ const ritualRouter    = require("./routes/ritual");
 const analyticsRouter  = require("./routes/analytics");
 const socialRouter     = require("./routes/social");
 const cosmeticsRouter  = require("./routes/cosmetics");
+const platformRouter   = require("./routes/platform");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -222,6 +223,7 @@ app.use(auditLog("ritual"), ritualRouter);
 app.use(analyticsRouter);
 app.use(socialRouter);
 app.use(cosmeticsRouter);
+app.use(platformRouter);
 
 // --- 404 ---
 app.use((req, res) => {

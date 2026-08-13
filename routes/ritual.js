@@ -13,6 +13,7 @@ function resolvedPlayerName(roomId, uid, fallback) {
 const { OSL_CARD_EFFECTS, OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_PACK_IDS, levelFromXP } = require("../data/cards");
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
+const events                            = require("../services/events");
 
 const router = express.Router();
 
@@ -218,6 +219,13 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi iniciado.", createdAt: now });
   await db.collection("salas").doc(roomId).update({ arenaActive: true, currentSessionId: sessionId, updatedAt: now });
 
+  events.emit('ritual.started', {
+    roomId, sessionId, hostUid: hostUid || null,
+    deckSize: deck.length,
+    playerCount: players.length,
+    players: players.map(p => ({ id: p.id, name: p.name })),
+  }, { persist: true });
+
   logInfo("ritual_started", { roomId, deckSize: deck.length, sessionId });
   return res.json({ ok: true, deckSize: deck.length, sessionId });
 }));
@@ -281,6 +289,18 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
       gameState: { cardsRevealedCount, currentCardTitle: card.title || null, phase: "playing" },
     }).catch(() => {});
   }
+
+  events.emit('ritual.card_revealed', {
+    roomId,
+    sessionId: currentSessionId,
+    cardTitle:  card.title  || null,
+    cardType:   card.type   || null,
+    cardId:     card.id     || null,
+    hasEffect:  !!battlecry,
+    effectType: battlecry?.type || null,
+    cardsRevealedCount,
+    remaining: deck.length,
+  }, { persist: true });
 
   logInfo("ritual_next_card", { roomId, cardTitle: card.title, cardsRevealedCount, remaining: deck.length });
   return res.json({ ok: true, card, cardsRevealedCount, remaining: deck.length });
@@ -399,6 +419,7 @@ router.post("/game/ritual/vote", asyncHandler(async (req, res) => {
   } catch (_) { /* documento não existe ainda — ignora silenciosamente */ }
 
   logSessionEvent(db, roomId, sessionId, "VOTE_CAST", uid, { option: safeOption });
+  events.emit('ritual.vote_cast', { roomId, sessionId, uid, option: safeOption });
 
   return res.json({ ok: true });
 }));
@@ -425,6 +446,7 @@ router.post("/game/ritual/react", asyncHandler(async (req, res) => {
   }, { merge: true });
 
   logSessionEvent(db, roomId, sessionId, "REACTION_SENT", uid, { emoji: safeEmoji, name: safeName });
+  events.emit('ritual.reaction_sent', { roomId, sessionId, uid, emoji: safeEmoji });
 
   return res.json({ ok: true, ts });
 }));
@@ -661,6 +683,11 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
     sessRef.update({ status: "ended", endedAt: now, summary }),
     db.collection("salas").doc(roomId).update({ currentSessionId: null }).catch(() => {}),
   ]).catch(() => {});
+
+  events.emit('session.ended', {
+    roomId, sessionId, summary,
+    playerCount: sessionPlayers.length,
+  }, { persist: true });
 
   logInfo("session_ended", { roomId, sessionId, cardsRevealed, durationSec });
   return res.json({ ok: true, summary });
