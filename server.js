@@ -76,6 +76,7 @@ const opsRouter        = require("./routes/ops");
 const liveRouter         = require("./routes/liveService");
 const notificationsRouter = require("./routes/notifications");
 const inviteLinksRouter  = require("./routes/inviteLinks");
+const roomsRouter        = require("./routes/rooms");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -235,6 +236,7 @@ app.use(sessionRouter);
 app.use(liveRouter);
 app.use(notificationsRouter);
 app.use(inviteLinksRouter);
+app.use(roomsRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---

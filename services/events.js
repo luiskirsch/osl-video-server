@@ -103,7 +103,7 @@ async function _persist(event) {
 // room.*     → ciclo de vida da sala (criação, join, leave, close)
 // session.*  → sessão de jogo (início, fim, jogadores)
 // payment.*  → pagamentos (aprovado, estornado)
-// user.*     → perfil do jogador (xp, moedas, conquistas)
+// user.*     → perfil do jogador (xp_awarded, achievement_unlocked, moedas)
 // flag.*     → feature flags (criação, atualização)
 // content.*  → cartas e packs (criação, atualização, remoção)
 // engine.*   → game engine (adaptive_applied, etc.)

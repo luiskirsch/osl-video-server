@@ -128,8 +128,17 @@ async function _updateReputations(sessionId, roomId, summary, players) {
       + (missionsDone * 15)
       + (isLongSession ? 5 : 0);
 
+    // XP: escala diferente da reputação — alimenta o sistema de níveis (levelFromXP)
+    const xpDelta = 50
+      + Math.min((summary.cardsRevealed || 0) * 2, 100)
+      + (isTopReactor ? 25 : 0)
+      + (voted        ? 15 : 0)
+      + (missionsDone * 30)
+      + (isLongSession ? 25 : 0);
+
     try {
       await db.collection('users').doc(uid).update({
+        'xp':                            admin.firestore.FieldValue.increment(xpDelta),
         'reputation.score':              admin.firestore.FieldValue.increment(delta),
         'reputation.totalSessions':      admin.firestore.FieldValue.increment(1),
         'reputation.totalReactions':     admin.firestore.FieldValue.increment(reactions),
@@ -137,6 +146,10 @@ async function _updateReputations(sessionId, roomId, summary, players) {
         'reputation.lastUpdatedAt':      now,
         'reputation.lastSessionId':      sessionId,
       });
+
+      // Evento para o cliente animar ganho de XP
+      const events = require('./events');
+      events.emit('user.xp_awarded', { uid, xpDelta, sessionId, roomId });
     } catch (err) {
       // Usuário pode não ter doc ainda (conta recém-criada não passou pelo perfil)
       logger.warn({ uid, err: err.message }, 'reputation_update_user_not_found');
