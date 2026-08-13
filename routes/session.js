@@ -19,6 +19,7 @@ const express = require('express');
 const admin   = require('firebase-admin');
 const { getDb }              = require('../services/firestore');
 const sessionDna             = require('../services/sessionDna');
+const socialGraph            = require('../services/socialGraph');
 const { GameEngine }         = require('../game/engine');
 const { asyncHandler, sendError } = require('../utils');
 
@@ -138,6 +139,43 @@ router.get('/game/room/:roomId/sessions/:sessionId/replay', asyncHandler(async (
     endedAt:   sessData.endedAt?.toMillis?.()   || null,
     timeline,
   });
+}));
+
+// ── GET /game/room/:roomId/group ──────────────────────────────────────────────
+// Perfil do grupo recorrente: roster de jogadores, core members, DNA resumido.
+
+router.get('/game/room/:roomId/group', asyncHandler(async (req, res) => {
+  const { roomId } = req.params;
+  const uid = await requireFirebaseAuth(req, res);
+  if (!uid) return;
+
+  const dna = await sessionDna.getRoomDna(roomId);
+  if (!dna) return res.json({ ok: true, group: null });
+
+  // Serializa datas
+  const lastPlayedAt = dna.lastPlayedAt?.getTime?.() || null;
+
+  // Monta perfil do grupo a partir do DNA
+  const group = {
+    roomId,
+    sessionCount:       dna.sessionCount      || 0,
+    uniquePlayerCount:  dna.uniquePlayerCount  || 0,
+    coreMembers:        dna.coreMembers        || [],
+    playerRoster:       dna.playerRoster       || {},
+    lastPlayedAt,
+    favCardType: Object.entries(dna.cardTypeCounts || {})
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+    favEmoji: Object.entries(dna.emojiTally || {})
+      .sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+    topCards:           (dna.topCards || []).slice(0, 5),
+    avgDurationSec:     dna.avgDurationSec     || 0,
+    avgCardsPerSession: dna.avgCardsPerSession  || 0,
+    topReactors:        (dna.topReactors || []).slice(0, 3),
+    playDayOfWeek:      dna.playDayOfWeek      || {},
+    playHourOfDay:      dna.playHourOfDay      || {},
+  };
+
+  return res.json({ ok: true, group });
 }));
 
 module.exports = router;

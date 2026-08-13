@@ -272,7 +272,9 @@ app.use((err, req, res, next) => {
 // --- Startup ---
 const { startCleanupLoop, stopCleanupLoop } = require("./services/cleanup");
 const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler");
-const sessionDna = require("./services/sessionDna");
+const sessionDna   = require("./services/sessionDna");
+const socialGraph  = require("./services/socialGraph");
+const reputation   = require("./services/reputation");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -286,6 +288,8 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   startSchedulerLoop();
   scheduleAuditLogCleanup();
   sessionDna.init();
+  socialGraph.init();
+  reputation.init();
 });
 
 async function gracefullyStopAllEgress() {

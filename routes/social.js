@@ -4,6 +4,8 @@ const admin      = require("firebase-admin");
 const { getDb }             = require("../services/firestore");
 const { logInfo, logError } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
+const socialGraph = require("../services/socialGraph");
+const reputation  = require("../services/reputation");
 
 const router = express.Router();
 
@@ -197,6 +199,42 @@ router.get("/social/search", socialLimiter, asyncHandler(async (req, res) => {
     });
 
   return res.json({ ok: true, results });
+}));
+
+// ── GET /social/connections ───────────────────────────────────────────────────
+// Retorna co-jogadores automáticos ordenados por sessões juntos.
+router.get("/social/connections", asyncHandler(async (req, res) => {
+  const uid = await getUidFromReq(req);
+  if (!uid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const limit = Math.min(Number(req.query.limit || 20), 50);
+  const connections = await socialGraph.getConnections(uid, limit);
+  return res.json({ ok: true, connections });
+}));
+
+// ── GET /social/reputation ────────────────────────────────────────────────────
+// Reputação do próprio jogador.
+router.get("/social/reputation", asyncHandler(async (req, res) => {
+  const uid = await getUidFromReq(req);
+  if (!uid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const rep = await reputation.getReputation(uid);
+  if (!rep) return res.json({ ok: true, reputation: null });
+  return res.json({ ok: true, reputation: rep });
+}));
+
+// ── GET /social/reputation/:uid ───────────────────────────────────────────────
+// Reputação pública de outro jogador.
+router.get("/social/reputation/:uid", asyncHandler(async (req, res) => {
+  const selfUid = await getUidFromReq(req);
+  if (!selfUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const rep = await reputation.getReputation(targetUid);
+  if (!rep) return res.json({ ok: true, reputation: null });
+  return res.json({ ok: true, reputation: rep });
 }));
 
 module.exports = router;

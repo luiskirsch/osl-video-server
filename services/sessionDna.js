@@ -43,9 +43,9 @@ function init() {
   _initialized = true;
 
   events.on('session.ended', async ({ payload }) => {
-    const { roomId, sessionId, summary } = payload || {};
+    const { roomId, sessionId, summary, players } = payload || {};
     if (!roomId || !sessionId || !summary) return;
-    await _updateDna(roomId, sessionId, summary).catch(err =>
+    await _updateDna(roomId, sessionId, summary, players || []).catch(err =>
       logger.error({ err, roomId, sessionId }, 'session_dna_update_failed')
     );
   });
@@ -55,7 +55,7 @@ function init() {
 
 // ── DNA computation ───────────────────────────────────────────────────────────
 
-async function _updateDna(roomId, sessionId, summary) {
+async function _updateDna(roomId, sessionId, summary, players = []) {
   const db = getDb();
   if (!db) return;
 
@@ -117,6 +117,25 @@ async function _updateDna(roomId, sessionId, summary) {
   const playHourOfDay = { ...(prev.playHourOfDay || {}) };
   playHourOfDay[hourOfDay] = (playHourOfDay[hourOfDay] || 0) + 1;
 
+  // ── Roster de jogadores (uid → { count, nickname, lastSeenAt }) ──────────
+  const playerRoster = { ...(prev.playerRoster || {}) };
+  const now2 = now.toISOString();
+  for (const p of players) {
+    const uid = p.userId || null;
+    if (!uid) continue;
+    const existing = playerRoster[uid] || { count: 0, nickname: p.nickname || 'Jogador' };
+    playerRoster[uid] = {
+      count:       existing.count + 1,
+      nickname:    p.nickname || existing.nickname,
+      lastSeenAt:  now2,
+    };
+  }
+  const uniquePlayerCount = Object.keys(playerRoster).length;
+  // Membros que estiveram em >50% das sessões
+  const coreMembers = Object.entries(playerRoster)
+    .filter(([, v]) => v.count > sessionCount * 0.5)
+    .map(([uid]) => uid);
+
   // ── Montar e persistir ────────────────────────────────────────────────────
   const dna = {
     roomId,
@@ -140,6 +159,9 @@ async function _updateDna(roomId, sessionId, summary) {
     topReactors,
     playDayOfWeek,
     playHourOfDay,
+    playerRoster,
+    coreMembers,
+    uniquePlayerCount,
   };
 
   await dnaRef.set(dna);

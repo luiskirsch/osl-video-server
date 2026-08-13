@@ -577,6 +577,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   events.emit('session.ended', {
     roomId, sessionId, summary,
     playerCount: sessionPlayers.length,
+    players: sessionPlayers,   // [{ playerId, userId, nickname }] — alimenta Social Graph
   }, { persist: true });
 
   logInfo("session_ended", { roomId, sessionId, cardsRevealed: summary.cardsRevealed, durationSec: summary.durationSec });
