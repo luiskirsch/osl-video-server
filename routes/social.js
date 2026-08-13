@@ -4,8 +4,9 @@ const admin      = require("firebase-admin");
 const { getDb }             = require("../services/firestore");
 const { logInfo, logError } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
-const socialGraph = require("../services/socialGraph");
-const reputation  = require("../services/reputation");
+const socialGraph   = require("../services/socialGraph");
+const reputation    = require("../services/reputation");
+const achievements  = require("../services/achievements");
 
 const router = express.Router();
 
@@ -235,6 +236,29 @@ router.get("/social/reputation/:uid", asyncHandler(async (req, res) => {
   const rep = await reputation.getReputation(targetUid);
   if (!rep) return res.json({ ok: true, reputation: null });
   return res.json({ ok: true, reputation: rep });
+}));
+
+// ── GET /social/achievements ──────────────────────────────────────────────────
+// Catálogo completo + conquistas desbloqueadas do próprio jogador.
+router.get("/social/achievements", asyncHandler(async (req, res) => {
+  const uid = await getUidFromReq(req);
+  if (!uid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const data = await achievements.getAchievements(uid);
+  return res.json({ ok: true, ...data });
+}));
+
+// ── GET /social/achievements/:uid ─────────────────────────────────────────────
+// Conquistas públicas de outro jogador.
+router.get("/social/achievements/:uid", asyncHandler(async (req, res) => {
+  const selfUid = await getUidFromReq(req);
+  if (!selfUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid) return sendError(res, 400, "UID_OBRIGATORIO");
+
+  const data = await achievements.getAchievements(targetUid);
+  return res.json({ ok: true, ...data });
 }));
 
 module.exports = router;

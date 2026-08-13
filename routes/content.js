@@ -10,7 +10,10 @@
  * PUT  /content/cards/:id             — atualiza carta
  * DELETE /content/cards/:id           — remove carta
  *
- * GET  /content/packs                  — lista packs disponíveis
+ * GET  /content/packs                  — lista packs disponíveis (metadata + cardCount)
+ * POST /content/packs                  — cria pack
+ * PUT  /content/packs/:id             — atualiza pack
+ * DELETE /content/packs/:id           — remove pack (soft: enabled=false)
  *
  * POST /content/seed                   — importa dados estáticos para Firestore
  *                                        body: { overwrite?: boolean }
@@ -137,14 +140,93 @@ router.delete('/content/cards/:id', requireAdmin, asyncHandler(async (req, res) 
 
 // ── Packs ─────────────────────────────────────────────────────────────────────
 
-// GET /content/packs — retorna contagem de cartas por pack a partir do content engine
+// GET /content/packs — lista packs com metadata e contagem de cartas
 router.get('/content/packs', requireAdmin, asyncHandler(async (_req, res) => {
   const bundle = await contentEngine.getContentBundle();
   const packs = bundle.packIds.map(id => ({
-    packId: id,
+    packId:    id,
     cardCount: (bundle.packCardsMap[id] || []).length,
+    ...(bundle.packsMeta?.[id] || {}),
   }));
-  return res.json({ ok: true, packs });
+  return res.json({ ok: true, packs, total: packs.length });
+}));
+
+// POST /content/packs — cria pack
+router.post('/content/packs', requireAdmin, asyncHandler(async (req, res) => {
+  const db = getDb();
+  if (!db) return sendError(res, 503, 'DB_INDISPONIVEL');
+
+  const { id, name, description, price, currency, coverUrl, tags, enabled, order } = req.body || {};
+  if (!id || !name) return sendError(res, 400, 'ID_E_NOME_OBRIGATORIOS');
+
+  const packId = String(id).replace(/[^a-z0-9_-]/gi, '-').slice(0, 100);
+  const ref    = db.collection('content_packs').doc(packId);
+  if ((await ref.get()).exists) return sendError(res, 409, 'PACK_JA_EXISTE');
+
+  const now = admin.firestore.FieldValue.serverTimestamp();
+  await ref.set({
+    name:        String(name).slice(0, 100),
+    description: description ? String(description).slice(0, 1000) : null,
+    price:       typeof price === 'number' ? price : null,
+    currency:    currency ? String(currency).slice(0, 10) : 'BRL',
+    coverUrl:    coverUrl ? String(coverUrl).slice(0, 500) : null,
+    tags:        Array.isArray(tags) ? tags.slice(0, 20).map(t => String(t).slice(0, 50)) : [],
+    enabled:     enabled !== false,
+    order:       typeof order === 'number' ? order : 9999,
+    createdAt:   now,
+    updatedAt:   now,
+  });
+
+  contentEngine.invalidate();
+  events.emit('content.pack_created', { packId, name });
+  logger.info({ packId, name }, 'content_pack_created');
+  return res.status(201).json({ ok: true, id: packId });
+}));
+
+// PUT /content/packs/:id — atualiza metadata do pack
+router.put('/content/packs/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const db = getDb();
+  if (!db) return sendError(res, 503, 'DB_INDISPONIVEL');
+
+  const { id } = req.params;
+  const ref    = db.collection('content_packs').doc(id);
+  if (!(await ref.get()).exists) return sendError(res, 404, 'PACK_NAO_ENCONTRADO');
+
+  const allowed = ['name', 'description', 'price', 'currency', 'coverUrl', 'tags', 'enabled', 'order'];
+  const update  = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  for (const key of allowed) {
+    if (key in req.body) update[key] = req.body[key];
+  }
+
+  await ref.update(update);
+  contentEngine.invalidate();
+  events.emit('content.pack_updated', { packId: id });
+  logger.info({ packId: id }, 'content_pack_updated');
+  return res.json({ ok: true, id });
+}));
+
+// DELETE /content/packs/:id — desabilita pack (soft) ou remove (hard com ?hard=true)
+router.delete('/content/packs/:id', requireAdmin, asyncHandler(async (req, res) => {
+  const db   = getDb();
+  if (!db) return sendError(res, 503, 'DB_INDISPONIVEL');
+
+  const { id } = req.params;
+  const hard   = req.query.hard === 'true';
+
+  if (hard) {
+    await db.collection('content_packs').doc(id).delete();
+    logger.info({ packId: id }, 'content_pack_deleted_hard');
+  } else {
+    await db.collection('content_packs').doc(id).update({
+      enabled:   false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    logger.info({ packId: id }, 'content_pack_disabled');
+  }
+
+  contentEngine.invalidate();
+  events.emit('content.pack_deleted', { packId: id, hard });
+  return res.json({ ok: true, id, hard });
 }));
 
 // ── Utilitários ───────────────────────────────────────────────────────────────

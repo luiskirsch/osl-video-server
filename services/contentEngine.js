@@ -29,12 +29,14 @@
  * }
  *
  * API pública:
- *   getContentBundle()          → { basicCards, packCardsMap, effectsMap, packIds }
+ *   getContentBundle()          → { basicCards, packCardsMap, effectsMap, packIds, packsMeta }
  *   getBasicCards()             → Card[]
  *   getPackCards(packId)        → Card[]
  *   getCardsByPackIds(packIds)  → Card[]  (union de múltiplos packs)
  *   getCardEffectsMap()         → { [title]: { battlecry?, deathrattle? } }
  *   getAllPackIds()              → string[]
+ *   getPackMeta(packId)         → PackMeta | null
+ *   getAllPacksMeta()            → { [packId]: PackMeta }
  *   invalidate()                → limpa cache (chame após editar conteúdo)
  */
 
@@ -89,6 +91,16 @@ async function getCardEffectsMap() {
 async function getAllPackIds() {
   const b = await getContentBundle();
   return b.packIds;
+}
+
+async function getPackMeta(packId) {
+  const b = await getContentBundle();
+  return b.packsMeta?.[packId] ?? null;
+}
+
+async function getAllPacksMeta() {
+  const b = await getContentBundle();
+  return b.packsMeta ?? {};
 }
 
 function invalidate() {
@@ -158,13 +170,22 @@ async function _loadFromFirestore() {
   // Garante que packs conhecidos estejam presentes mesmo sem cartas carregadas
   for (const id of OSL_PACK_IDS) packIdsSet.add(id);
 
+  // Metadata de packs da coleção content_packs
+  const packsMeta = {};
+  const metaSnap  = await db.collection('content_packs').get();
+  for (const doc of metaSnap.docs) {
+    packsMeta[doc.id] = { id: doc.id, ...doc.data() };
+    packIdsSet.add(doc.id);
+  }
+
   logger.info({
     basicCards: basicCards.length,
     packs: packIdsSet.size,
     effects: Object.keys(effectsMap).length,
+    packsMeta: Object.keys(packsMeta).length,
   }, 'content_engine_loaded_firestore');
 
-  return { basicCards, packCardsMap, effectsMap, packIds: [...packIdsSet] };
+  return { basicCards, packCardsMap, effectsMap, packIds: [...packIdsSet], packsMeta };
 }
 
 function _buildBundleFromStatic() {
@@ -185,6 +206,7 @@ function _buildBundleFromStatic() {
     packCardsMap,
     effectsMap:   { ...OSL_CARD_EFFECTS },
     packIds:      [...OSL_PACK_IDS],
+    packsMeta:    {},
   };
 }
 
@@ -250,6 +272,8 @@ module.exports = {
   getCardsByPackIds,
   getCardEffectsMap,
   getAllPackIds,
+  getPackMeta,
+  getAllPacksMeta,
   invalidate,
   seedFromStatic,
 };

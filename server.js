@@ -277,7 +277,8 @@ const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler"
 const sessionDna   = require("./services/sessionDna");
 const socialGraph  = require("./services/socialGraph");
 const reputation   = require("./services/reputation");
-const liveService  = require("./services/liveService");
+const liveService    = require("./services/liveService");
+const achievements   = require("./services/achievements");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -294,6 +295,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   socialGraph.init();
   reputation.init();
   liveService.init();
+  achievements.init();
 });
 
 async function gracefullyStopAllEgress() {
