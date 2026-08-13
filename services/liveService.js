@@ -194,7 +194,7 @@ function init() {
 
     events.emit('live.daily_ritual_completed', {
       roomId, date: ritual.date, cardTitle: ritual.cardTitle,
-      playerCount: authedUids.length,
+      authedUids, playerCount: authedUids.length,
     });
 
     logger.info({ roomId, date: ritual.date, cardTitle: ritual.cardTitle },

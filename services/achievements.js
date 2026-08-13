@@ -302,31 +302,21 @@ function init() {
   // Social: monitora quando jogadores são adicionados à social_connections
   events.on('user.achievement_unlocked', () => {});  // mantém listener vivo
 
-  // Ritual diário completado
+  // Ritual diário completado — authedUids vem direto do evento
   events.on('live.daily_ritual_completed', async ({ payload }) => {
-    const { roomId } = payload || {};
-    if (!roomId) return;
+    const { authedUids } = payload || {};
+    if (!Array.isArray(authedUids) || !authedUids.length) return;
 
-    try {
-      const socialGraph = require('./socialGraph');
-      // Pega jogadores da sala ativos no momento via panelRooms
-      const { panelRooms } = require('../game/state');
-      const room = panelRooms.get(roomId);
-      if (!room) return;
-
-      const players = Object.values(room.players || {});
-      for (const player of players) {
-        const uid = player.userId;
-        if (!uid) continue;
-
-        const rep = await reputation.getReputation(uid).catch(() => null);
+    for (const uid of authedUids) {
+      try {
+        const rep        = await reputation.getReputation(uid).catch(() => null);
         const dailyCount = rep?.dailyRitualsCompleted || 0;
 
         if (dailyCount >= 3)  await _checkAndUnlock(uid, 'daily_ritual_3',  { progress: Math.min(dailyCount, 3) }).catch(() => {});
         if (dailyCount >= 10) await _checkAndUnlock(uid, 'daily_ritual_10', { progress: Math.min(dailyCount, 10) }).catch(() => {});
+      } catch (err) {
+        logger.warn({ err, uid }, 'achievement_daily_check_error');
       }
-    } catch (err) {
-      logger.warn({ err }, 'achievement_daily_check_error');
     }
   });
 

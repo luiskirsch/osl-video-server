@@ -73,7 +73,9 @@ const platformRouter   = require("./routes/platform");
 const contentRouter    = require("./routes/content");
 const sessionRouter    = require("./routes/session");
 const opsRouter        = require("./routes/ops");
-const liveRouter       = require("./routes/liveService");
+const liveRouter         = require("./routes/liveService");
+const notificationsRouter = require("./routes/notifications");
+const inviteLinksRouter  = require("./routes/inviteLinks");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -231,6 +233,8 @@ app.use(platformRouter);
 app.use(contentRouter);
 app.use(sessionRouter);
 app.use(liveRouter);
+app.use(notificationsRouter);
+app.use(inviteLinksRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---
@@ -279,6 +283,7 @@ const socialGraph  = require("./services/socialGraph");
 const reputation   = require("./services/reputation");
 const liveService    = require("./services/liveService");
 const achievements   = require("./services/achievements");
+const notificationsSvc = require("./services/notifications");
 const { activeStreams, activeRecordings } = require("./game/state");
 const { stopRoomStreaming, stopRoomRecording } = require("./video/webrtc");
 
@@ -296,6 +301,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   reputation.init();
   liveService.init();
   achievements.init();
+  notificationsSvc.init();
 });
 
 async function gracefullyStopAllEgress() {

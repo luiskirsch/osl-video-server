@@ -53,6 +53,21 @@ function init() {
   if (_initialized) return;
   _initialized = true;
 
+  events.on('live.daily_ritual_completed', async ({ payload }) => {
+    const { authedUids } = payload || {};
+    if (!Array.isArray(authedUids) || !authedUids.length) return;
+
+    const admin = require('firebase-admin');
+    const db    = getDb();
+    if (!db) return;
+
+    await Promise.all(authedUids.map(uid =>
+      db.collection('users').doc(uid).update({
+        'reputation.dailyRitualsCompleted': admin.firestore.FieldValue.increment(1),
+      }).catch(() => {})
+    ));
+  });
+
   events.on('session.ended', async ({ payload }) => {
     const { roomId, sessionId, summary, players } = payload || {};
     if (!roomId || !sessionId || !summary || !Array.isArray(players)) return;
@@ -146,6 +161,7 @@ async function getReputation(uid) {
     totalSessions:   rep.totalSessions   || 0,
     totalReactions:  rep.totalReactions  || 0,
     topReactorCount: rep.topReactorCount || 0,
+    dailyRitualsCompleted: rep.dailyRitualsCompleted || 0,
     lastUpdatedAt:   rep.lastUpdatedAt?.toMillis?.() || null,
     lastSessionId:   rep.lastSessionId   || null,
   };
