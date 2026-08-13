@@ -111,7 +111,16 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     buildVerifiedDeck(db, firebaseIdToken || null, players),
     uidFromFirebaseToken(firebaseIdToken),
   ]);
-  const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+  let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+
+  // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
+  // Feature flag: contextual_selection_v1 | Fallback: deck original
+  try {
+    const playerContext       = require('../services/playerContext');
+    const contextualSelection = require('../services/contextualSelection');
+    const ctx = await playerContext.buildSessionContext({ hostUid, players, roomId });
+    deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
+  } catch (_) {}
 
   // Injeta fragmento do ritual diário anterior (pessoal do host)
   if (hostUid) {
@@ -270,7 +279,15 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
     uidFromFirebaseToken(firebaseIdToken),
   ]);
   const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
-  const deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+  let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+
+  // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
+  try {
+    const playerContext       = require('../services/playerContext');
+    const contextualSelection = require('../services/contextualSelection');
+    const ctx = await playerContext.buildSessionContext({ hostUid, players, roomId });
+    deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
+  } catch (_) {}
 
   // Injeta fragmento do ritual diário anterior (pessoal do host)
   if (hostUid) {

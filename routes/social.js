@@ -261,4 +261,35 @@ router.get("/social/achievements/:uid", asyncHandler(async (req, res) => {
   return res.json({ ok: true, ...data });
 }));
 
+// ── GET /social/compatibility/:uid ────────────────────────────────────────────
+// Compatibilidade multi-dimensional entre o jogador autenticado e outro.
+// overall + 6 dimensões + confidence + label
+router.get("/social/compatibility/:uid", asyncHandler(async (req, res) => {
+  const selfUid = await getUidFromReq(req);
+  if (!selfUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const targetUid = String(req.params.uid || "").trim();
+  if (!targetUid || targetUid === selfUid) return sendError(res, 400, "UID_INVALIDO");
+
+  const compatibility = require('../services/compatibility');
+  const result = await compatibility.computeCompatibility(selfUid, targetUid);
+  if (!result) return res.json({ ok: true, compatibility: null });
+
+  return res.json({ ok: true, compatibility: result });
+}));
+
+// ── GET /social/compatibility/group?uids=a,b,c ────────────────────────────────
+// Compatibilidade pairwise para um grupo de até 5 jogadores.
+router.get("/social/compatibility/group", asyncHandler(async (req, res) => {
+  const selfUid = await getUidFromReq(req);
+  if (!selfUid) return sendError(res, 401, "TOKEN_INVALIDO");
+
+  const rawUids = String(req.query.uids || "").split(",").map(u => u.trim()).filter(Boolean);
+  if (rawUids.length < 2 || rawUids.length > 5) return sendError(res, 400, "UIDS_INVALIDOS");
+
+  const compatibility = require('../services/compatibility');
+  const matrix = await compatibility.getGroupCompatibility(rawUids);
+  return res.json({ ok: true, matrix });
+}));
+
 module.exports = router;
