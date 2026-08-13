@@ -46,13 +46,15 @@ router.get('/hub', asyncHandler(async (req, res) => {
   presence.touch(uid).catch(() => {});
 
   // Tudo em paralelo — cada item falha independentemente
-  const [dailyRes, worldRes, connectionsRes, unreadRes, repRes, userDocRes] = await Promise.allSettled([
+  const [dailyRes, worldRes, connectionsRes, unreadRes, repRes, userDocRes, eventsRes, seasonRes] = await Promise.allSettled([
     liveService.getDailyRitual(),
     worldState.getWorldState(),
     socialGraph.getConnections(uid, 20),
     notifications.getUnreadCount(uid),
     reputation.getReputation(uid),
     _getUserDoc(uid),
+    liveService.getActiveEvents(),
+    liveService.getActiveSeason(),
   ]);
 
   const daily       = dailyRes.status       === 'fulfilled' ? dailyRes.value       : null;
@@ -61,6 +63,8 @@ router.get('/hub', asyncHandler(async (req, res) => {
   const unread      = unreadRes.status      === 'fulfilled' ? unreadRes.value      : 0;
   const rep         = repRes.status         === 'fulfilled' ? repRes.value         : null;
   const userDoc     = userDocRes.status     === 'fulfilled' ? userDocRes.value     : null;
+  const events      = eventsRes.status      === 'fulfilled' ? (eventsRes.value  || []) : [];
+  const season      = seasonRes.status      === 'fulfilled' ? seasonRes.value      : null;
 
   // Presença dos amigos
   const friendUids  = (connections || []).map(c => c.uid);
@@ -98,6 +102,8 @@ router.get('/hub', asyncHandler(async (req, res) => {
     ok:           true,
     uid,
     daily,
+    season,
+    events,
     world,
     friends,
     myGroups,
@@ -157,21 +163,43 @@ async function _getMyGroups(uid) {
 }
 
 async function _resolveLastSession(userDoc, rep) {
-  const lastRoomId   = userDoc?.lastRoomId   || null;
+  const lastRoomId    = userDoc?.lastRoomId  || null;
   const lastSessionId = rep?.lastSessionId   || null;
   const lastSessionAt = userDoc?.lastSessionAt?.toMillis?.() ?? null;
 
   if (!lastRoomId) return null;
 
-  // Busca nome da sala (uma leitura, só se tiver lastRoomId)
   const db = require('../services/firestore').db;
-  let roomName = null;
-  if (db) {
-    const snap = await db.collection('salas').doc(lastRoomId).get().catch(() => null);
-    roomName = snap?.exists ? (snap.data().name || null) : null;
+  if (!db) return { roomId: lastRoomId, sessionId: lastSessionId, roomName: null, sessionAt: lastSessionAt, dna: null };
+
+  // Lê sala + DNA em paralelo (uma round-trip cada)
+  const [salaSnap, dnaSnap] = await Promise.all([
+    db.collection('salas').doc(lastRoomId).get().catch(() => null),
+    db.collection('salas').doc(lastRoomId).collection('meta').doc('dna').get().catch(() => null),
+  ]);
+
+  const roomName = salaSnap?.exists ? (salaSnap.data().name || null) : null;
+
+  let dna = null;
+  if (dnaSnap?.exists) {
+    const d = dnaSnap.data();
+    // Resume o DNA em campos legíveis para o cliente renderizar
+    const cardTypeCounts = d.cardTypeCounts || {};
+    const totalCards     = Object.values(cardTypeCounts).reduce((s, v) => s + v, 0) || 1;
+    const dominantType   = Object.entries(cardTypeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    const dominantPct    = dominantType ? Math.round(cardTypeCounts[dominantType] / totalCards * 100) : null;
+
+    dna = {
+      sessionCount:     d.sessionCount     || 0,
+      avgDurationSec:   d.avgDurationSec   || 0,
+      dominantType,
+      dominantPct,
+      topCards:         (d.topCards        || []).slice(0, 3),
+      topReactors:      (d.topReactors     || []).slice(0, 3),
+    };
   }
 
-  return { roomId: lastRoomId, sessionId: lastSessionId, roomName, sessionAt: lastSessionAt };
+  return { roomId: lastRoomId, sessionId: lastSessionId, roomName, sessionAt: lastSessionAt, dna };
 }
 
 module.exports = router;
