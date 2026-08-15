@@ -125,29 +125,124 @@ async function getDailyRitual() {
   return ritual;
 }
 
-async function _generateDailyRitual(dateStr, db) {
-  const contentEngine = require('./contentEngine');
-  const basicCards    = await contentEngine.getBasicCards();
-  if (!basicCards.length) return null;
+// ── Fallbacks usados quando a API Claude não responde ────────────────────────
 
-  // Seleção determinística pelo dia (não aleatória — permite reprodução)
-  const dayNum  = new Date(dateStr).getTime();
-  const card    = basicCards[Math.abs(Math.round(dayNum / 86400000)) % basicCards.length];
+const _FALLBACK_RITUALS = [
+  { title: 'O Peso Silencioso',   text: 'O que você carrega hoje que nunca contou a ninguém?' },
+  { title: 'A Escolha Não Feita', text: 'Que decisão você continua adiando, e por quê?' },
+  { title: 'O Espelho',           text: 'O que em outra pessoa te incomoda e que também existe em você?' },
+  { title: 'A Dívida Invisível',  text: 'Para quem você deveria ligar hoje, mas não vai?' },
+  { title: 'O Momento Exato',     text: 'Quando foi a última vez que você foi completamente honesto com alguém?' },
+  { title: 'A Fronteira',         text: 'Que limite você exige dos outros mas não coloca em si mesmo?' },
+  { title: 'O Não Dito',          text: 'O que você gostaria que alguém soubesse, sem ter que explicar?' },
+  { title: 'A Versão Real',       text: 'Quem você seria se não tivesse medo de ser julgado?' },
+  { title: 'O Custo',             text: 'O que você está pagando para manter uma versão de si que não é mais você?' },
+  { title: 'A Ausência',          text: 'Quem sumiu da sua vida e você ainda pensa nisso?' },
+  { title: 'O Limite',            text: 'Qual foi a última vez que você disse não e quis dizer sim?' },
+  { title: 'A Inveja Honesta',    text: 'Quem você inveja de verdade, e o que isso te diz sobre você?' },
+  { title: 'O Arrependimento',    text: 'Se você pudesse refazer um momento da última semana, qual seria?' },
+  { title: 'A Máscara',           text: 'Que versão de você mesma você apresenta que não corresponde a quem você é?' },
+];
+
+async function _askClaude(prompt) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const apiKey    = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const client = new Anthropic({ apiKey });
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 120,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return msg.content?.[0]?.text?.trim() || null;
+}
+
+async function _generateDailyRitual(dateStr, db) {
+  // Contexto do mundo para informar a pergunta
+  const [season, events, world] = await Promise.allSettled([
+    getActiveSeason(),
+    getActiveEvents(),
+    require('./worldState').getWorldState().catch(() => null),
+  ]);
+
+  const seasonData  = season.status  === 'fulfilled' ? season.value  : null;
+  const eventsData  = events.status  === 'fulfilled' ? events.value  : [];
+  const worldData   = world.status   === 'fulfilled' ? world.value   : null;
+
+  // Monta contexto descritivo para o Claude
+  const dateObj    = new Date(dateStr);
+  const weekday    = ['Domingo','Segunda','Terça','Quarta','Quinta','Sexta','Sábado'][dateObj.getUTCDay()];
+  const progress   = worldData ? Math.round((worldData.communityProgress || 0) * 100) : 0;
+  const mission    = worldData?.currentMission?.name || null;
+  const eventNames = eventsData.map(e => e.name).filter(Boolean).join(', ') || 'nenhum';
+
+  let seasonCtx = 'sem temporada ativa';
+  if (seasonData) {
+    const startMs   = seasonData.startAt?.toMillis?.() || 0;
+    const endMs     = seasonData.endAt?.toMillis?.()   || 0;
+    const totalDays = endMs > startMs ? Math.round((endMs - startMs) / 86400000) : 0;
+    const dayIn     = Math.round((Date.now() - startMs) / 86400000);
+    const weekIn    = Math.ceil(dayIn / 7);
+    const weekTotal = Math.ceil(totalDays / 7);
+    seasonCtx = `temporada "${seasonData.name}" — semana ${weekIn} de ${weekTotal}`;
+  }
+
+  const prompt = `Você é a voz de um mundo vivo e interativo — um jogo de conexões humanas chamado SextoLugar.
+
+Contexto de hoje (${weekday}, ${dateStr}):
+- Mundo: ${seasonCtx}
+- Progresso da comunidade: ${progress}%
+- Missão ativa: ${mission || 'nenhuma'}
+- Eventos: ${eventNames}
+
+Gere UMA pergunta de reflexão individual para o Ritual do Dia. A pergunta:
+- É feita para uma pessoa ler sozinha no hub, não em grupo
+- É direta, pessoal e provoca desconforto produtivo
+- Tem no máximo 2 frases curtas
+- Não tem introdução, só a pergunta em si
+- Está em português brasileiro
+
+Responda APENAS com a pergunta, sem aspas, sem título, sem explicação.`;
+
+  let cardText    = null;
+  let cardTitle   = null;
+  let generatedBy = 'claude';
+
+  try {
+    cardText = await _askClaude(prompt);
+  } catch (err) {
+    logger.warn({ err, dateStr }, 'daily_ritual_claude_failed');
+  }
+
+  // Fallback determinístico se Claude falhar ou API key ausente
+  if (!cardText) {
+    const dayNum  = new Date(dateStr).getTime();
+    const seed    = _FALLBACK_RITUALS[Math.abs(Math.round(dayNum / 86400000)) % _FALLBACK_RITUALS.length];
+    cardText    = seed.text;
+    cardTitle   = seed.title;
+    generatedBy = 'fallback';
+    logger.info({ dateStr }, 'daily_ritual_fallback_used');
+  } else {
+    const firstWords = cardText.split(/\s+/).slice(0, 3).join(' ').replace(/[^a-zA-ZÀ-ú\s]/g, '').trim();
+    cardTitle = firstWords || 'O Ritual';
+  }
 
   const ritual = {
     date:            dateStr,
-    cardTitle:       card.title,
-    cardText:        card.text || '',
-    cardType:        card.type || 'Ritual',
-    challengeType:   'group',
+    cardTitle,
+    cardText,
+    cardType:        'Ritual',
+    challengeType:   'individual',
     bonusXp:         50,
     completionCount: 0,
     expiresAt:       _endOfDayUTC(dateStr),
     createdAt:       new Date(),
+    generatedBy,
   };
 
   await db.collection('daily_ritual').doc(dateStr).set(ritual);
-  logger.info({ dateStr, cardTitle: card.title }, 'daily_ritual_generated');
+  logger.info({ dateStr, cardTitle, generatedBy: ritual.generatedBy }, 'daily_ritual_generated');
   return ritual;
 }
 
