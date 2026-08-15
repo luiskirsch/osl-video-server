@@ -39,18 +39,6 @@ router.get('/live/daily', asyncHandler(async (_req, res) => {
   return res.json({ ok: true, daily });
 }));
 
-// ── GET /live/daily-debug (temporário) ───────────────────────────────────────
-
-router.get('/live/daily-debug', asyncHandler(async (_req, res) => {
-  const db = require('../services/firestore').db;
-  const today = new Date().toISOString().slice(0, 10);
-  const snap = db ? await db.collection('daily_ritual').doc(today).get().catch(e => ({ _err: e.message })) : null;
-  const snapExists = snap && snap.exists !== undefined ? snap.exists : 'db_null_or_error';
-  const snapData = snap && snap.data ? snap.data() : null;
-  const daily = await liveService.getDailyRitual().catch(e => ({ _err: e.message }));
-  return res.json({ ok: true, today, dbAvail: !!db, snapExists, cardText: snapData?.cardText?.slice(0,60) ?? null, daily });
-}));
-
 // ── GET /live/world ───────────────────────────────────────────────────────────
 // Público — world state global (communityProgress, missão, conteúdo desbloqueado).
 // Usado pelo cliente pré-login para mostrar o "mundo está vivo" na tela inicial.
