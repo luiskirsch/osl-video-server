@@ -41,7 +41,7 @@
  */
 
 const { OSL_BASIC_CARDS, OSL_PACK_CARDS, OSL_CARD_EFFECTS, OSL_PACK_IDS } = require('../data/cards');
-const logger = require('../logger');
+const { logInfo, logWarn } = require('../logger');
 
 const CACHE_TTL_MS = 5 * 60_000;  // 5 minutos
 
@@ -52,6 +52,40 @@ let _db = null;
 function getDb() {
   if (!_db) _db = require('./firestore').getDb();
   return _db;
+}
+
+function _staticBasicCards() {
+  return OSL_BASIC_CARDS
+    .filter(card => card && String(card.title || '').trim() && String(card.text || '').trim())
+    .map(card => ({ ...card, tags: [], intensity: 'medium', minPlayers: 2 }));
+}
+
+function _normalizeFirestoreCard(id, data) {
+  if (!data || typeof data !== 'object') return null;
+
+  const title = String(data.title || '').trim().slice(0, 200);
+  const text  = String(data.text  || '').trim().slice(0, 2000);
+  if (!title || !text) return null;
+
+  const intensity = ['low', 'medium', 'high'].includes(data.intensity)
+    ? data.intensity
+    : 'medium';
+  const minPlayers = Number.isFinite(data.minPlayers) && data.minPlayers > 0
+    ? Math.floor(data.minPlayers)
+    : 2;
+
+  return {
+    id,
+    type:       String(data.type || 'Ritual').slice(0, 50),
+    title,
+    text,
+    rule:       data.rule    ? String(data.rule).slice(0, 1000)    : undefined,
+    subrule:    data.subrule ? String(data.subrule).slice(0, 1000) : undefined,
+    phrase:     data.phrase  ? String(data.phrase).slice(0, 500)   : undefined,
+    tags:       Array.isArray(data.tags) ? data.tags.map(tag => String(tag).slice(0, 50)).slice(0, 20) : [],
+    intensity,
+    minPlayers,
+  };
 }
 
 // ── API pública ───────────────────────────────────────────────────────────────
@@ -105,7 +139,7 @@ async function getAllPacksMeta() {
 
 function invalidate() {
   _cache = null;
-  logger.info({}, 'content_engine_cache_invalidated');
+  logInfo('content_engine_cache_invalidated');
 }
 
 // ── Carga do Firestore (com fallback estático) ────────────────────────────────
@@ -118,7 +152,9 @@ async function _load() {
       return bundle;
     }
   } catch (err) {
-    logger.warn({ err }, 'content_engine_firestore_error_fallback');
+    logWarn('content_engine_firestore_error_fallback', {
+      error: err?.message || String(err),
+    });
   }
 
   // Fallback: dados estáticos (sempre funcionam, mesmo sem Firestore)
@@ -138,21 +174,15 @@ async function _loadFromFirestore() {
   const packCardsMap  = {};
   const effectsMap    = {};
   const packIdsSet    = new Set();
+  let invalidCards    = 0;
 
   for (const doc of snap.docs) {
     const d = doc.data();
-    const card = {
-      id:       doc.id,
-      type:     d.type     || 'Ritual',
-      title:    d.title    || '',
-      text:     d.text     || '',
-      rule:     d.rule     || undefined,
-      subrule:  d.subrule  || undefined,
-      phrase:   d.phrase   || undefined,
-      tags:     d.tags     || [],
-      intensity:  d.intensity  || 'medium',
-      minPlayers: d.minPlayers || 2,
-    };
+    const card = _normalizeFirestoreCard(doc.id, d);
+    if (!card) {
+      invalidCards++;
+      continue;
+    }
 
     if (d.packId) {
       if (!packCardsMap[d.packId]) packCardsMap[d.packId] = [];
@@ -167,6 +197,22 @@ async function _loadFromFirestore() {
     }
   }
 
+  // Um snapshot pode conter somente cartas de pacotes. Sem esta garantia,
+  // jogadores sem entitlement recebem um deck vazio embora o CMS não esteja vazio.
+  let usedStaticBasicFallback = false;
+  if (basicCards.length === 0) {
+    basicCards.push(..._staticBasicCards());
+    for (const [title, effects] of Object.entries(OSL_CARD_EFFECTS)) {
+      if (!effectsMap[title]) effectsMap[title] = effects;
+    }
+    usedStaticBasicFallback = true;
+    logWarn('content_engine_basic_cards_static_fallback', {
+      firestoreCards: snap.size,
+      invalidCards,
+      fallbackCards: basicCards.length,
+    });
+  }
+
   // Garante que packs conhecidos estejam presentes mesmo sem cartas carregadas
   for (const id of OSL_PACK_IDS) packIdsSet.add(id);
 
@@ -178,12 +224,14 @@ async function _loadFromFirestore() {
     packIdsSet.add(doc.id);
   }
 
-  logger.info({
+  logInfo('content_engine_loaded_firestore', {
     basicCards: basicCards.length,
     packs: packIdsSet.size,
     effects: Object.keys(effectsMap).length,
     packsMeta: Object.keys(packsMeta).length,
-  }, 'content_engine_loaded_firestore');
+    invalidCards,
+    usedStaticBasicFallback,
+  });
 
   return { basicCards, packCardsMap, effectsMap, packIds: [...packIdsSet], packsMeta };
 }
@@ -194,15 +242,15 @@ function _buildBundleFromStatic() {
     packCardsMap[packId] = cards.map(c => ({ ...c, tags: [], intensity: 'medium', minPlayers: 2 }));
   }
 
-  logger.info({
+  logInfo('content_engine_loaded_static', {
     basicCards: OSL_BASIC_CARDS.length,
     packs: OSL_PACK_IDS.length,
     effects: Object.keys(OSL_CARD_EFFECTS).length,
     source: 'static',
-  }, 'content_engine_loaded_static');
+  });
 
   return {
-    basicCards:   OSL_BASIC_CARDS.map(c => ({ ...c, tags: [], intensity: 'medium', minPlayers: 2 })),
+    basicCards:   _staticBasicCards(),
     packCardsMap,
     effectsMap:   { ...OSL_CARD_EFFECTS },
     packIds:      [...OSL_PACK_IDS],
@@ -261,7 +309,7 @@ async function seedFromStatic(overwrite = false) {
   if (count > 0) await batch.commit();
 
   invalidate();
-  logger.info({ count, overwrite }, 'content_engine_seeded');
+  logInfo('content_engine_seeded', { count, overwrite });
   return count;
 }
 

@@ -9,7 +9,7 @@ function resolvedPlayerName(roomId, uid, fallback) {
   return panelRooms.get(roomId)?.players?.[uid]?.playerName
     || String(fallback || "Jogador").slice(0, 80);
 }
-const { levelFromXP } = require("../data/cards");
+const { levelFromXP, OSL_BASIC_CARDS } = require("../data/cards");
 const contentEngine = require("../services/contentEngine");
 const { logInfo, logWarn }              = require("../logger");
 const { asyncHandler, sendError }       = require("../utils");
@@ -21,6 +21,45 @@ const liveService                       = require("../services/liveService");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
+
+function playableCards(cards) {
+  if (!Array.isArray(cards)) return [];
+  return cards.filter(card => (
+    card
+    && typeof card === 'object'
+    && typeof card.title === 'string'
+    && card.title.trim()
+    && typeof card.text === 'string'
+    && card.text.trim()
+  ));
+}
+
+// Invariante do ritual: nunca persiste started=true com um deck vazio/inválido.
+// Preserva primeiro o deck anterior à etapa opcional; em último caso usa as
+// cartas básicas embaralhadas pelo próprio GameEngine.
+function ensurePlayableDeck(candidate, previousDeck, stage) {
+  const playableCandidate = playableCards(candidate);
+  if (playableCandidate.length > 0) return playableCandidate;
+
+  const playablePrevious = playableCards(previousDeck);
+  if (playablePrevious.length > 0) {
+    logWarn('ritual_deck_stage_fallback', { stage, deckSize: playablePrevious.length });
+    return playablePrevious;
+  }
+
+  const { deck: staticDeck } = engine.buildDeck({
+    basicCards: playableCards(OSL_BASIC_CARDS),
+    packCards: [],
+    customContributions: [],
+  });
+  const playableStatic = playableCards(staticDeck);
+  if (playableStatic.length === 0) {
+    throw new Error('RITUAL_DECK_EMPTY');
+  }
+
+  logWarn('ritual_deck_static_fallback', { stage, deckSize: playableStatic.length });
+  return playableStatic;
+}
 
 async function buildVerifiedDeck(db, firebaseIdToken, players) {
   // Resolve uid do host a partir do Firebase ID token
@@ -112,6 +151,7 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     uidFromFirebaseToken(firebaseIdToken),
   ]);
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+  deck = ensurePlayableDeck(deck, rawDeck, 'start:adaptive');
 
   // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
   // Feature flag: contextual_selection_v1 | Fallback: deck original
@@ -133,6 +173,8 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
       }
     } catch (_) {}
   }
+
+  deck = ensurePlayableDeck(deck, rawDeck, 'start:final');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -285,6 +327,7 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   ]);
   const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
+  deck = ensurePlayableDeck(deck, rawDeck, 'reset:adaptive');
 
   // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
   try {
@@ -305,6 +348,8 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
       }
     } catch (_) {}
   }
+
+  deck = ensurePlayableDeck(deck, rawDeck, 'reset:final');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
 
