@@ -18,6 +18,8 @@
 
 const express = require('express');
 const admin   = require('firebase-admin');
+const { getDb: _getFirestoreDb } = require('../services/firestore');
+const { FieldValue } = require('firebase-admin/firestore');
 const { asyncHandler, sendError } = require('../utils');
 const socialGraph   = require('../services/socialGraph');
 const liveService   = require('../services/liveService');
@@ -140,10 +142,10 @@ router.post('/daily/complete', asyncHandler(async (req, res) => {
   const daily = await liveService.getDailyRitual().catch(() => null);
   if (!daily) return sendError(res, 404, 'RITUAL_NAO_ENCONTRADO');
 
-  const db  = admin.firestore();
+  const db  = _getFirestoreDb();
   const ref = db.collection('daily_ritual').doc(daily.date);
 
-  await ref.update({ completionCount: admin.firestore.FieldValue.increment(1) }).catch(() => {});
+  await ref.update({ completionCount: FieldValue.increment(1) }).catch(() => {});
 
   const snap     = await ref.get().catch(() => null);
   const newCount = snap?.data()?.completionCount ?? (daily.completionCount + 1);
