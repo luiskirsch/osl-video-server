@@ -57,7 +57,12 @@ router.get('/hub', asyncHandler(async (req, res) => {
     liveService.getActiveSeason(),
   ]);
 
-  const daily       = dailyRes.status       === 'fulfilled' ? dailyRes.value       : null;
+  const dailyRaw    = dailyRes.status       === 'fulfilled' ? dailyRes.value       : null;
+  const daily       = dailyRaw ? {
+    ...dailyRaw,
+    question:    dailyRaw.cardText  || dailyRaw.cardTitle || '',
+    respondents: dailyRaw.completionCount ?? 0,
+  } : null;
   const world       = worldRes.status       === 'fulfilled' ? worldRes.value       : null;
   const connections = connectionsRes.status === 'fulfilled' ? connectionsRes.value : [];
   const unread      = unreadRes.status      === 'fulfilled' ? unreadRes.value      : 0;
@@ -124,6 +129,26 @@ router.get('/hub', asyncHandler(async (req, res) => {
     fragment,
     unread:       unread ?? 0,
   });
+}));
+
+// ── POST /daily/complete ──────────────────────────────────────────────────────
+
+router.post('/daily/complete', asyncHandler(async (req, res) => {
+  const uid = await getUid(req);
+  if (!uid) return sendError(res, 401, 'TOKEN_INVALIDO');
+
+  const daily = await liveService.getDailyRitual().catch(() => null);
+  if (!daily) return sendError(res, 404, 'RITUAL_NAO_ENCONTRADO');
+
+  const db  = admin.firestore();
+  const ref = db.collection('daily_ritual').doc(daily.date);
+
+  await ref.update({ completionCount: admin.firestore.FieldValue.increment(1) }).catch(() => {});
+
+  const snap     = await ref.get().catch(() => null);
+  const newCount = snap?.data()?.completionCount ?? (daily.completionCount + 1);
+
+  return res.json({ ok: true, xp: daily.bonusXp || 35, completionCount: newCount });
 }));
 
 // ── POST /hub/touch ───────────────────────────────────────────────────────────
