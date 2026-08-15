@@ -167,7 +167,12 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
 
   await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi iniciado.", createdAt: now });
-  await db.collection("salas").doc(roomId).update({ arenaActive: true, currentSessionId: sessionId, updatedAt: now });
+  await db.collection("salas").doc(roomId).update({
+    status: "started",
+    arenaActive: true,
+    currentSessionId: sessionId,
+    updatedAt: now,
+  });
 
   events.emit('ritual.started', {
     roomId, sessionId, hostUid: hostUid || null,
@@ -339,7 +344,11 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
     gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
   });
   sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
-  db.collection("salas").doc(roomId).update({ currentSessionId: sessionId }).catch(() => {});
+  await db.collection("salas").doc(roomId).update({
+    status: "started",
+    currentSessionId: sessionId,
+    updatedAt: now,
+  });
 
   await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi reiniciado.", createdAt: now });
 

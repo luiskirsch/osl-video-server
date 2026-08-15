@@ -149,7 +149,7 @@ router.get('/ops/live', requireAdmin, asyncHandler(async (_req, res) => {
 // ?type=shadow|applied — filtro opcional
 
 router.get('/ops/selection-audit', requireAdmin, asyncHandler(async (req, res) => {
-  const db = require('../services/firestore').db;
+  const db = require('../services/firestore').getDb();
   if (!db) return res.status(503).json({ ok: false, error: 'DB_INDISPONIVEL' });
 
   const limit     = Math.min(Number(req.query.limit || 20), 100);

@@ -36,7 +36,7 @@ const NOVELTY_CAP  = 5; // cartas vistas ≥ N vezes ganham penalidade de novida
 
 let _db = null;
 function getDb() {
-  if (!_db) _db = require('./firestore').db;
+  if (!_db) _db = require('./firestore').getDb();
   return _db;
 }
 

@@ -121,7 +121,7 @@ async function getDailyRitual() {
     });
   }
 
-  _dailyCache = { data: ritual, date: today };
+  if (ritual) _dailyCache = { data: ritual, date: today };
   return ritual;
 }
 

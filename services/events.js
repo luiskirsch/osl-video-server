@@ -82,7 +82,7 @@ function once(topic, handler) {
 // Lazy-require evita circular dep no boot (firestore.js → events.js → firestore.js)
 let _db = null;
 function getDb() {
-  if (!_db) _db = require('./firestore').db;
+  if (!_db) _db = require('./firestore').getDb();
   return _db;
 }
 

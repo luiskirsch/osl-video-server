@@ -30,7 +30,7 @@ const events  = require('./events');
 
 let _db = null;
 function getDb() {
-  if (!_db) _db = require('./firestore').db;
+  if (!_db) _db = require('./firestore').getDb();
   return _db;
 }
 

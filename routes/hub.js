@@ -165,14 +165,14 @@ router.post('/hub/touch', asyncHandler(async (req, res) => {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function _getUserDoc(uid) {
-  const db = require('../services/firestore').db;
+  const db = require('../services/firestore').getDb();
   if (!db) return null;
   const snap = await db.collection('users').doc(uid).get();
   return snap.exists ? snap.data() : null;
 }
 
 async function _getMyGroups(uid) {
-  const db = require('../services/firestore').db;
+  const db = require('../services/firestore').getDb();
   if (!db) return [];
 
   const snap = await db.collection('recurring_schedules')
@@ -209,7 +209,7 @@ async function _resolveLastSession(userDoc, rep) {
 
   if (!lastRoomId) return null;
 
-  const db = require('../services/firestore').db;
+  const db = require('../services/firestore').getDb();
   if (!db) return { roomId: lastRoomId, sessionId: lastSessionId, roomName: null, sessionAt: lastSessionAt, dna: null };
 
   // Lê sala + DNA em paralelo (uma round-trip cada)

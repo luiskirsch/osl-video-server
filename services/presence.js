@@ -15,7 +15,7 @@ const ACTIVITY_STALE_MS = 90 * 60_000; // 90 minutos
 
 let _db = null;
 function getDb() {
-  if (!_db) _db = require('./firestore').db;
+  if (!_db) _db = require('./firestore').getDb();
   return _db;
 }
 

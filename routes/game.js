@@ -93,6 +93,46 @@ router.post("/game/room/create", roomLimiter, (req, res) => {
   }
 });
 
+// Recupera um hostToken para o anfitriao autenticado da sala.
+// O token do Firebase prova a identidade; o Firestore continua sendo a fonte
+// de verdade para a propriedade da sala. Nenhum dado da sala e devolvido.
+router.post("/game/room/host-token", roomLimiter, asyncHandler(async (req, res) => {
+  const roomId = normalizeRoomId(req.body?.roomId);
+  const firebaseIdToken = String(req.body?.firebaseIdToken || "").trim();
+
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!firebaseIdToken) return sendError(res, 400, "FIREBASE_TOKEN_OBRIGATORIO");
+
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+  } catch (_) {
+    return sendError(res, 401, "FIREBASE_TOKEN_INVALIDO");
+  }
+
+  const roomSnap = await db.collection("salas").doc(roomId).get();
+  if (!roomSnap.exists) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+
+  const hostId = String(roomSnap.data()?.hostId || "").trim();
+  if (!hostId || decoded.uid !== hostId) {
+    return sendError(res, 403, "USUARIO_NAO_E_ANFITRIAO");
+  }
+
+  let hostToken;
+  try {
+    hostToken = signHostToken(roomId);
+  } catch (error) {
+    logError("game_room_host_token_sign_error", error, { roomId });
+    return sendError(res, 503, "HOST_TOKEN_INDISPONIVEL");
+  }
+
+  logInfo("game_room_host_token_issued", { roomId, uid: decoded.uid });
+  return res.json({ ok: true, hostToken });
+}));
+
 router.post("/game/player/join", joinLimiter, (req, res) => {
   try {
     const roomId     = normalizeRoomId(req.body?.roomId);
@@ -217,6 +257,32 @@ router.post("/game/room/request-join", (req, res) => {
   } catch (error) {
     logError("game_room_request_join_error", error);
     return sendError(res, 500, "ERRO_GAME_ROOM_REQUEST_JOIN");
+  }
+});
+
+// Status publico e minimo para o solicitante acompanhar o pedido de entrada.
+// Nao expoe nome da sala, jogadores ou qualquer outro estado interno.
+router.get("/game/room/:roomId/join-status", joinLimiter, (req, res) => {
+  try {
+    const roomId   = normalizeRoomId(req.params.roomId);
+    const playerId = normalizePlayerId(req.query.playerId);
+
+    if (!roomId || !playerId) {
+      return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+    }
+
+    const room = panelRooms.get(roomId);
+    const key  = `${roomId}:${playerId}`;
+    let status = "denied";
+
+    if (room?.players?.[playerId]) status = "approved";
+    else if (pendingJoinRequests.has(key)) status = "pending";
+
+    res.set("Cache-Control", "no-store");
+    return res.json({ ok: true, status });
+  } catch (error) {
+    logError("game_room_join_status_error", error);
+    return sendError(res, 500, "ERRO_GAME_ROOM_JOIN_STATUS");
   }
 });
 
