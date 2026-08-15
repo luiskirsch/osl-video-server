@@ -114,10 +114,10 @@ async function getDailyRitual() {
   const snap = await db.collection('daily_ritual').doc(today).get();
   let ritual = snap.exists ? snap.data() : null;
 
-  if (!ritual) {
+  if (!ritual || !ritual.cardText) {
     ritual = await _generateDailyRitual(today, db).catch(err => {
       logger.warn({ err, today }, 'daily_ritual_generate_failed');
-      return null;
+      return ritual; // mantém doc antigo se geração falhar
     });
   }
 
