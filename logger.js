@@ -102,7 +102,58 @@ function logError(message, error, meta = {}) {
   writeToFile(line);
 }
 
+// Compatibilidade com os serviços mais novos, que usam a assinatura do Pino:
+//   logger.info({ roomId }, "evento")
+// O logger original do projeto expunha apenas logInfo("evento", { roomId }).
+// Manter as duas formas evita que um único inicializador interrompa todo o
+// ecossistema de eventos (reputação, social, mundo e notificações).
+function normalizeCompatArgs(first, second, fallbackMessage) {
+  if (typeof first === "string") {
+    return {
+      message: first || fallbackMessage,
+      meta: second && typeof second === "object" && !(second instanceof Error) ? second : {}
+    };
+  }
+
+  return {
+    message: typeof second === "string" && second ? second : fallbackMessage,
+    meta: first && typeof first === "object" ? first : {}
+  };
+}
+
+function info(first, second) {
+  const { message, meta } = normalizeCompatArgs(first, second, "info");
+  logInfo(message, meta);
+}
+
+function warn(first, second) {
+  const { message, meta } = normalizeCompatArgs(first, second, "warning");
+  logWarn(message, meta);
+}
+
+function error(first, second, third) {
+  const { message, meta: rawMeta } = normalizeCompatArgs(first, second, "error");
+  const meta = { ...rawMeta };
+
+  let cause = null;
+  if (first instanceof Error) cause = first;
+  if (second instanceof Error) cause = second;
+  if (third instanceof Error) cause = third;
+  if (!cause && rawMeta.err instanceof Error) cause = rawMeta.err;
+  if (!cause && rawMeta.error instanceof Error) cause = rawMeta.error;
+  if (!cause) {
+    const detail = rawMeta.err || rawMeta.error || (typeof second === "string" ? null : second);
+    cause = new Error(typeof detail === "string" ? detail : message);
+  }
+
+  delete meta.err;
+  delete meta.error;
+  if (third && typeof third === "object" && !(third instanceof Error)) Object.assign(meta, third);
+  logError(message, cause, meta);
+}
+
 module.exports = {
   APP_START_TIME, LOG_FILE, MAX_LOG_SIZE_BYTES,
-  writeToFile, logInfo, logWarn, logError
+  writeToFile, logInfo, logWarn, logError,
+  info, warn, error
 };

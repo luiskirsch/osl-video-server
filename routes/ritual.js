@@ -18,6 +18,7 @@ const entitlements                      = require("../services/entitlements");
 const { GameEngine }                    = require("../game/engine");
 const adaptiveEngine                    = require("../services/adaptiveEngine");
 const liveService                       = require("../services/liveService");
+const reputation                        = require("../services/reputation");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
@@ -104,10 +105,51 @@ async function buildVerifiedDeck(db, firebaseIdToken, players) {
 
 function sanitizePlayers(players) {
   if (!Array.isArray(players)) return [];
+  const seen = new Set();
   return players.slice(0, 20).map(p => ({
-    id:   String(p.id   || "").slice(0, 100),
-    name: String(p.name || "Jogador").slice(0, 80),
-  }));
+    id:   String(p.id   || "").trim().slice(0, 100),
+    name: String(p.name || "Jogador").trim().slice(0, 80),
+  })).filter(p => p.id && !seen.has(p.id) && seen.add(p.id));
+}
+
+// O array vindo do navegador serve apenas para indicar o roster visível. A
+// ligação com a conta e com o deck é sempre reconstruída de fontes que já
+// validaram o Firebase UID: panelRooms e membership Firestore da sala.
+async function resolveSessionPlayers(db, roomId, rawPlayers) {
+  const players = sanitizePlayers(rawPlayers);
+  if (!players.length) return [];
+
+  const panelPlayers = panelRooms.get(roomId)?.players || {};
+  const refs = players.map(p => db.collection("salas").doc(roomId).collection("players").doc(p.id));
+  const snaps = await db.getAll(...refs).catch(() => []);
+  const membershipById = new Map(snaps.filter(Boolean).map(snap => [snap.id, snap.exists ? snap.data() : null]));
+
+  return players.map(player => {
+    const panelPlayer = panelPlayers[player.id] || null;
+    const membership  = membershipById.get(player.id) || null;
+    const panelUid     = String(panelPlayer?.userId || "").trim();
+    const memberUid    = String(membership?.userId || "").trim();
+    const userId       = panelUid === player.id
+      ? panelUid
+      : (memberUid === player.id ? memberUid : null);
+
+    return {
+      id: player.id,
+      name: String(panelPlayer?.playerName || membership?.name || player.name || "Jogador").slice(0, 80),
+      userId,
+      activeDeckId: userId && membership?.activeDeckId
+        ? String(membership.activeDeckId).slice(0, 120)
+        : null,
+    };
+  });
+}
+
+async function verifyRoomHost(db, roomId, hostUid) {
+  if (!hostUid) return false;
+  const roomSnap = await db.collection("salas").doc(roomId).get().catch(() => null);
+  if (!roomSnap?.exists) return false;
+  const expectedHostUid = String(roomSnap.data()?.hostId || "").trim();
+  return !expectedHostUid || expectedHostUid === hostUid;
 }
 
 // Sanitiza payload de evento: apenas primitivos, chaves ≤50 chars, strings ≤500 chars
@@ -145,11 +187,23 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
-  const players = sanitizePlayers(rawPlayers);
-  const [{ deck: rawDeck }, hostUid] = await Promise.all([
-    buildVerifiedDeck(db, firebaseIdToken || null, players),
-    uidFromFirebaseToken(firebaseIdToken),
-  ]);
+  const hostUid = await uidFromFirebaseToken(firebaseIdToken);
+  if (!await verifyRoomHost(db, roomId, hostUid)) {
+    return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+  }
+
+  const players = await resolveSessionPlayers(db, roomId, rawPlayers);
+
+  const existingRoomSnap = await db.collection("salas").doc(roomId).get();
+  if (!existingRoomSnap.exists) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+  if (String(existingRoomSnap.data()?.hostId || "").trim() !== hostUid) {
+    return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+  }
+  const existingSessionId = String(existingRoomSnap.data()?.currentSessionId || "").trim();
+  if (existingSessionId) {
+    return res.json({ ok: true, alreadyStarted: true, sessionId: existingSessionId });
+  }
+  const { deck: rawDeck } = await buildVerifiedDeck(db, firebaseIdToken || null, players);
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'start:adaptive');
 
@@ -162,65 +216,94 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
   } catch (_) {}
 
-  // Injeta fragmento do ritual diário anterior (pessoal do host)
-  if (hostUid) {
-    try {
-      const fragmentEngine = require('../services/fragmentEngine');
-      const fragment = await fragmentEngine.consumeFragment(hostUid);
-      if (fragment) {
-        const pos = Math.max(1, Math.floor(deck.length / 3));
-        deck.splice(pos, 0, fragment);
-      }
-    } catch (_) {}
-  }
-
   deck = ensurePlayableDeck(deck, rawDeck, 'start:final');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  const roomRef = db.collection("salas").doc(roomId);
 
   // Gera session antes de escrever o ritual para incluir sessionId no doc
   const sessRef   = db.collection("salas").doc(roomId).collection("sessions").doc();
   const sessionId = sessRef.id;
+  const startedEventRef = sessRef.collection("events").doc();
+  const historyRef = ritualRef.collection("history").doc();
 
-  await ritualRef.set({
-    started: true,
-    remainingDeck: deck,
-    currentCard: null,
-    activeEffect: null,
-    pendingDeathrattle: null,
-    cardsRevealedCount: 0,
-    sessionId,
-    updatedAt: now,
-    updatedBy: "server",
-    sessionStartedAt: Date.now()
-  });
+  let reservation;
+  try {
+    reservation = await db.runTransaction(async tx => {
+    const freshRoomSnap = await tx.get(roomRef);
+    if (!freshRoomSnap.exists) throw Object.assign(new Error("SALA_NAO_ENCONTRADA"), { code: "room-missing" });
+    const freshRoom = freshRoomSnap.data() || {};
+    if (String(freshRoom.hostId || "") !== hostUid) {
+      throw Object.assign(new Error("ANFITRIAO_NAO_AUTORIZADO"), { code: "host-changed" });
+    }
+    const activeSessionId = String(freshRoom.currentSessionId || "").trim();
+    if (activeSessionId) return { existingSessionId: activeSessionId };
 
-  // Cria doc de sessão e evento inicial via Admin SDK (bypass Firestore rules)
-  await sessRef.set({
-    sessionId,
-    roomId,
-    hostId: hostUid || null,
-    status: "active",
-    createdAt: now,
-    players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
-    gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
-  });
-  sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
+    const reservedDeck = deck.slice();
+    const fragmentEngine = require('../services/fragmentEngine');
+    const fragment = await fragmentEngine.claimFragmentInTransaction(tx, hostUid, db);
+    if (fragment) {
+      const position = Math.max(1, Math.floor(reservedDeck.length / 3));
+      reservedDeck.splice(position, 0, fragment);
+    }
 
-  await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi iniciado.", createdAt: now });
-  await db.collection("salas").doc(roomId).update({
-    status: "started",
-    arenaActive: true,
-    currentSessionId: sessionId,
-    updatedAt: now,
-  });
+    tx.set(ritualRef, {
+      started: true,
+      remainingDeck: reservedDeck,
+      currentCard: null,
+      activeEffect: null,
+      pendingDeathrattle: null,
+      cardsRevealedCount: 0,
+      sessionId,
+      updatedAt: now,
+      updatedBy: "server",
+      sessionStartedAt: Date.now(),
+    });
+    tx.set(sessRef, {
+      sessionId,
+      roomId,
+      hostId: hostUid,
+      status: "active",
+      createdAt: now,
+      players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
+      gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
+    });
+    tx.set(startedEventRef, {
+      type: "SESSION_STARTED",
+      ts: now,
+      actor: "server",
+      payload: {},
+    });
+    tx.set(historyRef, {
+      type: "Ritual",
+      text: "O ritual foi iniciado.",
+      createdAt: now,
+    });
+    tx.update(roomRef, {
+      status: "started",
+      arenaActive: true,
+      currentSessionId: sessionId,
+      updatedAt: now,
+    });
+      return { existingSessionId: null, deck: reservedDeck };
+    });
+  } catch (error) {
+    if (error?.code === "room-missing") return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+    if (error?.code === "host-changed") return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+    throw error;
+  }
+
+  if (reservation.existingSessionId) {
+    return res.json({ ok: true, alreadyStarted: true, sessionId: reservation.existingSessionId });
+  }
+  deck = reservation.deck;
 
   events.emit('ritual.started', {
     roomId, sessionId, hostUid: hostUid || null,
     deckSize: deck.length,
     playerCount: players.length,
-    players: players.map(p => ({ id: p.id, name: p.name })),
+    players: players.map(p => ({ id: p.id, userId: p.userId || null, name: p.name })),
   }, { persist: true });
 
   logInfo("ritual_started", { roomId, deckSize: deck.length, sessionId });
@@ -229,11 +312,26 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
 
 // ── POST /game/ritual/next-card ───────────────────────────────────────────────
 router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
-  const { roomId, hostToken, players: rawPlayers } = req.body || {};
+  const {
+    roomId,
+    hostToken,
+    players: rawPlayers,
+    commandId: rawCommandId,
+    expectedCardsRevealedCount: rawExpectedCardsRevealedCount,
+  } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!verifyHostToken(hostToken, roomId)) {
     logWarn("ritual_next_card_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
     return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
+  }
+
+  const commandId = String(rawCommandId || "").trim();
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(commandId)) {
+    return sendError(res, 400, "COMMAND_ID_INVALIDO");
+  }
+  const expectedCardsRevealedCount = Number(rawExpectedCardsRevealedCount);
+  if (!Number.isInteger(expectedCardsRevealedCount) || expectedCardsRevealedCount < 0) {
+    return sendError(res, 400, "EXPECTED_CARDS_REVEALED_COUNT_INVALIDO");
   }
 
   const db = getDb();
@@ -241,67 +339,177 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
 
   const players = sanitizePlayers(rawPlayers);
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
-  const snap = await ritualRef.get();
-
-  if (!snap.exists) return sendError(res, 404, "RITUAL_NAO_INICIADO");
-
-  const data = snap.data();
-  const deck = Array.isArray(data.remainingDeck) ? [...data.remainingDeck] : [];
-  if (!deck.length) return res.status(409).json({ ok: false, error: "DECK_VAZIO" });
-
-  const card = deck.shift();
-  const cardsRevealedCount = (data.cardsRevealedCount || 0) + 1;
-  const effectsMap = await contentEngine.getCardEffectsMap();
-  const { battlecry, deathrattle } = engine.prepareCard(card, players, effectsMap);
-
+  const commandRef = ritualRef.collection("commands").doc(commandId);
+  const historyRef = ritualRef.collection("history").doc(`card_${commandId}`);
+  const platformEventRef = db.collection("platform_events").doc();
+  let effectsMapPromise = null;
   const now = admin.firestore.FieldValue.serverTimestamp();
-  const currentSessionId = data.sessionId || null;
+  const eventTs = Date.now();
 
-  await ritualRef.set({
-    started: true,
-    remainingDeck: deck,
-    currentCard: card,
-    activeEffect: battlecry || null,
-    pendingDeathrattle: deathrattle || null,
-    cardsRevealedCount,
-    updatedAt: now,
-    updatedBy: "server"
-  }, { merge: true });
+  const outcome = await db.runTransaction(async tx => {
+    const [commandSnap, ritualSnap] = await Promise.all([
+      tx.get(commandRef),
+      tx.get(ritualRef),
+    ]);
 
-  await ritualRef.collection("history").add({ type: card.type || "Ritual", text: card.title || "Carta", createdAt: now });
-
-  // Registra eventos e atualiza gameState na sessão via Admin SDK
-  if (currentSessionId) {
-    const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(currentSessionId);
-    sessRef.collection("events").add({
-      type: "CARD_REVEALED", ts: now, actor: "server",
-      payload: { title: card.title || null, type: card.type || null, count: cardsRevealedCount },
-    }).catch(() => {});
-    if (battlecry) {
-      sessRef.collection("events").add({
-        type: "EFFECT_TRIGGERED", ts: now, actor: "server",
-        payload: { effectId: battlecry.id, effectType: battlecry.type, phase: "battlecry", cardTitle: card.title || null },
-      }).catch(() => {});
+    if (commandSnap.exists) {
+      const previous = commandSnap.data() || {};
+      const currentSessionId = String(ritualSnap.data()?.sessionId || "").trim() || null;
+      if (
+        Number(previous.expectedCardsRevealedCount) !== expectedCardsRevealedCount
+        || (previous.sessionId || null) !== currentSessionId
+      ) {
+        return { status: "command-reused" };
+      }
+      return { status: "replayed", response: previous.response || null };
     }
-    sessRef.update({
-      gameState: { cardsRevealedCount, currentCardTitle: card.title || null, phase: "playing" },
-    }).catch(() => {});
+    if (!ritualSnap.exists || ritualSnap.data()?.started !== true) {
+      return { status: "not-started" };
+    }
+
+    const data = ritualSnap.data() || {};
+    const storedCount = Number(data.cardsRevealedCount);
+    const currentCount = Number.isInteger(storedCount) && storedCount >= 0 ? storedCount : 0;
+    if (currentCount !== expectedCardsRevealedCount) {
+      return { status: "count-conflict", currentCount };
+    }
+
+    const deck = Array.isArray(data.remainingDeck) ? [...data.remainingDeck] : [];
+    if (!deck.length) return { status: "empty-deck", currentCount };
+
+    const card = deck.shift();
+    const cardsRevealedCount = currentCount + 1;
+    if (!effectsMapPromise) effectsMapPromise = contentEngine.getCardEffectsMap();
+    const effectsMap = await effectsMapPromise;
+    const { battlecry, deathrattle } = engine.prepareCard(card, players, effectsMap);
+    const currentSessionId = String(data.sessionId || "").trim() || null;
+    const eventPayload = {
+      roomId,
+      sessionId: currentSessionId,
+      cardTitle: card.title || null,
+      cardType: card.type || null,
+      cardId: card.id || null,
+      hasEffect: !!battlecry,
+      effectType: battlecry?.type || null,
+      cardsRevealedCount,
+      remaining: deck.length,
+      commandId,
+    };
+    const response = {
+      ok: true,
+      commandId,
+      card,
+      cardsRevealedCount,
+      remaining: deck.length,
+    };
+
+    let sessRef = null;
+    let sessionSnap = null;
+    if (currentSessionId) {
+      sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(currentSessionId);
+      sessionSnap = await tx.get(sessRef);
+    }
+
+    tx.set(ritualRef, {
+      started: true,
+      remainingDeck: deck,
+      currentCard: card,
+      activeEffect: battlecry || null,
+      pendingDeathrattle: deathrattle || null,
+      cardsRevealedCount,
+      updatedAt: now,
+      updatedBy: "server",
+    }, { merge: true });
+    tx.create(commandRef, {
+      type: "ritual.next-card",
+      commandId,
+      sessionId: currentSessionId,
+      expectedCardsRevealedCount,
+      response,
+      createdAt: now,
+    });
+    tx.create(historyRef, {
+      type: card.type || "Ritual",
+      text: card.title || "Carta",
+      commandId,
+      createdAt: now,
+    });
+    tx.create(platformEventRef, {
+      topic: "ritual.card_revealed",
+      payload: eventPayload,
+      ts: eventTs,
+      createdAt: now,
+    });
+
+    if (sessRef && sessionSnap?.exists) {
+      const sessionEventRef = sessRef.collection("events").doc(`card_${commandId}`);
+      tx.create(sessionEventRef, {
+        type: "CARD_REVEALED",
+        ts: now,
+        actor: "server",
+        commandId,
+        payload: {
+          title: card.title || null,
+          type: card.type || null,
+          count: cardsRevealedCount,
+        },
+      });
+      if (battlecry) {
+        const effectEventRef = sessRef.collection("events").doc(`effect_${commandId}`);
+        tx.create(effectEventRef, {
+          type: "EFFECT_TRIGGERED",
+          ts: now,
+          actor: "server",
+          commandId,
+          payload: {
+            effectId: battlecry.id,
+            effectType: battlecry.type,
+            phase: "battlecry",
+            cardTitle: card.title || null,
+          },
+        });
+      }
+      tx.update(sessRef, {
+        gameState: {
+          cardsRevealedCount,
+          currentCardTitle: card.title || null,
+          phase: "playing",
+        },
+      });
+    }
+
+    return { status: "applied", response, eventPayload };
+  });
+
+  if (outcome.status === "not-started") return sendError(res, 404, "RITUAL_NAO_INICIADO");
+  if (outcome.status === "empty-deck") {
+    return res.status(409).json({ ok: false, error: "DECK_VAZIO", cardsRevealedCount: outcome.currentCount });
+  }
+  if (outcome.status === "count-conflict") {
+    return res.status(409).json({
+      ok: false,
+      error: "CARDS_REVEALED_COUNT_DIVERGIU",
+      expectedCardsRevealedCount,
+      cardsRevealedCount: outcome.currentCount,
+    });
+  }
+  if (outcome.status === "command-reused") {
+    return res.status(409).json({ ok: false, error: "COMMAND_ID_REUTILIZADO", commandId });
+  }
+  if (outcome.status === "replayed") {
+    if (!outcome.response) return sendError(res, 409, "COMMAND_RESULT_INDISPONIVEL");
+    return res.json({ ...outcome.response, alreadyApplied: true });
   }
 
-  events.emit('ritual.card_revealed', {
+  events.emit("ritual.card_revealed", outcome.eventPayload);
+  logInfo("ritual_next_card", {
     roomId,
-    sessionId: currentSessionId,
-    cardTitle:  card.title  || null,
-    cardType:   card.type   || null,
-    cardId:     card.id     || null,
-    hasEffect:  !!battlecry,
-    effectType: battlecry?.type || null,
-    cardsRevealedCount,
-    remaining: deck.length,
-  }, { persist: true });
-
-  logInfo("ritual_next_card", { roomId, cardTitle: card.title, cardsRevealedCount, remaining: deck.length });
-  return res.json({ ok: true, card, cardsRevealedCount, remaining: deck.length });
+    commandId,
+    cardTitle: outcome.response.card?.title || null,
+    cardsRevealedCount: outcome.response.cardsRevealedCount,
+    remaining: outcome.response.remaining,
+  });
+  return res.json({ ...outcome.response, alreadyApplied: false });
 }));
 
 // ── POST /game/ritual/reset ───────────────────────────────────────────────────
@@ -316,16 +524,30 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
-  const players = sanitizePlayers(rawPlayers);
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
+  const roomRef = db.collection("salas").doc(roomId);
 
-  // Lê sessionId anterior antes de sobrescrever
-  const [oldSnap, { deck: rawDeck }, hostUid] = await Promise.all([
+  const hostUid = await uidFromFirebaseToken(firebaseIdToken);
+  if (!await verifyRoomHost(db, roomId, hostUid)) {
+    return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+  }
+  const players = await resolveSessionPlayers(db, roomId, rawPlayers);
+
+  // Captura a sessão esperada antes de preparar o novo deck. A transação
+  // abaixo relê e compara esse valor, portanto uma segunda chamada concorrente
+  // nunca encerra a sessão que acabou de ser criada pela primeira.
+  const [oldSnap, roomBeforeSnap, { deck: rawDeck }] = await Promise.all([
     ritualRef.get(),
+    roomRef.get(),
     buildVerifiedDeck(db, firebaseIdToken || null, players),
-    uidFromFirebaseToken(firebaseIdToken),
   ]);
-  const oldSessionId = oldSnap.exists ? (oldSnap.data().sessionId || null) : null;
+  if (!roomBeforeSnap.exists) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+  const ritualSessionId = oldSnap.exists ? String(oldSnap.data()?.sessionId || "").trim() : "";
+  const roomSessionIdBefore = String(roomBeforeSnap.data()?.currentSessionId || "").trim();
+  if (ritualSessionId && roomSessionIdBefore && ritualSessionId !== roomSessionIdBefore) {
+    return sendError(res, 409, "ESTADO_DE_SESSAO_INCONSISTENTE");
+  }
+  const oldSessionId = roomSessionIdBefore || ritualSessionId || null;
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'reset:adaptive');
 
@@ -337,18 +559,6 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
     deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
   } catch (_) {}
 
-  // Injeta fragmento do ritual diário anterior (pessoal do host)
-  if (hostUid) {
-    try {
-      const fragmentEngine = require('../services/fragmentEngine');
-      const fragment = await fragmentEngine.consumeFragment(hostUid);
-      if (fragment) {
-        const pos = Math.max(1, Math.floor(deck.length / 3));
-        deck.splice(pos, 0, fragment);
-      }
-    } catch (_) {}
-  }
-
   deck = ensurePlayableDeck(deck, rawDeck, 'reset:final');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
@@ -356,46 +566,111 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   // Gera nova sessão
   const sessRef   = db.collection("salas").doc(roomId).collection("sessions").doc();
   const sessionId = sessRef.id;
+  const oldSessRef = oldSessionId
+    ? db.collection("salas").doc(roomId).collection("sessions").doc(oldSessionId)
+    : null;
+  const startedEventRef = sessRef.collection("events").doc();
+  const resetEventRef = oldSessRef ? oldSessRef.collection("events").doc() : null;
+  const historyRef = ritualRef.collection("history").doc();
 
-  await ritualRef.set({
-    started: true,
-    remainingDeck: deck,
-    currentCard: null,
-    activeEffect: null,
-    pendingDeathrattle: null,
-    cardsRevealedCount: 0,
-    sessionId,
-    updatedAt: now,
-    updatedBy: "server"
-  }, { merge: true });
+  let reservation;
+  try {
+    reservation = await db.runTransaction(async tx => {
+      const reads = [tx.get(roomRef), tx.get(ritualRef)];
+      if (oldSessRef) reads.push(tx.get(oldSessRef));
+      const [freshRoomSnap, freshRitualSnap, freshOldSessionSnap] = await Promise.all(reads);
+      if (!freshRoomSnap.exists) throw Object.assign(new Error("SALA_NAO_ENCONTRADA"), { code: "room-missing" });
+      const freshRoom = freshRoomSnap.data() || {};
+      if (String(freshRoom.hostId || "") !== hostUid) {
+        throw Object.assign(new Error("ANFITRIAO_NAO_AUTORIZADO"), { code: "host-changed" });
+      }
 
-  // Encerra sessão antiga assíncronamente
-  if (oldSessionId) {
-    const oldSessRef = db.collection("salas").doc(roomId).collection("sessions").doc(oldSessionId);
-    Promise.all([
-      oldSessRef.update({ status: "ended", endedAt: now }),
-      oldSessRef.collection("events").add({ type: "GAME_RESET", ts: now, actor: "server", payload: {} }),
-    ]).catch(() => {});
+      const freshRitualSessionId = String(freshRitualSnap.data()?.sessionId || "").trim();
+      if (freshRitualSessionId && freshRitualSessionId !== String(oldSessionId || "")) {
+        return { existingSessionId: freshRitualSessionId };
+      }
+      const roomSessionId = String(freshRoom.currentSessionId || "").trim();
+      if (roomSessionId && roomSessionId !== String(oldSessionId || "")) {
+        return { existingSessionId: roomSessionId };
+      }
+      const oldSessionStatus = freshOldSessionSnap?.exists
+        ? String(freshOldSessionSnap.data()?.status || "").trim()
+        : "";
+      if (oldSessionStatus && !["active", "ended"].includes(oldSessionStatus)) {
+        throw Object.assign(new Error("SESSAO_NAO_PODE_SER_REINICIADA"), { code: "session-invalid-status" });
+      }
+      if (oldSessionStatus === "active") {
+        throw Object.assign(new Error("SESSAO_ATIVA_PRECISA_SER_ENCERRADA"), { code: "session-still-active" });
+      }
+
+      const reservedDeck = deck.slice();
+      const fragmentEngine = require('../services/fragmentEngine');
+      const fragment = await fragmentEngine.claimFragmentInTransaction(tx, hostUid, db);
+      if (fragment) {
+        const position = Math.max(1, Math.floor(reservedDeck.length / 3));
+        reservedDeck.splice(position, 0, fragment);
+      }
+
+      tx.set(ritualRef, {
+        started: true,
+        remainingDeck: reservedDeck,
+        currentCard: null,
+        activeEffect: null,
+        pendingDeathrattle: null,
+        cardsRevealedCount: 0,
+        sessionId,
+        updatedAt: now,
+        updatedBy: "server",
+        sessionStartedAt: Date.now(),
+      }, { merge: true });
+      tx.set(sessRef, {
+        sessionId,
+        roomId,
+        hostId: hostUid,
+        status: "active",
+        createdAt: now,
+        players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
+        gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
+      });
+      tx.set(startedEventRef, {
+        type: "SESSION_STARTED",
+        ts: now,
+        actor: "server",
+        payload: {},
+      });
+      if (resetEventRef && freshOldSessionSnap?.exists) {
+        tx.set(resetEventRef, {
+          type: "GAME_RESET",
+          ts: now,
+          actor: "server",
+          payload: {},
+        });
+      }
+      tx.set(historyRef, {
+        type: "Ritual",
+        text: "O ritual foi reiniciado.",
+        createdAt: now,
+      });
+      tx.update(roomRef, {
+        status: "started",
+        arenaActive: true,
+        currentSessionId: sessionId,
+        updatedAt: now,
+      });
+      return { existingSessionId: null, deck: reservedDeck };
+    });
+  } catch (error) {
+    if (error?.code === "room-missing") return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+    if (error?.code === "host-changed") return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+    if (error?.code === "session-invalid-status") return sendError(res, 409, "SESSAO_NAO_PODE_SER_REINICIADA");
+    if (error?.code === "session-still-active") return sendError(res, 409, "SESSAO_ATIVA_PRECISA_SER_ENCERRADA");
+    throw error;
   }
 
-  // Cria nova sessão
-  await sessRef.set({
-    sessionId,
-    roomId,
-    hostId: hostUid || null,
-    status: "active",
-    createdAt: now,
-    players: players.map(p => ({ playerId: p.id, userId: p.userId || null, nickname: p.name })),
-    gameState: { cardsRevealedCount: 0, currentCardTitle: null, phase: "playing" },
-  });
-  sessRef.collection("events").add({ type: "SESSION_STARTED", ts: now, actor: "server", payload: {} }).catch(() => {});
-  await db.collection("salas").doc(roomId).update({
-    status: "started",
-    currentSessionId: sessionId,
-    updatedAt: now,
-  });
-
-  await ritualRef.collection("history").add({ type: "Ritual", text: "O ritual foi reiniciado.", createdAt: now });
+  if (reservation.existingSessionId) {
+    return res.json({ ok: true, alreadyReset: true, sessionId: reservation.existingSessionId });
+  }
+  deck = reservation.deck;
 
   logInfo("ritual_reset", { roomId, deckSize: deck.length, sessionId });
   return res.json({ ok: true, deckSize: deck.length, sessionId });
@@ -420,9 +695,10 @@ async function verifyParticipant(db, roomId, participantId) {
 }
 
 async function resolveParticipantId(db, roomId, firebaseIdToken, participantId) {
-  // Firebase ID token tem precedência (mais seguro).
+  // Um token válido prova a conta, mas não prova sozinho que ela pertence a
+  // esta sala. A membership Firestore fecha esse segundo elo.
   const uid = await uidFromFirebaseToken(firebaseIdToken);
-  if (uid) return uid;
+  if (uid) return verifyParticipant(db, roomId, uid);
   // Fallback: verifica se o participantId está na coleção de players da sala.
   return verifyParticipant(db, roomId, participantId);
 }
@@ -658,6 +934,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
 
   const now     = admin.firestore.FieldValue.serverTimestamp();
   const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
+  const roomRef = db.collection("salas").doc(roomId);
 
   // Lê sessão e eventos em paralelo para computar summary
   const [sessSnap, eventsSnap] = await Promise.all([
@@ -665,26 +942,105 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
     sessRef.collection("events").get(),
   ]).catch(() => [null, null]);
 
-  const sessData       = sessSnap?.exists ? sessSnap.data() : {};
+  if (!sessSnap?.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+
+  const sessData       = sessSnap.data();
   const createdMs      = sessData.createdAt?.toMillis?.() || Date.now();
   const sessionPlayers = sessData.players || [];
   const rawEvents      = eventsSnap?.docs?.map(d => d.data()) || [];
-  const summary        = engine.computeSummary(rawEvents, { players: sessionPlayers, createdMs });
+  const summary        = sessData.summary
+    || engine.computeSummary(rawEvents, { players: sessionPlayers, createdMs });
 
-  await Promise.all([
-    sessRef.collection("events").add({ type: "GAME_ENDED", ts: now, actor: "server", payload: {} }),
-    sessRef.update({ status: "ended", endedAt: now, summary }),
-    db.collection("salas").doc(roomId).update({ currentSessionId: null }).catch(() => {}),
-  ]).catch(() => {});
+  // O encerramento pode ter sido confirmado antes de uma queda do processo.
+  // Nesse caso repetimos apenas o settlement idempotente das contas: o marker
+  // account-v1 impede XP/reputação duplicados e repara uma tentativa incompleta.
+  if (sessData.status === "ended") {
+    const accountSettlement = await reputation.settleSessionAccounts(
+      sessionId,
+      roomId,
+      summary,
+      sessionPlayers.filter(player => player?.userId),
+    );
+    return res.json({
+      ok: true,
+      alreadyEnded: true,
+      summary,
+      accountSettlement,
+    });
+  }
 
-  events.emit('session.ended', {
+  const settlement = await db.runTransaction(async tx => {
+    const [freshSessionSnap, roomSnap] = await Promise.all([
+      tx.get(sessRef),
+      tx.get(roomRef),
+    ]);
+
+    if (!freshSessionSnap.exists) return { missing: true };
+    const freshSession = freshSessionSnap.data();
+    if (freshSession.status === "ended") {
+      return { alreadyEnded: true, summary: freshSession.summary || null };
+    }
+    if (freshSession.status !== "active") {
+      return { invalidStatus: freshSession.status || "unknown" };
+    }
+
+    tx.update(sessRef, {
+      status: "ended",
+      endedAt: now,
+      settledAt: now,
+      settlementVersion: 1,
+      summary,
+    });
+    if (roomSnap.exists && roomSnap.data()?.currentSessionId === sessionId) {
+      tx.update(roomRef, { currentSessionId: null, updatedAt: now });
+    }
+    return { alreadyEnded: false };
+  });
+
+  if (settlement.missing) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (settlement.invalidStatus) {
+    return res.status(409).json({ ok: false, error: "SESSAO_NAO_ATIVA", status: settlement.invalidStatus });
+  }
+  if (settlement.alreadyEnded) {
+    const settledSummary = settlement.summary || summary;
+    const accountSettlement = await reputation.settleSessionAccounts(
+      sessionId,
+      roomId,
+      settledSummary,
+      sessionPlayers.filter(player => player?.userId),
+    );
+    return res.json({
+      ok: true,
+      alreadyEnded: true,
+      summary: settledSummary,
+      accountSettlement,
+    });
+  }
+
+  // Progressão de conta é parte obrigatória do settlement e é reparável em
+  // qualquer retry do endpoint, independentemente do fan-out de eventos.
+  const accountSettlement = await reputation.settleSessionAccounts(
+    sessionId,
+    roomId,
+    summary,
+    sessionPlayers.filter(player => player?.userId),
+  );
+
+  await sessRef.collection("events").add({
+    type: "GAME_ENDED",
+    ts: now,
+    actor: "server",
+    payload: { settlementVersion: 1 },
+  });
+
+  await events.emitAsync('session.ended', {
     roomId, sessionId, summary,
     playerCount: sessionPlayers.length,
     players: sessionPlayers,   // [{ playerId, userId, nickname }] — alimenta Social Graph
   }, { persist: true });
 
   logInfo("session_ended", { roomId, sessionId, cardsRevealed: summary.cardsRevealed, durationSec: summary.durationSec });
-  return res.json({ ok: true, summary });
+  return res.json({ ok: true, alreadyEnded: false, summary, accountSettlement });
 }));
 
 // ── GET /game/room/:roomId/sessions ──────────────────────────────────────────

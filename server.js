@@ -307,23 +307,37 @@ const { initSocketIo } = require("./services/socketio");
 const httpServer = http.createServer(app);
 initSocketIo(httpServer, ALLOWED_ORIGINS);
 
+function initializeService(name, service) {
+  try {
+    service.init();
+    logInfo("service_initialized", { service: name });
+  } catch (error) {
+    // Um subsistema opcional não pode impedir que os demais registrem seus
+    // listeners. Sem esse isolamento, uma falha em Session DNA desligava em
+    // cascata social, reputação, conquistas, notificações e mundo.
+    logError("service_initialization_failed", error, { service: name });
+  }
+}
+
 const server = httpServer.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
   startCleanupLoop();
   startSchedulerLoop();
   scheduleAuditLogCleanup();
-  sessionDna.init();
-  socialGraph.init();
-  reputation.init();
-  liveService.init();
-  achievements.init();
-  notificationsSvc.init();
-  recurringGroups.init();
-  worldStateSvc.init();
-  activityTracker.init();
-  fragmentEngine.init();
-  compatibilitySvc.init();
-  selectionAudit.init();
+  [
+    ["sessionDna", sessionDna],
+    ["socialGraph", socialGraph],
+    ["reputation", reputation],
+    ["liveService", liveService],
+    ["achievements", achievements],
+    ["notifications", notificationsSvc],
+    ["recurringGroups", recurringGroups],
+    ["worldState", worldStateSvc],
+    ["activityTracker", activityTracker],
+    ["fragmentEngine", fragmentEngine],
+    ["compatibility", compatibilitySvc],
+    ["selectionAudit", selectionAudit],
+  ].forEach(([name, service]) => initializeService(name, service));
 });
 
 async function gracefullyStopAllEgress() {

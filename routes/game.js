@@ -1,5 +1,5 @@
 const express = require("express");
-const { logError, logInfo } = require("../logger");
+const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError, nowIso } = require("../utils");
 const {
   panelRooms, panelClients, roomHostSseClients, pendingJoinRequests,
@@ -33,10 +33,50 @@ function checkPanelToken(req) {
 // Verifica hostToken para uma sala específica.
 // Aceita o token no body (hostToken) ou no header x-host-token.
 function verifyHostToken(req, roomId) {
-  const token = String(req.body?.hostToken || req.headers["x-host-token"] || "").trim();
+  const token = String(
+    req.body?.hostToken ||
+    req.headers["x-host-token"] ||
+    req.query?.hostToken ||
+    ""
+  ).trim();
   if (!token || !ACCESS_TOKEN_SECRET) return false;
   const r = verifySignedToken(token, ACCESS_TOKEN_SECRET);
   return r.valid && r.payload?.token_type === "host" && r.payload?.roomId === normalizeRoomId(roomId);
+}
+
+// Vincula a participação à conta sem confiar em userId vindo do cliente.
+// Convidados/fluxos legados continuam permitidos sem token, mas ficam sem UID
+// canônico e, portanto, sem progressão de conta.
+async function verifyPlayerIdentity(firebaseIdToken, playerId) {
+  const token = String(firebaseIdToken || "").trim();
+  if (!token) return { userId: null, error: null };
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    if (decoded.uid !== playerId) {
+      return { userId: null, error: "PLAYER_ID_NAO_CORRESPONDE_A_CONTA" };
+    }
+    return { userId: decoded.uid, error: null };
+  } catch (_) {
+    return { userId: null, error: "FIREBASE_TOKEN_INVALIDO" };
+  }
+}
+
+const LEGACY_PROFILE_MIGRATION_FIELDS = [
+  "displayName", "name", "username", "bio", "avatar", "avatarEmoji",
+  "avatarColor", "avatarPhotoUrl", "photoURL", "xp", "coins",
+  "achievements", "stats", "friends", "incomingRequests", "outgoingRequests",
+  "reputation", "dailyStreak", "lastDailyCompletedDate", "lastLoginRewardDate",
+  "loginRewardStreak", "pendingLoginXp", "bgTheme", "cardStyle",
+  "visualEffect", "memberSince", "activeDeckId",
+];
+
+function pickLegacyProfileFields(data = {}) {
+  const picked = {};
+  for (const key of LEGACY_PROFILE_MIGRATION_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) picked[key] = data[key];
+  }
+  return picked;
 }
 
 // --- SSE do painel ---
@@ -71,13 +111,29 @@ router.get("/panel/stream", (req, res) => {
 
 // --- Salas ---
 
-router.post("/game/room/create", roomLimiter, (req, res) => {
-  try {
+router.post("/game/room/create", roomLimiter, asyncHandler(async (req, res) => {
     const roomId = normalizeRoomId(req.body?.roomId);
     const name   = String(req.body?.name || "").trim();
     const host   = String(req.body?.host || "").trim();
+    const firebaseIdToken = String(req.body?.firebaseIdToken || "").trim();
 
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+    if (!firebaseIdToken) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
+
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+    } catch (_) {
+      return sendError(res, 401, "FIREBASE_TOKEN_INVALIDO");
+    }
+
+    const db = getDb();
+    if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+    const roomSnap = await db.collection("salas").doc(roomId).get();
+    if (!roomSnap.exists) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+    if (String(roomSnap.data()?.hostId || "") !== decoded.uid) {
+      return sendError(res, 403, "USUARIO_NAO_E_ANFITRIAO");
+    }
     if (panelRooms.has(roomId)) return res.status(409).json({ ok: false, code: "SALA_JA_EXISTE" });
 
     const room = getOrCreatePanelRoom(roomId, name, host);
@@ -87,11 +143,7 @@ router.post("/game/room/create", roomLimiter, (req, res) => {
     try { hostToken = signHostToken(roomId); } catch (_) { /* ACCESS_TOKEN_SECRET não configurado */ }
 
     return res.json({ ok: true, room: serializePanelRoom(room), hostToken });
-  } catch (error) {
-    logError("game_room_create_error", error);
-    return sendError(res, 500, "ERRO_GAME_ROOM_CREATE");
-  }
-});
+}));
 
 // Recupera um hostToken para o anfitriao autenticado da sala.
 // O token do Firebase prova a identidade; o Firestore continua sendo a fonte
@@ -133,8 +185,7 @@ router.post("/game/room/host-token", roomLimiter, asyncHandler(async (req, res) 
   return res.json({ ok: true, hostToken });
 }));
 
-router.post("/game/player/join", joinLimiter, (req, res) => {
-  try {
+router.post("/game/player/join", joinLimiter, asyncHandler(async (req, res) => {
     const roomId     = normalizeRoomId(req.body?.roomId);
     const playerId   = normalizePlayerId(req.body?.playerId);
     const playerName = normalizePlayerName(req.body?.playerName) || "Jogador";
@@ -143,6 +194,9 @@ router.post("/game/player/join", joinLimiter, (req, res) => {
 
     const room = panelRooms.get(roomId);
     if (!room) return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" });
+
+    const identity = await verifyPlayerIdentity(req.body?.firebaseIdToken, playerId);
+    if (identity.error) return sendError(res, 403, identity.error);
 
     const isRejoin = !!room.players[playerId];
 
@@ -164,6 +218,7 @@ router.post("/game/player/join", joinLimiter, (req, res) => {
 
     room.players[playerId] = {
       playerId, playerName,
+      userId: identity.userId || room.players[playerId]?.userId || null,
       joinedAt: room.players[playerId]?.joinedAt || nowIso(),
       lastSeen: nowIso()
     };
@@ -171,13 +226,9 @@ router.post("/game/player/join", joinLimiter, (req, res) => {
     pendingJoinRequests.delete(`${roomId}:${playerId}`);
 
     return res.json({ ok: true, room: serializePanelRoom(room) });
-  } catch (error) {
-    logError("game_player_join_error", error);
-    return sendError(res, 500, "ERRO_GAME_PLAYER_JOIN");
-  }
-});
+}));
 
-router.post("/game/player/leave", (req, res) => {
+router.post("/game/player/leave", asyncHandler(async (req, res) => {
   try {
     const roomId       = normalizeRoomId(req.body?.roomId);
     const playerId     = normalizePlayerId(req.body?.playerId);
@@ -185,6 +236,15 @@ router.post("/game/player/leave", (req, res) => {
     const isHostLeaving = verifyHostToken(req, roomId);
 
     if (!roomId || !playerId) return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+
+    // O host usa a capability da sala. Qualquer outro participante precisa
+    // provar que o playerId removido pertence ao seu Firebase ID token.
+    if (!isHostLeaving) {
+      const identity = await verifyPlayerIdentity(req.body?.firebaseIdToken, playerId);
+      if (identity.error || !identity.userId) {
+        return sendError(res, 403, identity.error || "PARTICIPANTE_NAO_AUTORIZADO");
+      }
+    }
 
     const room = panelRooms.get(roomId);
     if (!room) {
@@ -206,12 +266,15 @@ router.post("/game/player/leave", (req, res) => {
     logError("game_player_leave_error", error);
     return sendError(res, 500, "ERRO_GAME_PLAYER_LEAVE");
   }
-});
+}));
 
 // SSE dedicado para o anfitrião receber notificações de pedidos de entrada
 router.get("/game/room/:roomId/host-sse", (req, res) => {
   const roomId = normalizeRoomId(req.params.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!verifyHostToken(req, roomId)) {
+    return sendError(res, 403, "HOST_TOKEN_INVALIDO");
+  }
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -228,14 +291,16 @@ router.get("/game/room/:roomId/host-sse", (req, res) => {
   });
 });
 
-router.post("/game/room/request-join", (req, res) => {
-  try {
+router.post("/game/room/request-join", asyncHandler(async (req, res) => {
     const roomId     = normalizeRoomId(req.body?.roomId);
     const roomName   = String(req.body?.roomName || "").trim();
     const playerId   = normalizePlayerId(req.body?.playerId);
     const playerName = normalizePlayerName(req.body?.playerName) || "Jogador";
 
     if (!roomId || !playerId) return sendError(res, 400, "ROOM_ID_E_PLAYER_ID_OBRIGATORIOS");
+
+    const identity = await verifyPlayerIdentity(req.body?.firebaseIdToken, playerId);
+    if (identity.error) return sendError(res, 403, identity.error);
 
     const room = panelRooms.get(roomId);
     if (!room) return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" });
@@ -250,15 +315,17 @@ router.post("/game/room/request-join", (req, res) => {
     }
 
     const key = `${roomId}:${playerId}`;
-    pendingJoinRequests.set(key, { roomId, playerId, playerName, requestedAt: nowIso() });
+    pendingJoinRequests.set(key, {
+      roomId,
+      playerId,
+      playerName,
+      userId: identity.userId,
+      requestedAt: nowIso(),
+    });
     const notified = notifyRoomHost(roomId, "join_request", { roomId, playerId, playerName });
 
     return res.json({ ok: true, status: "pending", hostOnline: notified });
-  } catch (error) {
-    logError("game_room_request_join_error", error);
-    return sendError(res, 500, "ERRO_GAME_ROOM_REQUEST_JOIN");
-  }
-});
+}));
 
 // Status publico e minimo para o solicitante acompanhar o pedido de entrada.
 // Nao expoe nome da sala, jogadores ou qualquer outro estado interno.
@@ -302,7 +369,13 @@ router.post("/game/room/approve-join", (req, res) => {
     if (!room) { pendingJoinRequests.delete(key); return res.status(404).json({ ok: false, code: "SALA_NAO_ENCONTRADA" }); }
     if (getRoomPlayerCount(room) >= MAX_ROOM_PLAYERS) { pendingJoinRequests.delete(key); return res.status(409).json({ ok: false, code: "SALA_CHEIA" }); }
 
-    room.players[playerId] = { playerId, playerName: pending.playerName, joinedAt: nowIso(), lastSeen: nowIso() };
+    room.players[playerId] = {
+      playerId,
+      playerName: pending.playerName,
+      userId: pending.userId || null,
+      joinedAt: nowIso(),
+      lastSeen: nowIso(),
+    };
     room.updatedAt = nowIso();
     pendingJoinRequests.delete(key);
     broadcastPanelUpdate();
@@ -480,19 +553,81 @@ router.post("/game/migrar-perfil", asyncHandler(async (req, res) => {
   const oldRef = db.collection("users").doc(oldUserId);
   const newRef = db.collection("users").doc(newUid);
 
-  const [oldSnap, newSnap] = await Promise.all([oldRef.get(), newRef.get()]);
+  const oldSnap = await oldRef.get();
 
   if (!oldSnap.exists) return res.json({ ok: true, skipped: "old_not_found" });
 
-  // Se novo perfil já tem dados de progressão, não sobrescreve
-  if (newSnap.exists) {
-    const d = newSnap.data();
-    if ((d.xp || 0) > 0 || (d.coins || 0) > 0 || Object.keys(d.achievements || {}).length > 0) {
-      return res.json({ ok: true, skipped: "new_has_data" });
-    }
+  const oldData = oldSnap.data() || {};
+  if (oldData.migratedTo === newUid) {
+    return res.json({ ok: true, skipped: "already_migrated" });
+  }
+  const verifiedEmail = decoded.email_verified === true
+    ? String(decoded.email || "").trim().toLowerCase()
+    : "";
+  const legacyEmail = String(oldData.email || "").trim().toLowerCase();
+  const explicitlyClaimed = String(oldData.migrationClaimUid || "") === newUid;
+  const emailProvesOwnership = Boolean(verifiedEmail && legacyEmail && verifiedEmail === legacyEmail);
+  if (!explicitlyClaimed && !emailProvesOwnership) {
+    logWarn("profile_migration_rejected", { oldUserId, newUid, reason: "proof_required" });
+    return sendError(res, 403, "MIGRATION_PROOF_REQUIRED");
+  }
+  if (oldData.migratedTo && oldData.migratedTo !== newUid) {
+    return sendError(res, 409, "LEGACY_PROFILE_ALREADY_CLAIMED");
   }
 
-  await newRef.set(oldSnap.data(), { merge: true });
+  let outcome;
+  try {
+    outcome = await db.runTransaction(async tx => {
+    const [freshOld, freshNew] = await Promise.all([tx.get(oldRef), tx.get(newRef)]);
+    if (!freshOld.exists) return { skipped: "old_not_found" };
+    const freshData = freshOld.data() || {};
+    if (freshData.migratedTo === newUid) {
+      return { skipped: "already_migrated" };
+    }
+    if (freshData.migratedTo && freshData.migratedTo !== newUid) {
+      throw Object.assign(new Error("LEGACY_PROFILE_ALREADY_CLAIMED"), { code: "already-claimed" });
+    }
+    const freshLegacyEmail = String(freshData.email || "").trim().toLowerCase();
+    const freshProof = String(freshData.migrationClaimUid || "") === newUid
+      || Boolean(verifiedEmail && freshLegacyEmail && verifiedEmail === freshLegacyEmail);
+    if (!freshProof) {
+      throw Object.assign(new Error("MIGRATION_PROOF_REQUIRED"), { code: "proof-required" });
+    }
+
+    const newData = freshNew.exists ? (freshNew.data() || {}) : {};
+    if ((Number(newData.xp) || 0) > 0
+      || (Number(newData.coins) || 0) > 0
+      || Object.keys(newData.achievements || {}).length > 0) {
+      return { skipped: "new_has_data" };
+    }
+
+    tx.set(newRef, {
+      ...pickLegacyProfileFields(freshData),
+      schemaVersion: 1,
+      uid: newUid,
+      userId: newUid,
+      email: decoded.email || freshData.email || null,
+      migratedFrom: oldUserId,
+      migratedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    tx.set(oldRef, {
+      migratedTo: newUid,
+      migratedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+      return { migrated: true };
+    });
+  } catch (error) {
+    if (error?.code === "already-claimed") {
+      return sendError(res, 409, "LEGACY_PROFILE_ALREADY_CLAIMED");
+    }
+    if (error?.code === "proof-required") {
+      return sendError(res, 403, "MIGRATION_PROOF_REQUIRED");
+    }
+    throw error;
+  }
+
+  if (outcome?.skipped) return res.json({ ok: true, skipped: outcome.skipped });
   logInfo("profile_migrated", { oldUserId, newUid });
 
   return res.json({ ok: true, migrated: true });

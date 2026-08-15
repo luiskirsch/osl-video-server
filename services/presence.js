@@ -26,7 +26,7 @@ async function touch(uid) {
   const db = getDb();
   if (!db || !uid) return;
   await db.collection('users').doc(uid)
-    .update({ lastSeenAt: new Date() })
+    .set({ uid, userId: uid, lastSeenAt: new Date() }, { merge: true })
     .catch(() => {});
 }
 
@@ -65,7 +65,9 @@ async function batchCheck(uids) {
       online:       lastSeen ? lastSeen >= cutoff : false,
       lastSeenMs:   lastSeen?.getTime() ?? null,
       displayName:  data.displayName || data.username || null,
-      photoURL:     data.photoURL    || null,
+      photoURL:     data.avatar?.url || data.avatarPhotoUrl || data.photoURL || null,
+      avatarEmoji:  data.avatar?.emoji || data.avatarEmoji || null,
+      avatarColor:  data.avatar?.color || data.avatarColor || null,
       lastActivity: (rawActivity && activityFresh) ? {
         type:      rawActivity.type,
         roomId:    rawActivity.roomId,

@@ -7,8 +7,25 @@ const { asyncHandler, sendError } = require("../utils");
 const socialGraph   = require("../services/socialGraph");
 const reputation    = require("../services/reputation");
 const achievements  = require("../services/achievements");
+const notifications = require("../services/notifications");
 
 const router = express.Router();
+
+function publicAvatar(data = {}) {
+  const avatar = data.avatar && typeof data.avatar === "object" ? data.avatar : {};
+  const normalized = {
+    kind: avatar.kind || (avatar.url || data.avatarPhotoUrl ? "image" : "emoji"),
+    url: avatar.url || data.avatarPhotoUrl || data.photoURL || null,
+    emoji: avatar.emoji || data.avatarEmoji || "🔮",
+    color: avatar.color || data.avatarColor || "#342718",
+  };
+  return {
+    avatar: normalized,
+    avatarPhotoUrl: normalized.url,
+    avatarEmoji: normalized.emoji,
+    avatarColor: normalized.color,
+  };
+}
 
 const socialLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -48,11 +65,16 @@ router.post("/social/friend-request", socialLimiter, asyncHandler(async (req, re
 
   try {
     let status = "pending";
+    let requesterName = "Alguém";
+    let targetName = "Jogador";
     await db.runTransaction(async (tx) => {
       const [requesterSnap, targetSnap] = await Promise.all([tx.get(requesterRef), tx.get(targetRef)]);
       if (!requesterSnap.exists || !targetSnap.exists) throw Object.assign(new Error(), { code: 404 });
 
       const rData = requesterSnap.data();
+      const tData = targetSnap.data();
+      requesterName = rData.displayName || rData.username || requesterName;
+      targetName = tData.displayName || tData.username || targetName;
 
       if ((rData.friends || []).includes(targetUid)) { status = "already_friends"; return; }
       if ((rData.outgoingRequests || []).includes(targetUid)) { status = "already_pending"; return; }
@@ -75,11 +97,35 @@ router.post("/social/friend-request", socialLimiter, asyncHandler(async (req, re
       tx.update(targetRef,    { incomingRequests: admin.firestore.FieldValue.arrayUnion(requesterUid) });
     });
 
+    if (status === "pending") {
+      await notifications.createNotification(targetUid, {
+        type: "friend_request",
+        title: "Novo pedido de amizade",
+        body: `${requesterName} quer se conectar com você.`,
+        data: { requesterUid },
+      }).catch(() => {});
+    } else if (status === "auto_accepted") {
+      await Promise.all([
+        notifications.createNotification(requesterUid, {
+          type: "friend_accepted",
+          title: "Amizade confirmada",
+          body: `Você e ${targetName} agora são amigos.`,
+          data: { friendUid: targetUid },
+        }),
+        notifications.createNotification(targetUid, {
+          type: "friend_accepted",
+          title: "Amizade confirmada",
+          body: `Você e ${requesterName} agora são amigos.`,
+          data: { friendUid: requesterUid },
+        }),
+      ]).catch(() => {});
+    }
+
     logInfo("friend_request", { requesterUid, targetUid, status });
     return res.json({ ok: true, status });
   } catch (e) {
     if (e.code === 404) return sendError(res, 404, "USUARIO_NAO_ENCONTRADO");
-    logError("friend_request_error", { error: e.message });
+    logError("friend_request_error", e, { requesterUid, targetUid });
     return sendError(res, 500, "ERRO_FRIEND_REQUEST");
   }
 }));
@@ -98,13 +144,17 @@ router.post("/social/friend-respond", socialLimiter, asyncHandler(async (req, re
 
   const responderRef = db.collection("users").doc(responderUid);
   const requesterRef = db.collection("users").doc(requesterUid);
+  let processed = false;
+  let responderName = "Jogador";
 
   await db.runTransaction(async (tx) => {
-    const snap = await tx.get(responderRef);
-    if (!snap.exists) return;
+    const [snap, requesterSnap] = await Promise.all([tx.get(responderRef), tx.get(requesterRef)]);
+    if (!snap.exists || !requesterSnap.exists) return;
 
     const incoming = snap.data().incomingRequests || [];
     if (!incoming.includes(requesterUid)) return; // Já processado — idempotente
+    responderName = snap.data().displayName || snap.data().username || responderName;
+    processed = true;
 
     if (action === "accept") {
       tx.update(responderRef, {
@@ -120,6 +170,15 @@ router.post("/social/friend-respond", socialLimiter, asyncHandler(async (req, re
       tx.update(requesterRef, { outgoingRequests: admin.firestore.FieldValue.arrayRemove(responderUid) });
     }
   });
+
+  if (processed && action === "accept") {
+    await notifications.createNotification(requesterUid, {
+      type: "friend_accepted",
+      title: "Pedido de amizade aceito",
+      body: `${responderName} aceitou seu pedido de amizade.`,
+      data: { friendUid: responderUid },
+    }).catch(() => {});
+  }
 
   logInfo("friend_respond", { responderUid, requesterUid, action });
   return res.json({ ok: true });
@@ -154,9 +213,7 @@ router.get("/social/leaderboard", asyncHandler(async (req, res) => {
         isSelf:        s.id === uid,
         displayName:   d.displayName   || "Jogador",
         username:      d.username      || "jogador",
-        avatarEmoji:   d.avatarEmoji   || "🔮",
-        avatarColor:   d.avatarColor   || "#342718",
-        avatarPhotoUrl: d.avatarPhotoUrl || null,
+        ...publicAvatar(d),
         xp,
         level: levelFromXP(xp),
       };
@@ -193,9 +250,7 @@ router.get("/social/search", socialLimiter, asyncHandler(async (req, res) => {
         uid:           d.id,
         displayName:   data.displayName   || "Jogador",
         username:      data.username      || "jogador",
-        avatarEmoji:   data.avatarEmoji   || "🔮",
-        avatarColor:   data.avatarColor   || "#342718",
-        avatarPhotoUrl: data.avatarPhotoUrl || null,
+        ...publicAvatar(data),
       };
     });
 

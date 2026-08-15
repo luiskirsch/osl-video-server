@@ -32,6 +32,14 @@ const FRAGMENT_POOL = [
   { title: 'O que ficou',               text: 'De tudo que aconteceu recentemente, o que vai ficar com você?' },
 ];
 
+function sanitizeFragmentCard(card) {
+  if (!card || typeof card !== 'object' || Array.isArray(card)) return null;
+  const title = typeof card.title === 'string' ? card.title.trim().slice(0, 160) : '';
+  const text  = typeof card.text === 'string' ? card.text.trim().slice(0, 1200) : '';
+  if (!title || !text) return null;
+  return { title, text, type: 'fragmento' };
+}
+
 let _db = null;
 function getDb() {
   if (!_db) _db = require('./firestore').getDb();
@@ -78,35 +86,37 @@ async function consumeFragment(uid) {
   const db = getDb();
   if (!db || !uid) return null;
 
-  let card = null;
-
   try {
-    await db.runTransaction(async (tx) => {
-      const ref  = db.collection('users').doc(uid);
-      const snap = await tx.get(ref);
-      if (!snap.exists) return;
-
-      const pf = snap.data().pendingFragment;
-      if (!pf) return;
-
-      const expiresAt = pf.expiresAt instanceof Date
-        ? pf.expiresAt
-        : pf.expiresAt?.toDate?.() ?? null;
-
-      if (!expiresAt || expiresAt <= new Date()) {
-        // Expirado: limpa silenciosamente
-        tx.update(ref, { pendingFragment: admin.firestore.FieldValue.delete() });
-        return;
-      }
-
-      card = pf.card;
-      tx.update(ref, { pendingFragment: admin.firestore.FieldValue.delete() });
-    });
+    // O valor retornado pertence à tentativa que efetivamente fez commit.
+    // Não mantenha resultado em variável externa: callbacks de transação
+    // podem ser executados novamente em caso de contenção.
+    return await db.runTransaction(tx => claimFragmentInTransaction(tx, uid, db));
   } catch (err) {
     logger.warn({ err, uid: uid.slice(0, 8) }, 'fragment_consume_failed');
+    return null;
   }
+}
 
-  return card;
+/**
+ * Variante composável para reservar o fragmento na mesma transação que cria a
+ * sessão. Evita consumir uma carta quando outra chamada concorrente vence o
+ * start ou quando a criação da sessão falha.
+ */
+async function claimFragmentInTransaction(tx, uid, db = getDb()) {
+  if (!tx || !db || !uid) return null;
+  const ref = db.collection('users').doc(uid);
+  const snap = await tx.get(ref);
+  if (!snap.exists) return null;
+
+  const pending = snap.data().pendingFragment;
+  if (!pending) return null;
+  const expiresAt = pending.expiresAt instanceof Date
+    ? pending.expiresAt
+    : pending.expiresAt?.toDate?.() ?? null;
+
+  tx.update(ref, { pendingFragment: admin.firestore.FieldValue.delete() });
+  if (!expiresAt || expiresAt <= new Date()) return null;
+  return sanitizeFragmentCard(pending.card);
 }
 
 let _initialized = false;
@@ -128,4 +138,4 @@ function init() {
   logger.info('fragment_engine_initialized');
 }
 
-module.exports = { issueFragment, consumeFragment, init };
+module.exports = { issueFragment, consumeFragment, claimFragmentInTransaction, init };

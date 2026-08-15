@@ -49,6 +49,37 @@ function emit(topic, payload = {}, opts = {}) {
 }
 
 /**
+ * Variante aguardável usada nos pontos de settlement. Executa os consumidores
+ * na ordem em que foram registrados, permitindo que progressão seja persistida
+ * antes de conquistas/notificações lerem o novo estado.
+ */
+async function emitAsync(topic, payload = {}, opts = {}) {
+  if (!topic || typeof topic !== 'string') return;
+
+  const event = { topic, payload, ts: Date.now() };
+  if (opts.persist) {
+    await _persist(event).catch(err =>
+      logger.warn({ err, topic }, 'event_persist_failed')
+    );
+  }
+
+  const topics = [topic];
+  const parts = topic.split('.');
+  for (let i = parts.length - 1; i > 0; i--) {
+    topics.push(parts.slice(0, i).join('.') + '.*');
+  }
+  topics.push('*');
+
+  for (const subscribedTopic of topics) {
+    // rawListeners preserva corretamente a semântica de listeners `once`.
+    const listeners = emitter.rawListeners(subscribedTopic);
+    for (const listener of listeners) {
+      await listener.call(emitter, event);
+    }
+  }
+}
+
+/**
  * Assina um tópico ou padrão wildcard.
  * Handler erros são capturados e logados — nunca propagam para o emitter.
  *
@@ -58,7 +89,7 @@ function emit(topic, payload = {}, opts = {}) {
  */
 function on(topic, handler) {
   const wrapped = (event) => {
-    Promise.resolve(handler(event)).catch(err =>
+    return Promise.resolve(handler(event)).catch(err =>
       logger.error({ err, topic }, 'event_handler_error')
     );
   };
@@ -70,11 +101,13 @@ function on(topic, handler) {
  * Assina um tópico, dispara apenas uma vez.
  */
 function once(topic, handler) {
-  emitter.once(topic, (event) => {
-    Promise.resolve(handler(event)).catch(err =>
+  const wrapped = (event) => {
+    return Promise.resolve(handler(event)).catch(err =>
       logger.error({ err, topic }, 'event_handler_once_error')
     );
-  });
+  };
+  emitter.once(topic, wrapped);
+  return () => emitter.off(topic, wrapped);
 }
 
 // ── Persistência opcional ─────────────────────────────────────────────────────
@@ -109,4 +142,4 @@ async function _persist(event) {
 // engine.*   → game engine (adaptive_applied, etc.)
 // live.*     → live service (daily_ritual_completed, session_reminder_sent, etc.)
 
-module.exports = { emit, on, once };
+module.exports = { emit, emitAsync, on, once };

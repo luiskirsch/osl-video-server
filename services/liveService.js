@@ -278,21 +278,33 @@ function init() {
     const db = getDb();
     if (!db) return;
 
-    const authedUids = (players || []).map(p => p.userId).filter(Boolean);
+    const authedUids = [...new Set((players || []).map(p => p.userId).filter(Boolean))];
+    if (!authedUids.length) return;
 
-    await db.collection('daily_ritual').doc(ritual.date).update({
-      completionCount: admin.firestore.FieldValue.increment(1),
-    }).catch(() => {});
+    // Hub e sala compartilham o mesmo ledger por UID/data. Assim, jogar a carta
+    // no ritual completo depois de descobri-la no Hub (ou o inverso) nunca
+    // concede XP, streak ou progresso mundial duas vezes.
+    const accountState = require('./accountState');
+    const completions = await Promise.all(authedUids.map(async uid => ({
+      uid,
+      result: await accountState.completeDailyRitual({ db, uid, daily: ritual }),
+    })));
+    const newlyCompletedUids = completions
+      .filter(item => !item.result.alreadyCompleted)
+      .map(item => item.uid);
 
-    // Invalida cache do dia para refletir completionCount atualizado
     _dailyCache = null;
+    if (newlyCompletedUids.length) {
+      await events.emitAsync('live.daily_ritual_completed', {
+        roomId, date: ritual.date, cardTitle: ritual.cardTitle,
+        authedUids: newlyCompletedUids,
+        playerCount: newlyCompletedUids.length,
+        source: 'session',
+      });
+    }
 
-    events.emit('live.daily_ritual_completed', {
-      roomId, date: ritual.date, cardTitle: ritual.cardTitle,
-      authedUids, playerCount: authedUids.length,
-    });
-
-    logger.info({ roomId, date: ritual.date, cardTitle: ritual.cardTitle },
+    logger.info({ roomId, date: ritual.date, cardTitle: ritual.cardTitle,
+      completed: newlyCompletedUids.length, alreadyCompleted: authedUids.length - newlyCompletedUids.length },
       'daily_ritual_completed');
   });
 

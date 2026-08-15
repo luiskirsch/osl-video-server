@@ -75,7 +75,7 @@ function init() {
     const authedPlayers = players.filter(p => p.userId);
     if (!authedPlayers.length) return;
 
-    await _updateReputations(sessionId, roomId, summary, authedPlayers).catch(err =>
+    await settleSessionAccounts(sessionId, roomId, summary, authedPlayers).catch(err =>
       logger.error({ err, roomId, sessionId }, 'reputation_update_failed')
     );
   });
@@ -85,13 +85,22 @@ function init() {
 
 // ── Computação ────────────────────────────────────────────────────────────────
 
-async function _updateReputations(sessionId, roomId, summary, players) {
+async function settleSessionAccounts(sessionId, roomId, summary, players) {
   const db = getDb();
-  if (!db) return;
+  if (!db) throw new Error('DB_INDISPONIVEL');
+
+  // Um UID só entra uma vez no settlement, mesmo se aparecer duplicado no
+  // snapshot de participantes por causa de uma reconexão.
+  const uniquePlayers = Array.from(new Map(
+    (players || [])
+      .filter(player => player?.userId)
+      .map(player => [String(player.userId), player])
+  ).values());
+  if (!uniquePlayers.length) return { ok: true, alreadySettled: true, awards: [] };
 
   // Lê eventos da sessão para extrair reações por jogador
   const sessRef    = db.collection('salas').doc(roomId).collection('sessions').doc(sessionId);
-  const eventsSnap = await sessRef.collection('events').get().catch(() => null);
+  const eventsSnap = await sessRef.collection('events').get();
 
   const reactionsByUid   = {};   // uid → count
   const votedUids        = new Set();
@@ -109,11 +118,7 @@ async function _updateReputations(sessionId, roomId, summary, players) {
   const topReactorNickname = summary.topReactor?.nickname || null;
   const isLongSession      = (summary.durationSec || 0) > 1800;
 
-  const admin = require('firebase-admin');
-  const now   = new Date();
-
-  // Atualiza cada jogador em paralelo (fire-and-forget por usuário)
-  await Promise.all(players.map(async (p) => {
+  const awards = uniquePlayers.map((p) => {
     const uid = p.userId;
 
     const reactions  = reactionsByUid[uid] || 0;
@@ -136,29 +141,72 @@ async function _updateReputations(sessionId, roomId, summary, players) {
       + (missionsDone * 30)
       + (isLongSession ? 25 : 0);
 
-    try {
-      await db.collection('users').doc(uid).update({
-        'xp':                            admin.firestore.FieldValue.increment(xpDelta),
-        'reputation.score':              admin.firestore.FieldValue.increment(delta),
-        'reputation.totalSessions':      admin.firestore.FieldValue.increment(1),
-        'reputation.totalReactions':     admin.firestore.FieldValue.increment(reactions),
-        'reputation.topReactorCount':    admin.firestore.FieldValue.increment(isTopReactor ? 1 : 0),
-        'reputation.lastUpdatedAt':      now,
-        'reputation.lastSessionId':      sessionId,
-        'lastRoomId':                    roomId,
-        'lastSessionAt':                 now,
-      });
+    return { uid, xpDelta, reputationDelta: delta, reactions, isTopReactor };
+  });
 
-      // Evento para o cliente animar ganho de XP
-      const events = require('./events');
-      events.emit('user.xp_awarded', { uid, xpDelta, sessionId, roomId });
-    } catch (err) {
-      // Usuário pode não ter doc ainda (conta recém-criada não passou pelo perfil)
-      logger.warn({ uid, err: err.message }, 'reputation_update_user_not_found');
+  const admin     = require('firebase-admin');
+  const now       = new Date();
+  const markerRef = sessRef.collection('settlements').doc('account-v1');
+
+  const outcome = await db.runTransaction(async tx => {
+    const markerSnap = await tx.get(markerRef);
+    if (markerSnap.exists && markerSnap.data()?.status === 'complete') {
+      return {
+        alreadySettled: true,
+        awards: Array.isArray(markerSnap.data()?.awards) ? markerSnap.data().awards : [],
+      };
     }
-  }));
 
-  logger.info({ sessionId, players: players.length }, 'reputation_updated');
+    // Todas as leituras precedem as escritas, como exigido pelo Firestore.
+    const userRefs = awards.map(award => db.collection('users').doc(award.uid));
+    for (const userRef of userRefs) await tx.get(userRef);
+
+    awards.forEach((award, index) => {
+      tx.set(userRefs[index], {
+        uid: award.uid,
+        userId: award.uid,
+        xp: admin.firestore.FieldValue.increment(award.xpDelta),
+        reputation: {
+          score:           admin.firestore.FieldValue.increment(award.reputationDelta),
+          totalSessions:   admin.firestore.FieldValue.increment(1),
+          totalReactions:  admin.firestore.FieldValue.increment(award.reactions),
+          topReactorCount: admin.firestore.FieldValue.increment(award.isTopReactor ? 1 : 0),
+          lastUpdatedAt:   now,
+          lastSessionId:   sessionId,
+        },
+        stats: {
+          gamesPlayed: admin.firestore.FieldValue.increment(1),
+        },
+        lastRoomId:    roomId,
+        lastSessionAt: now,
+        updatedAt:     now,
+      }, { merge: true });
+    });
+
+    tx.set(markerRef, {
+      status: 'complete',
+      version: 1,
+      roomId,
+      sessionId,
+      awards,
+      completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { alreadySettled: false, awards };
+  });
+
+  if (!outcome.alreadySettled) {
+    for (const award of outcome.awards) {
+      events.emit('user.xp_awarded', {
+        uid: award.uid,
+        xpDelta: award.xpDelta,
+        sessionId,
+        roomId,
+      });
+    }
+    logger.info({ sessionId, players: outcome.awards.length }, 'reputation_updated');
+  }
+
+  return { ok: true, ...outcome };
 }
 
 // ── API pública ───────────────────────────────────────────────────────────────
@@ -182,4 +230,4 @@ async function getReputation(uid) {
   };
 }
 
-module.exports = { init, getReputation, reputationLevel };
+module.exports = { init, getReputation, reputationLevel, settleSessionAccounts };

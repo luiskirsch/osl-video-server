@@ -195,7 +195,9 @@ async function computeCompatibility(uid_a, uid_b) {
   const dataB          = userSnaps[1]?.exists ? userSnaps[1].data() : {};
   const sessionsA      = dataA.reputation?.totalSessions || 0;
   const sessionsB      = dataB.reputation?.totalSessions || 0;
-  const sharedSessions = connSnap?.exists ? (connSnap.data().sharedSessions || 0) : 0;
+  const sharedSessions = connSnap?.exists
+    ? (connSnap.data().sessionCount || connSnap.data().sharedSessions || 0)
+    : 0;
 
   return {
     ...computeFromProfiles(
