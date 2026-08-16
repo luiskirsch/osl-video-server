@@ -102,15 +102,17 @@ async function settleSessionAccounts(sessionId, roomId, summary, players) {
   const sessRef    = db.collection('salas').doc(roomId).collection('sessions').doc(sessionId);
   const eventsSnap = await sessRef.collection('events').get();
 
-  const reactionsByUid   = {};   // uid → count
-  const votedUids        = new Set();
-  const missionsUids     = new Set();
+  const reactionsByUid    = {};   // uid → count
+  const pressureByUid     = {};   // uid → count
+  const votedUids         = new Set();
+  const missionsUids      = new Set();
 
   for (const doc of (eventsSnap?.docs || [])) {
     const e = doc.data();
     const actor = e.actor;
     if (!actor) continue;
     if (e.type === 'REACTION_SENT')      reactionsByUid[actor] = (reactionsByUid[actor] || 0) + 1;
+    if (e.type === 'PRESSURE_VOTE')      pressureByUid[actor]  = (pressureByUid[actor]  || 0) + 1;
     if (e.type === 'VOTE_CAST')          votedUids.add(actor);
     if (e.type === 'MISSION_COMPLETED')  missionsUids.add(actor);
   }
@@ -121,9 +123,10 @@ async function settleSessionAccounts(sessionId, roomId, summary, players) {
   const awards = uniquePlayers.map((p) => {
     const uid = p.userId;
 
-    const reactions  = reactionsByUid[uid] || 0;
+    const reactions    = reactionsByUid[uid] || 0;
+    const pressure     = pressureByUid[uid]  || 0;
     const isTopReactor = topReactorNickname && p.nickname === topReactorNickname;
-    const voted      = votedUids.has(uid);
+    const voted        = votedUids.has(uid);
     const missionsDone = missionsUids.has(uid) ? 1 : 0;
 
     const delta = 10
@@ -141,7 +144,7 @@ async function settleSessionAccounts(sessionId, roomId, summary, players) {
       + (missionsDone * 30)
       + (isLongSession ? 25 : 0);
 
-    return { uid, xpDelta, reputationDelta: delta, reactions, isTopReactor };
+    return { uid, xpDelta, reputationDelta: delta, reactions, pressure, isTopReactor, missionsDone };
   });
 
   const admin     = require('firebase-admin');
@@ -176,8 +179,9 @@ async function settleSessionAccounts(sessionId, roomId, summary, players) {
         },
         stats: {
           gamesPlayed:        admin.firestore.FieldValue.increment(1),
-          wins:               admin.firestore.FieldValue.increment(missionsDone ? 1 : 0),
-          missionsCompleted:  admin.firestore.FieldValue.increment(missionsDone),
+          wins:               admin.firestore.FieldValue.increment(award.missionsDone ? 1 : 0),
+          missionsCompleted:  admin.firestore.FieldValue.increment(award.missionsDone),
+          pressureVotes:      admin.firestore.FieldValue.increment(award.pressure),
         },
         lastRoomId:    roomId,
         lastSessionAt: now,

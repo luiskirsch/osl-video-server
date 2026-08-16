@@ -34,10 +34,81 @@ const CATALOG = [
   {
     id:          'first_game',
     title:       'Primeira Sessão',
-    description: 'Joguou sua primeira sessão.',
+    description: 'Jogou sua primeira sessão.',
     icon:        '🎴',
     category:    'milestone',
     rarity:      'common',
+  },
+  // Aliases client-side (IDs usados por effects.js) mapeados aqui para validação server
+  {
+    id:          'first_session',
+    title:       'Primeira Sessão',
+    description: 'Jogou sua primeira sessão.',
+    icon:        '🎴',
+    category:    'milestone',
+    rarity:      'common',
+  },
+  {
+    id:          'level_10',
+    title:       'Veterano Iniciante',
+    description: 'Atingiu o nível 10.',
+    icon:        '⭐',
+    category:    'milestone',
+    rarity:      'common',
+    progressTarget: 10,
+  },
+  {
+    id:          'level_20',
+    title:       'Jogador Dedicado',
+    description: 'Atingiu o nível 20.',
+    icon:        '🌟',
+    category:    'milestone',
+    rarity:      'uncommon',
+    progressTarget: 20,
+  },
+  {
+    id:          'level_30',
+    title:       'Mestre do Ritual',
+    description: 'Atingiu o nível 30.',
+    icon:        '💫',
+    category:    'milestone',
+    rarity:      'rare',
+    progressTarget: 30,
+  },
+  {
+    id:          'level_50',
+    title:       'O Sexto',
+    description: 'Atingiu o nível máximo — Prestige desbloqueado.',
+    icon:        '🔮',
+    category:    'milestone',
+    rarity:      'legendary',
+    progressTarget: 50,
+  },
+  {
+    id:          'fire_streak',
+    title:       'Chama Viva',
+    description: 'Foi o jogador mais reativo em uma sessão.',
+    icon:        '🔥',
+    category:    'engagement',
+    rarity:      'uncommon',
+  },
+  {
+    id:          'mission_3',
+    title:       'Agente Triplo',
+    description: 'Completou missões em 3 sessões diferentes.',
+    icon:        '🎯',
+    category:    'engagement',
+    rarity:      'rare',
+    progressTarget: 3,
+  },
+  {
+    id:          'pressure_5',
+    title:       'Pressão Total',
+    description: 'Aplicou pressão social 5 vezes.',
+    icon:        '💢',
+    category:    'engagement',
+    rarity:      'uncommon',
+    progressTarget: 5,
   },
   {
     id:          'session_5',
@@ -297,6 +368,96 @@ function init() {
         await _checkAndUnlock(uid, 'mission').catch(() => {});
       }
     } catch (_) {}
+  });
+
+  // Nível — dispara quando XP é concedido ao fim de sessão
+  events.on('user.xp_awarded', async ({ payload }) => {
+    const { uid } = payload || {};
+    if (!uid) return;
+    try {
+      const db = getDb();
+      if (!db) return;
+      const snap = await db.collection('users').doc(uid).get();
+      if (!snap.exists) return;
+      const { levelFromXP } = require('../data/cards');
+      const level = levelFromXP(snap.data().xp || 0);
+      if (level >= 10) await _checkAndUnlock(uid, 'level_10', { progress: Math.min(level, 10) }).catch(() => {});
+      if (level >= 20) await _checkAndUnlock(uid, 'level_20', { progress: Math.min(level, 20) }).catch(() => {});
+      if (level >= 30) await _checkAndUnlock(uid, 'level_30', { progress: Math.min(level, 30) }).catch(() => {});
+      if (level >= 50) await _checkAndUnlock(uid, 'level_50', { progress: Math.min(level, 50) }).catch(() => {});
+    } catch (err) {
+      logger.warn({ err, uid }, 'achievement_level_check_error');
+    }
+  });
+
+  // fire_streak: top reator de uma sessão; pressure_5: 5 pressões acumuladas
+  events.on('session.ended', async ({ payload }) => {
+    const { players, summary } = payload || {};
+    if (!players || !summary) return;
+    const topNick = summary.topReactor?.nickname || null;
+    const authedPlayers = players.filter(p => p.userId);
+    for (const p of authedPlayers) {
+      const uid = p.userId;
+      try {
+        // fire_streak: foi o mais reativo nesta sessão
+        if (topNick && p.nickname === topNick) {
+          await _checkAndUnlock(uid, 'fire_streak').catch(() => {});
+        }
+        // pressure_5: verifica contador acumulado
+        const db = getDb();
+        if (!db) continue;
+        const uSnap = await db.collection('users').doc(uid).get();
+        if (!uSnap.exists) continue;
+        const totalPressure = uSnap.data()?.stats?.pressureVotes || 0;
+        if (totalPressure >= 5) {
+          await _checkAndUnlock(uid, 'pressure_5', { progress: Math.min(totalPressure, 5) }).catch(() => {});
+        }
+      } catch (err) {
+        logger.warn({ err, uid }, 'achievement_fire_pressure_check_error');
+      }
+    }
+  });
+
+  // mission_3: verifica contador acumulado de missões ao fim de sessão
+  events.on('session.ended', async ({ payload }) => {
+    const { players, sessionId, roomId } = payload || {};
+    if (!players || !sessionId) return;
+    const authedPlayers = players.filter(p => p.userId);
+    if (!authedPlayers.length) return;
+    try {
+      const db = getDb();
+      if (!db) return;
+      const evSnap = await db.collection('salas').doc(roomId)
+        .collection('sessions').doc(sessionId)
+        .collection('events').where('type', '==', 'MISSION_COMPLETED').get();
+      if (evSnap.empty) return;
+      const completedUids = new Set(evSnap.docs.map(d => d.data().actor).filter(Boolean));
+      for (const uid of completedUids) {
+        const uSnap = await db.collection('users').doc(uid).get().catch(() => null);
+        if (!uSnap?.exists) continue;
+        const total = uSnap.data()?.stats?.missionsCompleted || 0;
+        if (total >= 3) {
+          await _checkAndUnlock(uid, 'mission_3', { progress: Math.min(total, 3) }).catch(() => {});
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'achievement_mission3_check_error');
+    }
+  });
+
+  // first_session alias (mesmo que first_game mas com o ID usado pelo client)
+  events.on('session.ended', async ({ payload }) => {
+    const { players } = payload || {};
+    if (!players) return;
+    const authedPlayers = players.filter(p => p.userId);
+    for (const p of authedPlayers) {
+      try {
+        const rep = await reputation.getReputation(p.userId);
+        if ((rep?.totalSessions || 0) === 1) {
+          await _checkAndUnlock(p.userId, 'first_session').catch(() => {});
+        }
+      } catch (_) {}
+    }
   });
 
   // Social: monitora quando jogadores são adicionados à social_connections

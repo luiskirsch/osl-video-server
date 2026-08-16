@@ -219,6 +219,7 @@ function buildAccountSnapshot({ uid, claims = {}, user = {}, legacyProfile = {},
       xpNeededForLevel,
       progressPct,
       dailyStreak: integer(user.dailyStreak),
+      loginRewardStreak: integer(user.loginRewardStreak),
       achievementsCount,
       stats: {
         ...stats,
