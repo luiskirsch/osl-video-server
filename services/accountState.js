@@ -312,6 +312,11 @@ async function ensureAccountSnapshot({ db, uid, claims = {}, userData, lastSessi
       patch.coinAwardedUpToLevel = _currentLevel;
     }
 
+    // Prestige: regras Firestore bloqueiam escrita client-side — backend concede via Admin SDK.
+    if (_currentLevel >= 50 && !user.prestige) {
+      patch.prestige = true;
+    }
+
     if (!Array.isArray(user.friends)) patch.friends = [];
     if (!Array.isArray(user.incomingRequests)) patch.incomingRequests = [];
     if (!Array.isArray(user.outgoingRequests)) patch.outgoingRequests = [];

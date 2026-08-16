@@ -60,6 +60,36 @@ router.get('/game/me', asyncHandler(async (req, res) => {
   return res.json({ ok: true, account });
 }));
 
+// POST /game/grant-prestige
+// Concede prestige ao usuário quando ele atinge nível 50.
+// Usa Admin SDK para contornar a regra Firestore que bloqueia escrita client-side.
+router.post('/game/grant-prestige', asyncHandler(async (req, res) => {
+  const claims = await getClaims(req);
+  const uid = claims?.uid;
+  if (!uid) return sendError(res, 401, 'TOKEN_INVALIDO');
+
+  const db = _getFirestoreDb();
+  if (!db) return sendError(res, 503, 'DB_INDISPONIVEL');
+
+  const userSnap = await db.collection('users').doc(uid).get();
+  if (!userSnap.exists) return sendError(res, 404, 'USUARIO_NAO_ENCONTRADO');
+
+  const { levelFromXP } = require('../data/cards');
+  const xp = Number(userSnap.data()?.xp || 0);
+  const level = levelFromXP(xp);
+
+  if (level < 50) return sendError(res, 403, 'NIVEL_INSUFICIENTE');
+  if (userSnap.data()?.prestige === true) return res.json({ ok: true, alreadyGranted: true });
+
+  await db.collection('users').doc(uid).update({
+    prestige: true,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  eventBus.emit('user.prestige_granted', { uid, level });
+  return res.json({ ok: true, granted: true });
+}));
+
 // GET /hub
 router.get('/hub', asyncHandler(async (req, res) => {
   const claims = await getClaims(req);

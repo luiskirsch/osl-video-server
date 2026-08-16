@@ -175,7 +175,9 @@ async function settleSessionAccounts(sessionId, roomId, summary, players) {
           lastSessionId:   sessionId,
         },
         stats: {
-          gamesPlayed: admin.firestore.FieldValue.increment(1),
+          gamesPlayed:        admin.firestore.FieldValue.increment(1),
+          wins:               admin.firestore.FieldValue.increment(missionsDone ? 1 : 0),
+          missionsCompleted:  admin.firestore.FieldValue.increment(missionsDone),
         },
         lastRoomId:    roomId,
         lastSessionAt: now,
