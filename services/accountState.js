@@ -13,6 +13,21 @@ const { levelFromXP } = require('../data/cards');
 
 const SCHEMA_VERSION = 1;
 
+// Espelho do mapa de moedas do frontend (js/constants.js OSL_COINS_PER_LEVEL).
+// Índice 0 = nível 1, mas moedas só são concedidas ao subir DE nível (≥2).
+const COINS_PER_LEVEL = [
+   25,  25,  25,  25, 100,
+   25,  25,  25,  25, 100,
+   30,  30,  30,  30, 150,
+   30,  30,  30,  30, 150,
+   50,  50,  50,  50, 200,
+   50,  50,  50,  50, 200,
+   75,  75,  75,  75, 300,
+   75,  75,  75,  75, 300,
+  100, 100, 100, 100, 400,
+  100, 100, 100, 100, 500,
+];
+
 // Espelho do catálogo visual já usado pelo cliente. O último título também é
 // usado para níveis acima do catálogo, preservando a progressão numérica.
 const XP_TITLES = [
@@ -280,6 +295,23 @@ async function ensureAccountSnapshot({ db, uid, claims = {}, userData, lastSessi
     if (user.userId !== uid) patch.userId = uid;
     if (!Number.isFinite(Number(user.xp)) || Number(user.xp) < 0) patch.xp = 0;
     if (!Number.isFinite(Number(user.coins)) || Number(user.coins) < 0) patch.coins = 0;
+
+    // Concede coins para level-ups que o cliente nunca conseguiu persistir
+    // (Firestore rules bloqueiam escrita de coins pelo cliente).
+    const _currentLevel = levelFromXP(integer(user.xp));
+    const _coinAwardedUpToLevel = integer(user.coinAwardedUpToLevel, 0);
+    let _coinAwardAmount = 0;
+    if (_currentLevel > _coinAwardedUpToLevel) {
+      for (let _lvl = Math.max(2, _coinAwardedUpToLevel + 1); _lvl <= _currentLevel; _lvl++) {
+        _coinAwardAmount += COINS_PER_LEVEL[_lvl - 1] ?? 25;
+      }
+      if (_coinAwardAmount > 0) {
+        delete patch.coins; // remove eventual patch.coins=0 para usar increment
+        patch.coins = FieldValue.increment(_coinAwardAmount);
+      }
+      patch.coinAwardedUpToLevel = _currentLevel;
+    }
+
     if (!Array.isArray(user.friends)) patch.friends = [];
     if (!Array.isArray(user.incomingRequests)) patch.incomingRequests = [];
     if (!Array.isArray(user.outgoingRequests)) patch.outgoingRequests = [];
@@ -315,6 +347,9 @@ async function ensureAccountSnapshot({ db, uid, claims = {}, userData, lastSessi
     const mergedUser = {
       ...user,
       ...patch,
+      // coins pode ser FieldValue.increment — usa valor numérico para o snapshot
+      coins: integer(user.coins) + _coinAwardAmount,
+      coinAwardedUpToLevel: _currentLevel,
       avatar: patch.avatar || user.avatar,
       stats: {
         ...(user.stats && typeof user.stats === 'object' ? user.stats : {}),
