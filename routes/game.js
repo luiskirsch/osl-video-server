@@ -502,7 +502,6 @@ router.get("/game/room/:roomId", (req, res) => {
 });
 
 router.get("/game/rooms", (req, res) => {
-  if (!checkPanelToken(req)) return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
   try {
     cleanupPanelRooms();
     const rooms = Array.from(panelRooms.values())
