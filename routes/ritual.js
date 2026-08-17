@@ -179,17 +179,20 @@ function logSessionEvent(db, roomId, sessionId, type, actor, payload = {}) {
 router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const { roomId, hostToken, firebaseIdToken, players: rawPlayers } = req.body || {};
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-  if (!verifyHostToken(hostToken, roomId)) {
-    logWarn("ritual_start_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
-    return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
-  }
 
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const hostUid = await uidFromFirebaseToken(firebaseIdToken);
   if (!await verifyRoomHost(db, roomId, hostUid)) {
+    logWarn("ritual_start_unauthorized", { roomId, ip: req.headers["x-forwarded-for"] || null });
     return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+  }
+  // O Firebase ID token + hostId do Firestore são a autorização canônica.
+  // O hostToken continua validado para telemetria/compatibilidade, mas uma
+  // credencial efêmera antiga não deve bloquear o anfitrião autenticado.
+  if (!verifyHostToken(hostToken, roomId)) {
+    logWarn("ritual_start_host_token_refreshed_late", { roomId, hostUid });
   }
 
   const players = await resolveSessionPlayers(db, roomId, rawPlayers);
@@ -935,6 +938,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   const now     = admin.firestore.FieldValue.serverTimestamp();
   const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
   const roomRef = db.collection("salas").doc(roomId);
+  const ritualRef = roomRef.collection("ritual").doc("state");
 
   // Lê sessão e eventos em paralelo para computar summary
   const [sessSnap, eventsSnap] = await Promise.all([
@@ -992,7 +996,23 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
       summary,
     });
     if (roomSnap.exists && roomSnap.data()?.currentSessionId === sessionId) {
-      tx.update(roomRef, { currentSessionId: null, updatedAt: now });
+      tx.update(roomRef, {
+        status: "waiting",
+        arenaActive: false,
+        currentSessionId: null,
+        updatedAt: now,
+      });
+      tx.set(ritualRef, {
+        started: false,
+        remainingDeck: [],
+        currentCard: null,
+        activeEffect: null,
+        pendingDeathrattle: null,
+        cardsRevealedCount: 0,
+        sessionId: null,
+        updatedAt: now,
+        updatedBy: "server",
+      }, { merge: true });
     }
     return { alreadyEnded: false };
   });
