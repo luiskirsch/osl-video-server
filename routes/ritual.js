@@ -149,7 +149,7 @@ async function verifyRoomHost(db, roomId, hostUid) {
   const roomSnap = await db.collection("salas").doc(roomId).get().catch(() => null);
   if (!roomSnap?.exists) return false;
   const expectedHostUid = String(roomSnap.data()?.hostId || "").trim();
-  return !expectedHostUid || expectedHostUid === hostUid;
+  return !!expectedHostUid && expectedHostUid === hostUid;
 }
 
 // Sanitiza payload de evento: apenas primitivos, chaves ≤50 chars, strings ≤500 chars
@@ -923,17 +923,63 @@ router.post("/game/session/player-heartbeat", asyncHandler(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+async function resetEndedSessionToLobby(db, roomId, sessionId) {
+  const roomRef   = db.collection("salas").doc(roomId);
+  const ritualRef = roomRef.collection("ritual").doc("state");
+  const now       = admin.firestore.FieldValue.serverTimestamp();
+
+  await db.runTransaction(async tx => {
+    const [roomSnap, ritualSnap] = await Promise.all([
+      tx.get(roomRef),
+      tx.get(ritualRef),
+    ]);
+    const roomSessionId   = String(roomSnap.data()?.currentSessionId || "");
+    const ritualSessionId = String(ritualSnap.data()?.sessionId || "");
+    const ownsRoomState   = roomSessionId === String(sessionId);
+    const ownsRitualState = ritualSessionId === String(sessionId);
+    const hasConflict     = (!!roomSessionId && !ownsRoomState) || (!!ritualSessionId && !ownsRitualState);
+    const canReset        = !hasConflict && (ownsRoomState || ownsRitualState);
+
+    // Nunca apaga uma sessão mais nova que tenha começado durante um retry.
+    if (roomSnap.exists && canReset) {
+      tx.update(roomRef, {
+        status: "waiting",
+        arenaActive: false,
+        currentSessionId: null,
+        updatedAt: now,
+      });
+    }
+    if (ritualSnap.exists && canReset) {
+      tx.set(ritualRef, {
+        started: false,
+        remainingDeck: [],
+        currentCard: null,
+        activeEffect: null,
+        pendingDeathrattle: null,
+        cardsRevealedCount: 0,
+        sessionId: null,
+        updatedAt: now,
+        updatedBy: "server",
+      }, { merge: true });
+    }
+  });
+}
+
 // ── POST /game/session/end-game ──────────────────────────────────────────────
 // Encerra a sessão de jogo. Computa summary durável a partir dos eventos.
 router.post("/game/session/end-game", asyncHandler(async (req, res) => {
-  const { roomId, sessionId, hostToken } = req.body || {};
+  const { roomId, sessionId, hostToken, firebaseIdToken } = req.body || {};
   if (!roomId || !sessionId) return sendError(res, 400, "ROOM_ID_OU_SESSION_ID_OBRIGATORIO");
-  if (!verifyHostToken(hostToken, roomId)) {
-    return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
-  }
 
   const db  = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+  if (!verifyHostToken(hostToken, roomId)) {
+    const hostUid = await uidFromFirebaseToken(firebaseIdToken);
+    if (!await verifyRoomHost(db, roomId, hostUid)) {
+      return res.status(403).json({ ok: false, error: "HOST_TOKEN_INVALIDO" });
+    }
+    logWarn("session_end_host_token_refreshed_late", { roomId, hostUid });
+  }
 
   const now     = admin.firestore.FieldValue.serverTimestamp();
   const sessRef = db.collection("salas").doc(roomId).collection("sessions").doc(sessionId);
@@ -959,6 +1005,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   // Nesse caso repetimos apenas o settlement idempotente das contas: o marker
   // account-v1 impede XP/reputação duplicados e repara uma tentativa incompleta.
   if (sessData.status === "ended") {
+    await resetEndedSessionToLobby(db, roomId, sessionId);
     const accountSettlement = await reputation.settleSessionAccounts(
       sessionId,
       roomId,
@@ -974,9 +1021,10 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
   }
 
   const settlement = await db.runTransaction(async tx => {
-    const [freshSessionSnap, roomSnap] = await Promise.all([
+    const [freshSessionSnap, roomSnap, ritualSnap] = await Promise.all([
       tx.get(sessRef),
       tx.get(roomRef),
+      tx.get(ritualRef),
     ]);
 
     if (!freshSessionSnap.exists) return { missing: true };
@@ -995,13 +1043,21 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
       settlementVersion: 1,
       summary,
     });
-    if (roomSnap.exists && roomSnap.data()?.currentSessionId === sessionId) {
+    const roomSessionId   = String(roomSnap.data()?.currentSessionId || "");
+    const ritualSessionId = String(ritualSnap.data()?.sessionId || "");
+    const ownsRoomState   = roomSessionId === String(sessionId);
+    const ownsRitualState = ritualSessionId === String(sessionId);
+    const hasConflict     = (!!roomSessionId && !ownsRoomState) || (!!ritualSessionId && !ownsRitualState);
+    const canReset        = !hasConflict && (ownsRoomState || ownsRitualState);
+    if (roomSnap.exists && canReset) {
       tx.update(roomRef, {
         status: "waiting",
         arenaActive: false,
         currentSessionId: null,
         updatedAt: now,
       });
+    }
+    if (ritualSnap.exists && canReset) {
       tx.set(ritualRef, {
         started: false,
         remainingDeck: [],
@@ -1022,6 +1078,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
     return res.status(409).json({ ok: false, error: "SESSAO_NAO_ATIVA", status: settlement.invalidStatus });
   }
   if (settlement.alreadyEnded) {
+    await resetEndedSessionToLobby(db, roomId, sessionId);
     const settledSummary = settlement.summary || summary;
     const accountSettlement = await reputation.settleSessionAccounts(
       sessionId,
