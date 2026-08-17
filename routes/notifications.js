@@ -62,4 +62,13 @@ router.post('/notifications/read-all', asyncHandler(async (req, res) => {
   return res.json({ ok: true, marked: count });
 }));
 
+// DELETE /notifications/:id
+router.delete('/notifications/:id', asyncHandler(async (req, res) => {
+  const uid = await getUid(req);
+  if (!uid) return sendError(res, 401, 'TOKEN_INVALIDO');
+
+  await notifications.deleteNotification(uid, req.params.id);
+  return res.json({ ok: true });
+}));
+
 module.exports = router;

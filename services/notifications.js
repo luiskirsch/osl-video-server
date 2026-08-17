@@ -105,6 +105,15 @@ async function markAllRead(uid) {
   return snap.size;
 }
 
+async function deleteNotification(uid, notifId) {
+  const db = getDb();
+  if (!db || !uid || !notifId) return;
+  await db.collection('users').doc(uid)
+    .collection('notifications').doc(notifId)
+    .delete()
+    .catch(() => {});
+}
+
 async function getUnreadCount(uid) {
   const db = getDb();
   if (!db || !uid) return 0;
@@ -179,4 +188,4 @@ function init() {
   logger.info({}, 'notifications_initialized');
 }
 
-module.exports = { createNotification, getNotifications, markRead, markAllRead, getUnreadCount, init };
+module.exports = { createNotification, getNotifications, markRead, markAllRead, deleteNotification, getUnreadCount, init };
