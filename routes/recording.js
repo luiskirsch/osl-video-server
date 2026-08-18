@@ -268,7 +268,7 @@ router.get("/recording/status/:roomId", (req, res) => {
     ? require("../services/auth").verifySignedToken(t, require("../config").ADMIN_SECRET)
     : { valid: false };
   if (!r.valid || r.payload?.token_type !== "panel_session") {
-    return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
+    return res.json({ ok: true, active: false });
   }
   try {
     const roomId    = normalizeRoomId(req.params.roomId);

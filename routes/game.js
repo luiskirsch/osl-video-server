@@ -134,7 +134,12 @@ router.post("/game/room/create", roomLimiter, asyncHandler(async (req, res) => {
     if (String(roomSnap.data()?.hostId || "") !== decoded.uid) {
       return sendError(res, 403, "USUARIO_NAO_E_ANFITRIAO");
     }
-    if (panelRooms.has(roomId)) return res.status(409).json({ ok: false, code: "SALA_JA_EXISTE" });
+    if (panelRooms.has(roomId)) {
+      // Sala já registrada — retorna 200 idempotente com hostToken fresco
+      let hostToken = null;
+      try { hostToken = signHostToken(roomId); } catch (_) {}
+      return res.json({ ok: true, alreadyExists: true, room: serializePanelRoom(panelRooms.get(roomId)), hostToken });
+    }
 
     const room = getOrCreatePanelRoom(roomId, name, host);
     broadcastPanelUpdate();
