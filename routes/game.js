@@ -408,12 +408,17 @@ router.post("/game/room/deny-join", (req, res) => {
 
 router.post("/game/room/heartbeat", (req, res) => {
   try {
-    const roomId = normalizeRoomId(req.body?.roomId);
+    const roomId   = normalizeRoomId(req.body?.roomId);
+    const playerId = String(req.body?.playerId || "").trim();
     if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
     const room = panelRooms.get(roomId);
     if (!room) return res.json({ ok: true });
-    room.lastActivityAt = nowIso();
-    room.updatedAt      = nowIso();
+    const ts = nowIso();
+    room.lastActivityAt = ts;
+    room.updatedAt      = ts;
+    if (playerId && room.players[playerId]) {
+      room.players[playerId].lastSeen = ts;
+    }
     return res.json({ ok: true });
   } catch (error) {
     logError("game_room_heartbeat_error", error);
