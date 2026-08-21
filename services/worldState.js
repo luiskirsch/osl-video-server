@@ -30,6 +30,13 @@ function getDb() {
 
 const WORLD_DOC = 'world_state/current';
 const CACHE_TTL = 60_000; // 1 min
+const WORLD_ACTIVITY_LIMIT = 18;
+const TERRITORIES = Object.freeze([
+  { id: 'limiar', name: 'O Limiar', threshold: 0, sigil: '◉', palette: ['#d4af37', '#10202a'], affinity: ['Ritual', 'Conexão'], effect: 'Cartas de abertura ganham presença e anunciam a origem do vestígio.', lore: 'Onde toda conversa abandona o cotidiano e se torna ritual.' },
+  { id: 'entrelinhas', name: 'Entrelinhas', threshold: .25, sigil: '△', palette: ['#60a6a8', '#081b22'], affinity: ['Pergunta', 'Segredo'], effect: 'Perguntas e segredos carregam o eco das sessões recentes.', lore: 'O território das palavras evitadas e das memórias compartilhadas.' },
+  { id: 'camara', name: 'A Câmara', threshold: .55, sigil: '□', palette: ['#a884d8', '#150e20'], affinity: ['Desafio', 'Missão'], effect: 'Desafios e missões recebem a pressão coletiva do mundo.', lore: 'Tudo que o grupo escolhe fazer permanece registrado aqui.' },
+  { id: 'sexto_lugar', name: 'O Sexto Lugar', threshold: .85, sigil: '◇', palette: ['#f0e4bd', '#26180d'], affinity: ['Reflexão', 'Decisão Coletiva'], effect: 'Cartas raras podem atravessar qualquer deck ativo.', lore: 'Um lugar criado apenas quando pessoas escolhem estar verdadeiramente presentes.' },
+]);
 
 let _cache = null; // { data, expiresAt }
 
@@ -39,8 +46,25 @@ function _defaultState() {
     currentMissionId:       null,
     unlockedContent:        [],
     totalDailyParticipants: 0,
+    territoryContributions: {},
+    recentEchoes:           [],
     updatedAt:              admin.firestore.FieldValue.serverTimestamp(),
   };
+}
+
+function _timestampMs(value) {
+  if (typeof value === 'number') return value;
+  if (value instanceof Date) return value.getTime();
+  return value?.toMillis?.() ?? null;
+}
+
+function _territoryView(raw, progress) {
+  const contributions = raw.territoryContributions || {};
+  return TERRITORIES.map((territory, index) => ({ ...territory, index,
+    unlocked: progress >= territory.threshold,
+    contribution: Number(contributions[territory.id] || 0),
+    nextThreshold: TERRITORIES[index + 1]?.threshold ?? 1,
+  }));
 }
 
 // ── API pública ───────────────────────────────────────────────────────────────
@@ -80,16 +104,49 @@ async function getWorldState() {
     }
   }
 
+  const communityProgress = Math.min(1, Math.max(0, raw.communityProgress || 0));
+  const territories = _territoryView(raw, communityProgress);
+  const activeTerritory = [...territories].reverse().find(t => t.unlocked) || territories[0];
   const data = {
-    communityProgress:      Math.min(1, Math.max(0, raw.communityProgress || 0)),
+    communityProgress,
     currentMission,
     unlockedContent:        raw.unlockedContent || [],
     totalDailyParticipants: raw.totalDailyParticipants || 0,
+    territories,
+    activeTerritory,
+    activeInfluence: { territoryId: activeTerritory.id, name: activeTerritory.name, sigil: activeTerritory.sigil, palette: activeTerritory.palette, affinity: activeTerritory.affinity, effect: activeTerritory.effect },
+    recentEchoes: (Array.isArray(raw.recentEchoes) ? raw.recentEchoes : []).slice(-WORLD_ACTIVITY_LIMIT).reverse().map(echo => ({ territoryId: String(echo.territoryId || 'limiar').slice(0, 40), kind: String(echo.kind || 'ritual_completed').slice(0, 40), players: Math.max(1, Number(echo.players || 1)), at: _timestampMs(echo.at) })),
     updatedAt:              raw.updatedAt?.toMillis?.() ?? null,
   };
 
   _cache = { data, expiresAt: Date.now() + CACHE_TTL };
   return data;
+}
+
+function _territoryForSummary(summary = {}) {
+  const counts = summary.cardTypeCounts || {};
+  const score = territory => territory.affinity.reduce((sum, type) => sum + Number(counts[type] || 0), 0);
+  return [...TERRITORIES].sort((a, b) => score(b) - score(a))[0] || TERRITORIES[0];
+}
+
+async function recordWorldActivity({ sessionId, playerCount, summary } = {}) {
+  const db = getDb();
+  if (!db || !sessionId) return;
+  const territory = _territoryForSummary(summary), ref = db.doc(WORLD_DOC);
+  _cache = null;
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(ref), raw = snap.exists ? snap.data() : {};
+    const echoes = Array.isArray(raw.recentEchoes) ? raw.recentEchoes.slice(-(WORLD_ACTIVITY_LIMIT - 1)) : [];
+    echoes.push({ id: String(sessionId).slice(0, 120), territoryId: territory.id, kind: 'ritual_completed', players: Math.max(1, Number(playerCount || 1)), at: new Date() });
+    tx.set(ref, { recentEchoes: echoes, territoryContributions: { ...(raw.territoryContributions || {}), [territory.id]: Number(raw.territoryContributions?.[territory.id] || 0) + Math.max(1, Number(playerCount || 1)) }, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  });
+}
+
+async function applyWorldInfluence(deck) {
+  if (!Array.isArray(deck) || !deck.length) return deck;
+  const state = await getWorldState().catch(() => null), influence = state?.activeInfluence;
+  if (!influence) return deck;
+  return deck.map((card, index) => influence.affinity.includes(card.type) && index % 3 === 0 ? { ...card, worldInfluence: influence } : card);
 }
 
 /**
@@ -251,11 +308,12 @@ function init() {
 
   // Cada sessão completada avança o progresso da comunidade
   events.on('session.ended', async ({ payload }) => {
-    const { sessionId, playerCount } = payload || {};
+    const { sessionId, playerCount, summary } = payload || {};
     if (!sessionId) return;
 
     const amount = 0.001 * Math.max(1, playerCount || 1);
     await contributeProgress(amount).catch(() => {});
+    await recordWorldActivity({ sessionId, playerCount, summary }).catch(err => logger.warn({ err }, 'world_activity_record_failed'));
 
     try {
       const state = await getWorldState();
@@ -280,5 +338,5 @@ function init() {
 module.exports = {
   getWorldState, contributeProgress, incrementDailyParticipants,
   setWorldState, createMission, updateMission, listMissions,
-  contributeMission, invalidate, init,
+  contributeMission, recordWorldActivity, applyWorldInfluence, TERRITORIES, invalidate, init,
 };

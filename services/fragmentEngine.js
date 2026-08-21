@@ -20,16 +20,16 @@ const admin  = require('firebase-admin');
 const FRAGMENT_TTL_MS = 48 * 60 * 60 * 1000;
 
 const FRAGMENT_POOL = [
-  { title: 'O que ficou sem dizer?',     text: 'Algo aconteceu recentemente. Traga o que você não conseguiu nomear.' },
-  { title: 'A pergunta que você evitou', text: 'Que pergunta você queria fazer, mas não fez? Hora de fazê-la.' },
-  { title: 'Antes de continuar',         text: 'O que você ainda não processou? Deixa entrar na sala.' },
-  { title: '24 horas',                   text: 'O que mudou em você nas últimas 24 horas? Não precisa ser grande.' },
-  { title: 'Uma coisa real',             text: 'Nada performático. Traga algo que aconteceu de verdade.' },
-  { title: 'O momento mais honesto',     text: 'Em que momento recente você foi mais honesto consigo mesmo?' },
-  { title: 'O que você descobriu?',      text: 'Uma descoberta — sobre você, sobre alguém, sobre qualquer coisa.' },
-  { title: 'Ainda aqui',                 text: 'O que de hoje você trouxe para essa sala sem perceber?' },
-  { title: 'A pergunta certa',           text: 'Que pergunta, se feita agora, mudaria algo entre as pessoas deste grupo?' },
-  { title: 'O que ficou',               text: 'De tudo que aconteceu recentemente, o que vai ficar com você?' },
+  { title: 'O que ficou sem dizer?', text: 'Algo aconteceu recentemente. Traga o que você não conseguiu nomear.', territoryId: 'limiar', rarity: 'incomum', sigil: '◉', palette: ['#d4af37','#10202a'], effect: 'Abre o ritual antes da primeira carta comum.' },
+  { title: 'A pergunta que você evitou', text: 'Que pergunta você queria fazer, mas não fez? Hora de fazê-la.', territoryId: 'entrelinhas', rarity: 'raro', sigil: '△', palette: ['#60a6a8','#081b22'], effect: 'Conduz o grupo diretamente ao que não foi dito.' },
+  { title: 'Antes de continuar', text: 'O que você ainda não processou? Deixe isso entrar na sala.', territoryId: 'camara', rarity: 'incomum', sigil: '□', palette: ['#a884d8','#150e20'], effect: 'Transforma uma memória recente em matéria do ritual.' },
+  { title: '24 horas', text: 'O que mudou em você nas últimas 24 horas? Não precisa ser grande.', territoryId: 'limiar', rarity: 'comum', sigil: '◉', palette: ['#d4af37','#10202a'], effect: 'Liga o ritual de hoje ao mundo que continuou sem você.' },
+  { title: 'Uma coisa real', text: 'Nada performático. Traga algo que aconteceu de verdade.', territoryId: 'camara', rarity: 'raro', sigil: '□', palette: ['#a884d8','#150e20'], effect: 'Aumenta a presença coletiva desta sessão.' },
+  { title: 'O momento mais honesto', text: 'Em que momento recente você foi mais honesto consigo mesmo?', territoryId: 'sexto_lugar', rarity: 'lendário', sigil: '◇', palette: ['#f0e4bd','#26180d'], effect: 'Um vestígio raro atravessa todas as fronteiras.' },
+  { title: 'O que você descobriu?', text: 'Uma descoberta — sobre você, sobre alguém, sobre qualquer coisa.', territoryId: 'entrelinhas', rarity: 'incomum', sigil: '△', palette: ['#60a6a8','#081b22'], effect: 'Registra uma memória nas Entrelinhas.' },
+  { title: 'Ainda aqui', text: 'O que de hoje você trouxe para essa sala sem perceber?', territoryId: 'limiar', rarity: 'comum', sigil: '◉', palette: ['#d4af37','#10202a'], effect: 'Torna visível o elo entre dois rituais.' },
+  { title: 'A pergunta certa', text: 'Que pergunta, se feita agora, mudaria algo entre as pessoas deste grupo?', territoryId: 'sexto_lugar', rarity: 'lendário', sigil: '◇', palette: ['#f0e4bd','#26180d'], effect: 'Permite ao grupo nomear o que mudou entre vocês.' },
+  { title: 'O que ficou', text: 'De tudo que aconteceu recentemente, o que vai ficar com você?', territoryId: 'entrelinhas', rarity: 'raro', sigil: '△', palette: ['#60a6a8','#081b22'], effect: 'Converte o encerramento em um vestígio persistente.' },
 ];
 
 function sanitizeFragmentCard(card) {
@@ -37,7 +37,8 @@ function sanitizeFragmentCard(card) {
   const title = typeof card.title === 'string' ? card.title.trim().slice(0, 160) : '';
   const text  = typeof card.text === 'string' ? card.text.trim().slice(0, 1200) : '';
   if (!title || !text) return null;
-  return { title, text, type: 'fragmento' };
+  const palette = (Array.isArray(card.palette) ? card.palette : []).slice(0, 2).map(color => /^#[0-9a-f]{6}$/i.test(color) ? color : null).filter(Boolean);
+  return { title, text, type: 'fragmento', fragmentId: String(card.fragmentId || '').slice(0, 80) || null, territoryId: String(card.territoryId || 'limiar').slice(0, 40), rarity: String(card.rarity || 'comum').slice(0, 20), sigil: String(card.sigil || '◉').slice(0, 4), palette: palette.length === 2 ? palette : ['#d4af37','#10202a'], effect: String(card.effect || '').slice(0, 240) };
 }
 
 let _db = null;
@@ -52,7 +53,7 @@ function _selectCard(cardTitle) {
   const dateStr = new Date().toISOString().split('T')[0];
   const seed    = (dateStr + (cardTitle || '')).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
   const base    = FRAGMENT_POOL[seed % FRAGMENT_POOL.length];
-  return { ...base, type: 'fragmento' };
+  return { ...base, fragmentId: `FRG-${dateStr.replace(/-/g, '')}-${String(seed % 997).padStart(3, '0')}`, type: 'fragmento' };
 }
 
 /**

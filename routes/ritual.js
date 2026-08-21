@@ -19,6 +19,7 @@ const { GameEngine }                    = require("../game/engine");
 const adaptiveEngine                    = require("../services/adaptiveEngine");
 const liveService                       = require("../services/liveService");
 const reputation                        = require("../services/reputation");
+const worldState                        = require("../services/worldState");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
@@ -209,6 +210,8 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const { deck: rawDeck } = await buildVerifiedDeck(db, firebaseIdToken || null, players);
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'start:adaptive');
+  deck = await worldState.applyWorldInfluence(deck);
+  deck = ensurePlayableDeck(deck, rawDeck, 'start:world');
 
   // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
   // Feature flag: contextual_selection_v1 | Fallback: deck original
@@ -553,6 +556,8 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const oldSessionId = roomSessionIdBefore || ritualSessionId || null;
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'reset:adaptive');
+  deck = await worldState.applyWorldInfluence(deck);
+  deck = ensurePlayableDeck(deck, rawDeck, 'reset:world');
 
   // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
   try {
