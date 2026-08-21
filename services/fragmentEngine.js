@@ -120,6 +120,18 @@ async function claimFragmentInTransaction(tx, uid, db = getDb()) {
   return sanitizeFragmentCard(pending.card);
 }
 
+/**
+ * Insere o fragmento reservado no primeiro terço do ritual sem modificar o
+ * array original. Função pura para manter o mesmo contrato em start/reset.
+ */
+function insertFragmentIntoDeck(deck, fragment) {
+  const reservedDeck = Array.isArray(deck) ? deck.slice() : [];
+  if (!fragment) return reservedDeck;
+  const position = Math.max(1, Math.floor(reservedDeck.length / 3));
+  reservedDeck.splice(Math.min(position, reservedDeck.length), 0, fragment);
+  return reservedDeck;
+}
+
 let _initialized = false;
 
 function init() {
@@ -139,4 +151,4 @@ function init() {
   logger.info('fragment_engine_initialized');
 }
 
-module.exports = { issueFragment, consumeFragment, claimFragmentInTransaction, init };
+module.exports = { issueFragment, consumeFragment, claimFragmentInTransaction, insertFragmentIntoDeck, init };

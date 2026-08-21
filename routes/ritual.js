@@ -246,13 +246,9 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     const activeSessionId = String(freshRoom.currentSessionId || "").trim();
     if (activeSessionId) return { existingSessionId: activeSessionId };
 
-    const reservedDeck = deck.slice();
     const fragmentEngine = require('../services/fragmentEngine');
     const fragment = await fragmentEngine.claimFragmentInTransaction(tx, hostUid, db);
-    if (fragment) {
-      const position = Math.max(1, Math.floor(reservedDeck.length / 3));
-      reservedDeck.splice(position, 0, fragment);
-    }
+    const reservedDeck = fragmentEngine.insertFragmentIntoDeck(deck, fragment);
 
     tx.set(ritualRef, {
       started: true,
@@ -611,13 +607,9 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
         throw Object.assign(new Error("SESSAO_ATIVA_PRECISA_SER_ENCERRADA"), { code: "session-still-active" });
       }
 
-      const reservedDeck = deck.slice();
       const fragmentEngine = require('../services/fragmentEngine');
       const fragment = await fragmentEngine.claimFragmentInTransaction(tx, hostUid, db);
-      if (fragment) {
-        const position = Math.max(1, Math.floor(reservedDeck.length / 3));
-        reservedDeck.splice(position, 0, fragment);
-      }
+      const reservedDeck = fragmentEngine.insertFragmentIntoDeck(deck, fragment);
 
       tx.set(ritualRef, {
         started: true,
