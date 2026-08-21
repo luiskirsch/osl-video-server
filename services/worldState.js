@@ -32,10 +32,10 @@ const WORLD_DOC = 'world_state/current';
 const CACHE_TTL = 60_000; // 1 min
 const WORLD_ACTIVITY_LIMIT = 18;
 const TERRITORIES = Object.freeze([
-  { id: 'limiar', name: 'O Limiar', threshold: 0, sigil: '◉', palette: ['#d4af37', '#10202a'], affinity: ['Ritual', 'Conexão'], effect: 'Cartas de abertura ganham presença e anunciam a origem do vestígio.', lore: 'Onde toda conversa abandona o cotidiano e se torna ritual.' },
-  { id: 'entrelinhas', name: 'Entrelinhas', threshold: .25, sigil: '△', palette: ['#60a6a8', '#081b22'], affinity: ['Pergunta', 'Segredo'], effect: 'Perguntas e segredos carregam o eco das sessões recentes.', lore: 'O território das palavras evitadas e das memórias compartilhadas.' },
-  { id: 'camara', name: 'A Câmara', threshold: .55, sigil: '□', palette: ['#a884d8', '#150e20'], affinity: ['Desafio', 'Missão'], effect: 'Desafios e missões recebem a pressão coletiva do mundo.', lore: 'Tudo que o grupo escolhe fazer permanece registrado aqui.' },
-  { id: 'sexto_lugar', name: 'O Sexto Lugar', threshold: .85, sigil: '◇', palette: ['#f0e4bd', '#26180d'], affinity: ['Reflexão', 'Decisão Coletiva'], effect: 'Cartas raras podem atravessar qualquer deck ativo.', lore: 'Um lugar criado apenas quando pessoas escolhem estar verdadeiramente presentes.' },
+  { id: 'limiar', name: 'O Limiar', threshold: 0, sigil: '◉', palette: ['#d4af37', '#10202a'], affinity: ['Ritual', 'Conexão'], effect: 'Cartas de Ritual e Conexão atravessam o início do deck e abrem a sessão sob sua presença.', lore: 'Onde toda conversa abandona o cotidiano e se torna ritual.' },
+  { id: 'entrelinhas', name: 'Entrelinhas', threshold: .25, sigil: '△', palette: ['#60a6a8', '#081b22'], affinity: ['Pergunta', 'Segredo'], effect: 'Perguntas e Segredos são trazidos para os primeiros atos e carregam ecos das sessões recentes.', lore: 'O território das palavras evitadas e das memórias compartilhadas.' },
+  { id: 'camara', name: 'A Câmara', threshold: .55, sigil: '□', palette: ['#a884d8', '#150e20'], affinity: ['Desafio', 'Missão'], effect: 'Desafios e Missões formam uma escalada deliberada depois que o grupo cruza a abertura.', lore: 'Tudo que o grupo escolhe fazer permanece registrado aqui.' },
+  { id: 'sexto_lugar', name: 'O Sexto Lugar', threshold: .85, sigil: '◇', palette: ['#f0e4bd', '#26180d'], affinity: ['Reflexão', 'Decisão Coletiva'], effect: 'Reflexões e Decisões Coletivas atravessam qualquer deck em quatro momentos decisivos.', lore: 'Um lugar criado apenas quando pessoas escolhem estar verdadeiramente presentes.' },
 ]);
 
 let _cache = null; // { data, expiresAt }
@@ -146,7 +146,22 @@ async function applyWorldInfluence(deck) {
   if (!Array.isArray(deck) || !deck.length) return deck;
   const state = await getWorldState().catch(() => null), influence = state?.activeInfluence;
   if (!influence) return deck;
-  return deck.map((card, index) => influence.affinity.includes(card.type) && index % 3 === 0 ? { ...card, worldInfluence: influence } : card);
+  // O território altera a cadência emocional sem remover cartas: até quatro
+  // cartas afins são promovidas para beats definidos e recebem identidade visual.
+  const selected = [], remaining = [];
+  for (const card of deck) {
+    if (selected.length < 4 && influence.affinity.includes(card.type)) selected.push({ ...card, worldInfluence: influence });
+    else remaining.push(card);
+  }
+  if (!selected.length) return deck;
+  const beats = {
+    limiar: [0, 3, 7, 12],
+    entrelinhas: [2, 5, 9, 14],
+    camara: [3, 6, 10, 15],
+    sexto_lugar: [1, 4, 8, 13],
+  }[influence.territoryId] || [1, 4, 8, 13];
+  selected.forEach((card, index) => remaining.splice(Math.min(beats[index], remaining.length), 0, card));
+  return remaining;
 }
 
 /**
