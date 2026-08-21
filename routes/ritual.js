@@ -210,10 +210,8 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const { deck: rawDeck } = await buildVerifiedDeck(db, firebaseIdToken || null, players);
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'start:adaptive');
-  deck = await worldState.applyWorldInfluence(deck);
-  deck = ensurePlayableDeck(deck, rawDeck, 'start:world');
 
-  // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
+  // Priming contextual — Pipeline: temporal + grupo + estilo host
   // Feature flag: contextual_selection_v1 | Fallback: deck original
   try {
     const playerContext       = require('../services/playerContext');
@@ -222,7 +220,11 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
   } catch (_) {}
 
-  deck = ensurePlayableDeck(deck, rawDeck, 'start:final');
+  deck = ensurePlayableDeck(deck, rawDeck, 'start:context');
+  // O Mundo fecha o pipeline: inclusive cartas de abertura geradas pelo
+  // priming recebem a identidade territorial e a cadência final do ritual.
+  deck = await worldState.applyWorldInfluence(deck);
+  deck = ensurePlayableDeck(deck, rawDeck, 'start:world');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
@@ -552,10 +554,8 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
   const oldSessionId = roomSessionIdBefore || ritualSessionId || null;
   let deck = await adaptiveEngine.reorderDeck(rawDeck, { roomId, hostUid });
   deck = ensurePlayableDeck(deck, rawDeck, 'reset:adaptive');
-  deck = await worldState.applyWorldInfluence(deck);
-  deck = ensurePlayableDeck(deck, rawDeck, 'reset:world');
 
-  // Priming contextual — Pipeline: temporal + grupo + mundo + estilo host
+  // Priming contextual — Pipeline: temporal + grupo + estilo host
   try {
     const playerContext       = require('../services/playerContext');
     const contextualSelection = require('../services/contextualSelection');
@@ -563,7 +563,9 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
     deck = await contextualSelection.applyPriming(deck, ctx, { roomId, hostUid });
   } catch (_) {}
 
-  deck = ensurePlayableDeck(deck, rawDeck, 'reset:final');
+  deck = ensurePlayableDeck(deck, rawDeck, 'reset:context');
+  deck = await worldState.applyWorldInfluence(deck);
+  deck = ensurePlayableDeck(deck, rawDeck, 'reset:world');
 
   const now = admin.firestore.FieldValue.serverTimestamp();
 

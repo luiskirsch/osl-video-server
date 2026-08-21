@@ -32,11 +32,18 @@ const WORLD_DOC = 'world_state/current';
 const CACHE_TTL = 60_000; // 1 min
 const WORLD_ACTIVITY_LIMIT = 18;
 const TERRITORIES = Object.freeze([
-  { id: 'limiar', name: 'O Limiar', threshold: 0, sigil: '◉', palette: ['#d4af37', '#10202a'], affinity: ['Ritual', 'Conexão'], effect: 'Cartas de Ritual e Conexão atravessam o início do deck e abrem a sessão sob sua presença.', lore: 'Onde toda conversa abandona o cotidiano e se torna ritual.' },
+  { id: 'limiar', name: 'O Limiar', threshold: 0, sigil: '◉', palette: ['#e7bb3f', '#07191b'], affinity: ['Ritual', 'Conexão', 'Vínculo'], effect: 'Cartas de Ritual, Conexão e Vínculo atravessam o início do deck. Todo o ritual recebe a marca viva do território.', lore: 'Onde toda conversa abandona o cotidiano e se torna ritual.' },
   { id: 'entrelinhas', name: 'Entrelinhas', threshold: .25, sigil: '△', palette: ['#60a6a8', '#081b22'], affinity: ['Pergunta', 'Segredo'], effect: 'Perguntas e Segredos são trazidos para os primeiros atos e carregam ecos das sessões recentes.', lore: 'O território das palavras evitadas e das memórias compartilhadas.' },
   { id: 'camara', name: 'A Câmara', threshold: .55, sigil: '□', palette: ['#a884d8', '#150e20'], affinity: ['Desafio', 'Missão'], effect: 'Desafios e Missões formam uma escalada deliberada depois que o grupo cruza a abertura.', lore: 'Tudo que o grupo escolhe fazer permanece registrado aqui.' },
   { id: 'sexto_lugar', name: 'O Sexto Lugar', threshold: .85, sigil: '◇', palette: ['#f0e4bd', '#26180d'], affinity: ['Reflexão', 'Decisão Coletiva'], effect: 'Reflexões e Decisões Coletivas atravessam qualquer deck em quatro momentos decisivos.', lore: 'Um lugar criado apenas quando pessoas escolhem estar verdadeiramente presentes.' },
 ]);
+
+const TERRITORY_TYPE_ALIASES = Object.freeze({
+  limiar:       ['ritual', 'conexao', 'vinculo', 'presenca'],
+  entrelinhas:  ['pergunta', 'segredo', 'verdade', 'confissao'],
+  camara:       ['desafio', 'missao', 'conflito', 'pressao', 'tensao'],
+  sexto_lugar:  ['reflexao', 'decisao', 'decisao coletiva', 'voto'],
+});
 
 let _cache = null; // { data, expiresAt }
 
@@ -142,18 +149,54 @@ async function recordWorldActivity({ sessionId, playerCount, summary } = {}) {
   });
 }
 
-async function applyWorldInfluence(deck) {
-  if (!Array.isArray(deck) || !deck.length) return deck;
-  const state = await getWorldState().catch(() => null), influence = state?.activeInfluence;
-  if (!influence) return deck;
-  // O território altera a cadência emocional sem remover cartas: até quatro
-  // cartas afins são promovidas para beats definidos e recebem identidade visual.
+function _fold(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function _matchesTerritory(card, influence) {
+  const haystack = _fold(`${card?.type || ''} ${card?.title || ''}`);
+  const aliases = TERRITORY_TYPE_ALIASES[influence?.territoryId]
+    || (influence?.affinity || []).map(_fold);
+  return aliases.some(alias => haystack.includes(alias));
+}
+
+/**
+ * Aplica a identidade do território a todo o deck e transforma até quatro
+ * cartas em ressonâncias principais. Assim o Mundo nunca fica apenas como
+ * metadado invisível quando um pack não usa exatamente os nomes da afinidade.
+ */
+function applyInfluenceToDeck(deck, influence) {
+  if (!Array.isArray(deck) || !deck.length || !influence) return Array.isArray(deck) ? [...deck] : deck;
+
+  const envelope = {
+    territoryId: influence.territoryId,
+    name: influence.name,
+    sigil: influence.sigil,
+    palette: Array.isArray(influence.palette) ? influence.palette.slice(0, 2) : ['#d4af37', '#0d151c'],
+    affinity: Array.isArray(influence.affinity) ? [...influence.affinity] : [],
+    effect: influence.effect || '',
+    version: 2,
+  };
   const selected = [], remaining = [];
   for (const card of deck) {
-    if (selected.length < 4 && influence.affinity.includes(card.type)) selected.push({ ...card, worldInfluence: influence });
-    else remaining.push(card);
+    const marked = { ...card, worldInfluence: envelope, worldResonance: 'ambient' };
+    if (selected.length < 4 && _matchesTerritory(card, influence)) {
+      selected.push({ ...marked, worldResonance: 'signature' });
+    } else {
+      remaining.push(marked);
+    }
   }
-  if (!selected.length) return deck;
+
+  // Packs customizados podem não conter categorias afins. O território ainda
+  // escolhe quatro âncoras para que sua cadência e seu efeito sejam percebidos.
+  while (selected.length < Math.min(4, deck.length) && remaining.length) {
+    selected.push({ ...remaining.shift(), worldResonance: 'signature' });
+  }
+
   const beats = {
     limiar: [0, 3, 7, 12],
     entrelinhas: [2, 5, 9, 14],
@@ -162,6 +205,12 @@ async function applyWorldInfluence(deck) {
   }[influence.territoryId] || [1, 4, 8, 13];
   selected.forEach((card, index) => remaining.splice(Math.min(beats[index], remaining.length), 0, card));
   return remaining;
+}
+
+async function applyWorldInfluence(deck) {
+  if (!Array.isArray(deck) || !deck.length) return deck;
+  const state = await getWorldState().catch(() => null), influence = state?.activeInfluence;
+  return applyInfluenceToDeck(deck, influence);
 }
 
 /**
@@ -353,5 +402,6 @@ function init() {
 module.exports = {
   getWorldState, contributeProgress, incrementDailyParticipants,
   setWorldState, createMission, updateMission, listMissions,
-  contributeMission, recordWorldActivity, applyWorldInfluence, TERRITORIES, invalidate, init,
+  contributeMission, recordWorldActivity, applyWorldInfluence, applyInfluenceToDeck,
+  TERRITORIES, invalidate, init,
 };
