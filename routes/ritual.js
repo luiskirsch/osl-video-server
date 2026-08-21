@@ -20,9 +20,12 @@ const adaptiveEngine                    = require("../services/adaptiveEngine");
 const liveService                       = require("../services/liveService");
 const reputation                        = require("../services/reputation");
 const worldState                        = require("../services/worldState");
+const { aggregateSessions }             = require("../services/sessionStats");
 
 const router = express.Router();
 const engine = new GameEngine('ritual');
+const ROOM_SESSION_HISTORY_MAX = 200;
+const ROOM_SESSION_SCAN_BUFFER = 25;
 
 function playableCards(cards) {
   if (!Array.isArray(cards)) return [];
@@ -1120,9 +1123,13 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
 }));
 
 // ── GET /game/room/:roomId/sessions ──────────────────────────────────────────
-// Lista as últimas sessões encerradas de uma sala (auth: Firebase ID token).
+// Lista até 200 sessões encerradas de uma sala (auth: Firebase ID token).
 router.get("/game/room/:roomId/sessions", asyncHandler(async (req, res) => {
   const { roomId } = req.params;
+  const requestedLimit = Math.min(
+    ROOM_SESSION_HISTORY_MAX,
+    Math.max(1, Number.parseInt(req.query.limit, 10) || ROOM_SESSION_HISTORY_MAX),
+  );
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!token)  return sendError(res, 401, "TOKEN_OBRIGATORIO");
@@ -1137,14 +1144,14 @@ router.get("/game/room/:roomId/sessions", asyncHandler(async (req, res) => {
   const snap = await db.collection("salas").doc(roomId)
     .collection("sessions")
     .orderBy("createdAt", "desc")
-    .limit(12)
+    .limit(Math.min(ROOM_SESSION_HISTORY_MAX + ROOM_SESSION_SCAN_BUFFER, requestedLimit + ROOM_SESSION_SCAN_BUFFER))
     .get();
 
-  const sessions = snap.docs
+  const endedSessions = snap.docs
     .map(d => ({ sessionId: d.id, ...d.data() }))
     .filter(s => s.status === "ended")
-    .slice(0, 10)
-    .map(s => ({
+    .slice(0, requestedLimit);
+  const sessions = endedSessions.map(s => ({
       sessionId:   s.sessionId,
       createdAt:   s.createdAt?.toMillis?.()  || null,
       endedAt:     s.endedAt?.toMillis?.()    || null,
@@ -1152,7 +1159,13 @@ router.get("/game/room/:roomId/sessions", asyncHandler(async (req, res) => {
       playerCount: (s.players || []).length,
     }));
 
-  return res.json({ ok: true, sessions });
+  return res.json({
+    ok: true,
+    sessions,
+    stats: { totalSessions: endedSessions.length, ...aggregateSessions(endedSessions) },
+    limit: requestedLimit,
+    hasMore: sessions.length === requestedLimit,
+  });
 }));
 
 module.exports = router;

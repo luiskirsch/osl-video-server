@@ -4,44 +4,14 @@ const { getDb }             = require("../services/firestore");
 const { requireAdmin }      = require("../services/auth");
 const { logInfo, logError } = require("../logger");
 const { asyncHandler, sendError } = require("../utils");
+const { aggregateSessions } = require("../services/sessionStats");
 
 const router = express.Router();
-
-// Agrega summary de um array de session data objects.
-function aggregateSessions(sessionsData) {
-  let totalCards = 0, totalTimeSec = 0, totalPlayers = 0, totalVotes = 0, totalMissions = 0;
-  const emojiTally = {};
-  let withSummary = 0;
-
-  for (const s of sessionsData) {
-    const sum = s.summary;
-    if (!sum) continue;
-    withSummary++;
-    totalCards    += sum.cardsRevealed     || 0;
-    totalTimeSec  += sum.durationSec       || 0;
-    totalPlayers  += sum.playerCount       || 0;
-    totalVotes    += sum.votesTotal        || 0;
-    totalMissions += sum.missionsCompleted || 0;
-    for (const [emoji, count] of Object.entries(sum.emojiTally || {})) {
-      emojiTally[emoji] = (emojiTally[emoji] || 0) + Number(count);
-    }
-  }
-
-  const topEmojiEntry = Object.entries(emojiTally).sort((a, b) => b[1] - a[1])[0];
-  return {
-    totalCardsRevealed: totalCards,
-    totalPlayTimeSec:   totalTimeSec,
-    avgDurationSec:     withSummary > 0 ? Math.round(totalTimeSec / withSummary) : 0,
-    avgPlayers:         withSummary > 0 ? Math.round((totalPlayers / withSummary) * 10) / 10 : 0,
-    totalVotes,
-    totalMissions,
-    topEmoji:           topEmojiEntry?.[0] || null,
-    emojiTally,
-  };
-}
+const ROOM_STATS_SESSION_LIMIT = 200;
+const ROOM_STATS_SCAN_BUFFER = 25;
 
 // GET /analytics/room/:roomId/stats
-// Agrega estatísticas de todas as sessões encerradas de uma sala.
+// Agrega estatísticas das até 200 sessões encerradas mais recentes da sala.
 // Auth: Firebase ID token (Bearer).
 router.get("/analytics/room/:roomId/stats", asyncHandler(async (req, res) => {
   const { roomId } = req.params;
@@ -59,12 +29,13 @@ router.get("/analytics/room/:roomId/stats", asyncHandler(async (req, res) => {
   const snap = await db.collection("salas").doc(roomId)
     .collection("sessions")
     .orderBy("createdAt", "desc")
-    .limit(50)
+    .limit(ROOM_STATS_SESSION_LIMIT + ROOM_STATS_SCAN_BUFFER)
     .get();
 
   const sessionsData = snap.docs
     .map(d => d.data())
-    .filter(s => s.status === "ended");
+    .filter(s => s.status === "ended")
+    .slice(0, ROOM_STATS_SESSION_LIMIT);
 
   const agg = aggregateSessions(sessionsData);
 
