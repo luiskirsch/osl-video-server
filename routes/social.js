@@ -8,6 +8,7 @@ const socialGraph   = require("../services/socialGraph");
 const reputation    = require("../services/reputation");
 const achievements  = require("../services/achievements");
 const notifications = require("../services/notifications");
+const presence      = require("../services/presence");
 
 const router = express.Router();
 
@@ -265,7 +266,34 @@ router.get("/social/connections", asyncHandler(async (req, res) => {
 
   const limit = Math.min(Number(req.query.limit || 20), 50);
   const connections = await socialGraph.getConnections(uid, limit);
-  return res.json({ ok: true, connections });
+  const db = getDb();
+  if (!db || !connections.length) return res.json({ ok: true, connections });
+
+  // A tela Social precisa apresentar pessoas, não IDs internos. Hidrata cada
+  // vestígio com a identidade pública, relação e presença em uma única resposta.
+  const uids = connections.map(connection => connection.uid);
+  const [selfSnap, userSnaps, presenceMap] = await Promise.all([
+    db.collection("users").doc(uid).get(),
+    Promise.all(uids.map(otherUid => db.collection("users").doc(otherUid).get())),
+    presence.batchCheck(uids).catch(() => ({})),
+  ]);
+  const friends = new Set(selfSnap.exists ? (selfSnap.data().friends || []) : []);
+  const hydrated = connections.map((connection, index) => {
+    const snap = userSnaps[index];
+    const data = snap?.exists ? snap.data() : {};
+    const live = presenceMap[connection.uid] || {};
+    return {
+      ...connection,
+      displayName: data.displayName || data.username || "Jogador",
+      username: data.username || "jogador",
+      ...publicAvatar(data),
+      online: live.online === true,
+      lastSeenMs: live.lastSeenMs || null,
+      lastActivity: live.lastActivity || null,
+      isFriend: friends.has(connection.uid),
+    };
+  });
+  return res.json({ ok: true, connections: hydrated });
 }));
 
 // ── GET /social/reputation ────────────────────────────────────────────────────
