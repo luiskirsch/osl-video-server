@@ -56,6 +56,7 @@ const {
   hashStudentConsentToken,
   escapeStudentEmailHtml
 } = require("../services/student-consent");
+const publicProgram = require("../services/public-program");
 const { withRetry } = require("../services/retry");
 const whisperSvc = require("../services/whisper");
 const sessionSummarySvc = require("../services/session-summary");
@@ -2425,6 +2426,37 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
+  if (sessData.publicProgramCaseId && sessData.studentId) {
+    const caseRef = db.collection("therapy_student_cases").doc(sessData.publicProgramCaseId);
+    const studentRef = db.collection("therapy_estudantes").doc(sessData.studentId);
+    const futureSessionsSnap = await db.collection("therapy_sessions").where("studentId", "==", sessData.studentId).limit(500).get();
+    const nextSessionAt = futureSessionsSnap.docs
+      .map(doc => doc.data())
+      .filter(session => session.status === "scheduled" && Number(session.scheduledAt || 0) > Date.now())
+      .map(session => Number(session.scheduledAt))
+      .sort((a, b) => a - b)[0] || null;
+    const batch = db.batch();
+    batch.set(caseRef, {
+      status: "care_active",
+      completedSessions: admin.firestore.FieldValue.increment(1),
+      scheduledSessions: admin.firestore.FieldValue.increment(-1),
+      lastSessionAt: admin.firestore.FieldValue.serverTimestamp(),
+      nextSessionAt,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    batch.set(studentRef, { status: "care_active", lastSessionAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await batch.commit();
+    await logStudentEvent({
+      studentId: sessData.studentId,
+      caseId: sessData.publicProgramCaseId,
+      programId: sessData.publicProgramId || null,
+      schoolId: sessData.publicSchoolId || null,
+      type: "public_session_completed",
+      actor: { uid, role: "psychologist" },
+      detail: { sessionId }
+    });
+  }
+
   await logAudit({ type: "session_completed", sessionId, therapistUid: uid });
 
   // Disparo fire-and-forget: WhatsApp de avaliação pra o paciente.
@@ -2857,7 +2889,40 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
     joinTokenExp: 0,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
-  await db.collection("therapy_sessions").doc(sessionId).set(update, { merge: true });
+  const cancellationBatch = db.batch();
+  cancellationBatch.set(db.collection("therapy_sessions").doc(sessionId), update, { merge: true });
+  if (sessData.publicProgramCaseId && sessData.studentId) {
+    cancellationBatch.set(db.collection("therapy_student_cases").doc(sessData.publicProgramCaseId), {
+      scheduledSessions: admin.firestore.FieldValue.increment(-1),
+      lastCancellationAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    if (sessData.publicProgramId && sessData.publicProgramUsageMonth) {
+      cancellationBatch.set(db.collection("therapy_public_program_usage")
+        .doc(`${sessData.publicProgramId}_${sessData.publicProgramUsageMonth}`), {
+          activeSessions: admin.firestore.FieldValue.increment(-1),
+          canceledSessions: admin.firestore.FieldValue.increment(1),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+    }
+    if (Array.isArray(sessData.scheduleLockIds) && sessData.scheduleLockIds.length) {
+      sessData.scheduleLockIds.slice(0, 50).forEach(lockId =>
+        cancellationBatch.delete(db.collection("therapy_schedule_locks").doc(String(lockId)))
+      );
+    }
+  }
+  await cancellationBatch.commit();
+  if (sessData.publicProgramCaseId && sessData.studentId) {
+    await logStudentEvent({
+      studentId: sessData.studentId,
+      caseId: sessData.publicProgramCaseId,
+      programId: sessData.publicProgramId || null,
+      schoolId: sessData.publicSchoolId || null,
+      type: "public_session_canceled",
+      actor: { role: canceledBy || "unknown" },
+      detail: { sessionId, hasReason: Boolean(reason) }
+    });
+  }
   await logAudit({
     type: "session_canceled",
     sessionId,
@@ -15564,8 +15629,379 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
-// ESTUDANTES — cadastro de alunos via contratos municipais
-// Coleção: therapy_estudantes
+// PROGRAMA PÚBLICO — prestadora privada, contratos municipais e escolas
+// Coleções: therapy_public_provider, therapy_public_programs, therapy_schools,
+//           therapy_estudantes, therapy_student_cases, therapy_student_events
+// ═════════════════════════════════════════════════════════════════════════
+
+const publicProgramInviteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde e tente novamente." }
+});
+
+function publicProgramMillis(value) {
+  return value?.toMillis?.() || (Number.isFinite(Number(value)) ? Number(value) : null);
+}
+
+function serializePublicProgramDoc(doc) {
+  const data = doc.data ? doc.data() : doc;
+  return {
+    ...(doc.id ? { id: doc.id } : {}),
+    ...data,
+    createdAt: publicProgramMillis(data.createdAt),
+    updatedAt: publicProgramMillis(data.updatedAt),
+    activatedAt: publicProgramMillis(data.activatedAt),
+    suspendedAt: publicProgramMillis(data.suspendedAt),
+    closedAt: publicProgramMillis(data.closedAt)
+  };
+}
+
+async function logStudentEvent({ studentId, caseId = null, programId = null, schoolId = null, type, actor, detail = null }) {
+  const db = getDb();
+  const safeDetail = detail && typeof detail === "object" ? detail : null;
+  await db.collection("therapy_student_events").add({
+    studentId,
+    caseId,
+    programId,
+    schoolId,
+    type,
+    actorUid: actor?.uid || null,
+    actorEmail: actor?.email || null,
+    actorRole: actor?.role || null,
+    detail: safeDetail,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+}
+
+async function verifyPublicProgramActor(req, res, { allowAdmin = true } = {}) {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return null;
+  let email = "";
+  try {
+    email = String((await admin.auth().getUser(uid)).email || "").trim().toLowerCase();
+  } catch { /* UID válido sem e-mail continua como profissional */ }
+  const therapistSnap = await getDb().collection("therapists").doc(uid).get();
+  const therapistData = therapistSnap.exists ? therapistSnap.data() : null;
+  const isVerifiedPsychologist = !!therapistData
+    && therapistData.verificationStatus === "verified"
+    && (therapistData.tipoConselho === "CRP" || !!therapistData.crp);
+  if (allowAdmin && THERAPY_ADMIN_EMAILS.includes(email)) {
+    return {
+      uid, email, role: "admin", isAdmin: true,
+      isPsychologist: isVerifiedPsychologist,
+      therapist: therapistData
+    };
+  }
+  if (!isVerifiedPsychologist) {
+    sendError(res, 403, "PROFISSIONAL_NAO_HABILITADO");
+    return null;
+  }
+  return { uid, email, role: "psychologist", isAdmin: false, isPsychologist: true, therapist: therapistData };
+}
+
+function buildSchoolRegistrationUrl(programSlug, schoolId, code) {
+  return `${THERAPY_FRONTEND_BASE}/aluno-cadastro.html?programa=${encodeURIComponent(programSlug)}&escola=${encodeURIComponent(schoolId)}&convite=${encodeURIComponent(code)}`;
+}
+
+// GET/PATCH /therapy/admin/programa-publico/config — dados da prestadora.
+router.get("/therapy/admin/programa-publico/config", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const snap = await getDb().collection("therapy_public_provider").doc("config").get();
+  const data = snap.exists ? snap.data() : {};
+  const validated = publicProgram.validateProviderProfile(data);
+  return res.json({ ok: true, config: serializePublicProgramDoc(data), ready: validated.ok, missing: validated.missing });
+}));
+
+router.patch("/therapy/admin/programa-publico/config", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const ref = getDb().collection("therapy_public_provider").doc("config");
+  const current = await ref.get();
+  const merged = { ...(current.exists ? current.data() : {}), ...(req.body || {}) };
+  const validated = publicProgram.validateProviderProfile(merged);
+  await ref.set({
+    ...validated.value,
+    schemaVersion: 1,
+    ready: validated.ok,
+    missingFields: validated.missing,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedBy: actor.email || actor.uid,
+    ...(current.exists ? {} : { createdAt: admin.firestore.FieldValue.serverTimestamp() })
+  }, { merge: true });
+  await logAudit({ type: "public_provider_config_updated", by: actor.email || actor.uid, ready: validated.ok });
+  return res.json({ ok: true, ready: validated.ok, missing: validated.missing });
+}));
+
+// Programas equivalem à execução de um instrumento/contrato público.
+router.get("/therapy/admin/programa-publico/programas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const snap = await getDb().collection("therapy_public_programs").limit(500).get();
+  const items = snap.docs.map(serializePublicProgramDoc)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+router.post("/therapy/admin/programa-publico/programas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const validated = publicProgram.validateProgram(req.body || {});
+  if (!validated.ok) return sendError(res, 400, "PROGRAMA_INCOMPLETO", { missing: validated.missing });
+  const db = getDb();
+  const baseSlug = publicProgram.slugifyPublicProgram(validated.value.name) || "programa";
+  let publicSlug = `${baseSlug}-${publicProgram.createOpaqueCode(4).toLowerCase()}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const existing = await db.collection("therapy_public_programs").where("publicSlug", "==", publicSlug).limit(1).get();
+    if (existing.empty) break;
+    publicSlug = `${baseSlug}-${publicProgram.createOpaqueCode(4).toLowerCase()}`;
+  }
+  const ref = await db.collection("therapy_public_programs").add({
+    ...validated.value,
+    publicSlug,
+    status: "draft",
+    registrationOpen: false,
+    aiEnabledForMinors: false,
+    totalStudents: 0,
+    totalSchools: 0,
+    totalSessions: 0,
+    schemaVersion: 1,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdBy: actor.email || actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await logAudit({ type: "public_program_created", programId: ref.id, by: actor.email || actor.uid });
+  return res.status(201).json({ ok: true, id: ref.id, publicSlug, status: "draft" });
+}));
+
+router.patch("/therapy/admin/programa-publico/programas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const ref = getDb().collection("therapy_public_programs").doc(String(req.params.id || ""));
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  if (req.body?.status !== undefined) return sendError(res, 400, "USE_ACAO_DE_STATUS_DO_PROGRAMA");
+  const merged = { ...snap.data(), ...(req.body || {}) };
+  const validated = publicProgram.validateProgram(merged);
+  if (!validated.ok) return sendError(res, 400, "PROGRAMA_INCOMPLETO", { missing: validated.missing });
+  await ref.set({
+    ...validated.value,
+    registrationOpen: req.body?.registrationOpen === undefined ? snap.data().registrationOpen === true : req.body.registrationOpen === true,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedBy: actor.email || actor.uid
+  }, { merge: true });
+  await logAudit({ type: "public_program_updated", programId: ref.id, by: actor.email || actor.uid });
+  return res.json({ ok: true });
+}));
+
+router.post("/therapy/admin/programa-publico/programas/:id/ativar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const db = getDb();
+  const ref = db.collection("therapy_public_programs").doc(String(req.params.id || ""));
+  const [programSnap, providerSnap, schoolsSnap] = await Promise.all([
+    ref.get(),
+    db.collection("therapy_public_provider").doc("config").get(),
+    db.collection("therapy_schools").where("programId", "==", ref.id).limit(500).get()
+  ]);
+  if (!programSnap.exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  const programValidation = publicProgram.validateProgram(programSnap.data());
+  const providerValidation = publicProgram.validateProviderProfile(providerSnap.exists ? providerSnap.data() : {});
+  const activeSchools = schoolsSnap.docs.filter(doc => doc.data().status === "active");
+  const therapistUids = programValidation.value.therapistUids || [];
+  const therapistDocs = await Promise.all(therapistUids.map(uid => db.collection("therapists").doc(uid).get()));
+  const invalidTherapists = therapistDocs
+    .map((doc, index) => ({ doc, uid: therapistUids[index] }))
+    .filter(({ doc }) => !doc.exists
+      || doc.data().verificationStatus !== "verified"
+      || (doc.data().tipoConselho !== "CRP" && !doc.data().crp))
+    .map(({ uid }) => uid);
+  const blockers = [];
+  if (!providerValidation.ok) blockers.push({ type: "provider", fields: providerValidation.missing });
+  if (!programValidation.ok) blockers.push({ type: "program", fields: programValidation.missing });
+  if (!activeSchools.length) blockers.push({ type: "schools", fields: ["activeSchool"] });
+  if (!therapistUids.length) blockers.push({ type: "team", fields: ["therapistUids"] });
+  if (invalidTherapists.length) blockers.push({ type: "team", fields: invalidTherapists });
+  if (blockers.length) return sendError(res, 409, "PROGRAMA_NAO_PODE_SER_ATIVADO", { blockers });
+  await ref.set({
+    status: "active",
+    registrationOpen: true,
+    activatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    activatedBy: actor.email || actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "public_program_activated", programId: ref.id, by: actor.email || actor.uid });
+  return res.json({ ok: true, status: "active", registrationOpen: true });
+}));
+
+router.post("/therapy/admin/programa-publico/programas/:id/status", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const status = String(req.body?.status || "");
+  if (!['suspended', 'closed', 'draft'].includes(status)) return sendError(res, 400, "STATUS_INVALIDO");
+  const ref = getDb().collection("therapy_public_programs").doc(String(req.params.id || ""));
+  if (!(await ref.get()).exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  await ref.set({
+    status,
+    registrationOpen: false,
+    [`${status}At`]: admin.firestore.FieldValue.serverTimestamp(),
+    statusReason: publicProgram.cleanMultiline(req.body?.reason, 1000),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedBy: actor.email || actor.uid
+  }, { merge: true });
+  await logAudit({ type: `public_program_${status}`, programId: ref.id, by: actor.email || actor.uid });
+  return res.json({ ok: true, status });
+}));
+
+router.get("/therapy/admin/programa-publico/escolas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const programId = String(req.query?.programId || "").trim();
+  let query = getDb().collection("therapy_schools");
+  if (programId) query = query.where("programId", "==", programId);
+  const snap = await query.limit(1000).get();
+  const items = snap.docs.map(doc => {
+    const item = serializePublicProgramDoc(doc);
+    delete item.registrationCodeHash;
+    return item;
+  }).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "pt-BR"));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+router.post("/therapy/admin/programa-publico/escolas", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const programId = String(req.body?.programId || "").trim();
+  const db = getDb();
+  const programSnap = await db.collection("therapy_public_programs").doc(programId).get();
+  if (!programSnap.exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  const validated = publicProgram.validateSchool(req.body || {});
+  if (!validated.ok) return sendError(res, 400, "ESCOLA_INCOMPLETA", { missing: validated.missing });
+  const code = publicProgram.createOpaqueCode();
+  const ref = await db.collection("therapy_schools").add({
+    ...validated.value,
+    programId,
+    programName: programSnap.data().name,
+    contractingAuthorityName: programSnap.data().contractingAuthorityName,
+    status: "active",
+    totalStudents: 0,
+    registrationCodeHash: publicProgram.hashOpaqueCode(code),
+    registrationCodeLast4: code.slice(-4),
+    registrationCodeRotatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    schemaVersion: 1,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdBy: actor.email || actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await db.collection("therapy_public_programs").doc(programId).set({
+    totalSchools: admin.firestore.FieldValue.increment(1),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "public_school_created", programId, schoolId: ref.id, by: actor.email || actor.uid });
+  return res.status(201).json({
+    ok: true,
+    id: ref.id,
+    registrationCode: code,
+    registrationUrl: buildSchoolRegistrationUrl(programSnap.data().publicSlug, ref.id, code)
+  });
+}));
+
+router.patch("/therapy/admin/programa-publico/escolas/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const ref = getDb().collection("therapy_schools").doc(String(req.params.id || ""));
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "ESCOLA_NAO_ENCONTRADA");
+  const merged = { ...snap.data(), ...(req.body || {}) };
+  const validated = publicProgram.validateSchool(merged);
+  if (!validated.ok) return sendError(res, 400, "ESCOLA_INCOMPLETA", { missing: validated.missing });
+  const status = req.body?.status === undefined ? snap.data().status : String(req.body.status);
+  if (!publicProgram.SCHOOL_STATUSES.includes(status)) return sendError(res, 400, "STATUS_INVALIDO");
+  await ref.set({ ...validated.value, status, updatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedBy: actor.email || actor.uid }, { merge: true });
+  return res.json({ ok: true });
+}));
+
+router.post("/therapy/admin/programa-publico/escolas/:id/rotacionar-convite", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const db = getDb();
+  const ref = db.collection("therapy_schools").doc(String(req.params.id || ""));
+  const schoolSnap = await ref.get();
+  if (!schoolSnap.exists) return sendError(res, 404, "ESCOLA_NAO_ENCONTRADA");
+  const programSnap = await db.collection("therapy_public_programs").doc(schoolSnap.data().programId).get();
+  if (!programSnap.exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  const code = publicProgram.createOpaqueCode();
+  await ref.set({
+    registrationCodeHash: publicProgram.hashOpaqueCode(code),
+    registrationCodeLast4: code.slice(-4),
+    registrationCodeRotatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    registrationCodeRotatedBy: actor.email || actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "public_school_invite_rotated", programId: schoolSnap.data().programId, schoolId: ref.id, by: actor.email || actor.uid });
+  return res.json({ ok: true, registrationCode: code, registrationUrl: buildSchoolRegistrationUrl(programSnap.data().publicSlug, ref.id, code) });
+}));
+
+// Validação pública do convite. Não expõe contatos, contrato financeiro ou código.
+router.get("/public/programa-escolar/:slug", publicProgramInviteLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const slug = String(req.params.slug || "").trim().toLowerCase();
+  const schoolId = String(req.query?.escola || "").trim();
+  const code = String(req.query?.convite || "").trim();
+  if (!slug || !schoolId || !code) return sendError(res, 400, "CONVITE_ESCOLAR_INCOMPLETO");
+  const db = getDb();
+  const [programQuery, schoolSnap] = await Promise.all([
+    db.collection("therapy_public_programs").where("publicSlug", "==", slug).limit(1).get(),
+    db.collection("therapy_schools").doc(schoolId).get()
+  ]);
+  if (programQuery.empty || !schoolSnap.exists) return sendError(res, 404, "CONVITE_ESCOLAR_INVALIDO");
+  const programDoc = programQuery.docs[0];
+  const program = programDoc.data();
+  const school = schoolSnap.data();
+  if (school.programId !== programDoc.id || school.status !== "active" || !publicProgram.safeCodeMatch(code, school.registrationCodeHash)) {
+    return sendError(res, 404, "CONVITE_ESCOLAR_INVALIDO");
+  }
+  if (!publicProgram.programIsOperational(program)) return sendError(res, 403, "PROGRAMA_FORA_DE_VIGENCIA");
+  if ((program.maxStudents && Number(program.totalStudents || 0) >= program.maxStudents)
+    || (school.maxStudents && Number(school.totalStudents || 0) >= school.maxStudents)) {
+    return sendError(res, 409, "PROGRAMA_SEM_VAGAS");
+  }
+  return res.json({
+    ok: true,
+    program: {
+      id: programDoc.id,
+      slug: program.publicSlug,
+      name: program.name,
+      contractingAuthorityName: program.contractingAuthorityName,
+      municipality: program.municipality,
+      state: program.state,
+      minAge: program.minAge,
+      maxAge: program.maxAge,
+      privacyNoticeVersion: program.privacyNoticeVersion,
+      consentTermVersion: program.consentTermVersion,
+      assentTermVersion: program.assentTermVersion,
+      emergencyProtocolVersion: program.emergencyProtocolVersion
+    },
+    school: { id: schoolSnap.id, name: school.name, educationStages: school.educationStages || [] }
+  });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// ESTUDANTES — cadastro e ciclo assistencial via contratos municipais
 // ═════════════════════════════════════════════════════════════════════════
 
 const publicStudentRegistrationLimiter = rateLimit({
@@ -15583,6 +16019,12 @@ const publicStudentConsentLimiter = rateLimit({
   legacyHeaders: false,
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde e tente novamente." }
 });
+
+function studentRegistrationFingerprint({ schoolId, schoolStudentCode, nome, dataNascimento }) {
+  return crypto.createHmac("sha256", ACCESS_TOKEN_SECRET)
+    .update(`${String(schoolId)}|${String(schoolStudentCode).trim().toLowerCase()}|${String(nome).trim().toLowerCase()}|${String(dataNascimento)}`)
+    .digest("hex");
+}
 
 async function findStudentByConsentToken(db, token) {
   if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return null;
@@ -15619,18 +16061,20 @@ router.post("/public/aluno-cadastro", publicStudentRegistrationLimiter, asyncHan
   if (!ensureDb(res)) return;
 
   const {
-    nome, dataNascimento, escola, turma, cidade, municipio, estado,
-    email, telefone,
-    responsavelNome, responsavelEmail, responsavelTelefone,
-    consentimentoResponsavel
+    programSlug, schoolId, schoolCode,
+    nome, nomeSocial, dataNascimento, schoolStudentCode, preferredLanguage, anoSerie, turma, turno,
+    email, telefone, studentEmail, studentPhone,
+    responsavelNome, responsavelEmail, responsavelTelefone, responsavelVinculo,
+    consentimentoResponsavel, selfConsent
   } = req.body || {};
 
+  if (!programSlug || !schoolId || !schoolCode) return sendError(res, 400, "CONVITE_ESCOLAR_OBRIGATORIO");
   if (!nome || String(nome).trim().length < 2) return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (!schoolStudentCode || String(schoolStudentCode).trim().length < 2) return sendError(res, 400, "IDENTIFICADOR_MATRICULA_OBRIGATORIO");
+  if (!anoSerie || String(anoSerie).trim().length < 1) return sendError(res, 400, "ANO_SERIE_OBRIGATORIO");
+  if (!["manha", "tarde", "noite", "integral"].includes(String(turno))) return sendError(res, 400, "TURNO_INVALIDO");
   const birth = parseStudentBirthDate(dataNascimento);
   if (!birth) return sendError(res, 400, "DATA_NASCIMENTO_INVALIDA");
-  if (!escola || String(escola).trim().length < 2) return sendError(res, 400, "ESCOLA_OBRIGATORIA");
-  if (!cidade || String(cidade).trim().length < 1) return sendError(res, 400, "CIDADE_OBRIGATORIA");
-  if (!estado || String(estado).trim().length !== 2) return sendError(res, 400, "ESTADO_OBRIGATORIO");
 
   const idade = birth.age;
   const isMenor = idade < 18;
@@ -15639,76 +16083,164 @@ router.post("/public/aluno-cadastro", publicStudentRegistrationLimiter, asyncHan
     if (!responsavelNome || String(responsavelNome).trim().length < 2) return sendError(res, 400, "RESPONSAVEL_NOME_OBRIGATORIO");
     if (!responsavelEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(responsavelEmail)) return sendError(res, 400, "RESPONSAVEL_EMAIL_INVALIDO");
     if (!responsavelTelefone || String(responsavelTelefone).trim().length < 8) return sendError(res, 400, "RESPONSAVEL_TELEFONE_OBRIGATORIO");
+    if (!responsavelVinculo || String(responsavelVinculo).trim().length < 2) return sendError(res, 400, "RESPONSAVEL_VINCULO_OBRIGATORIO");
     if (!consentimentoResponsavel) return sendError(res, 400, "CONSENTIMENTO_OBRIGATORIO");
   } else {
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
     if (!telefone || String(telefone).trim().length < 8) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+    if (selfConsent !== true) return sendError(res, 400, "CONSENTIMENTO_PROPRIO_OBRIGATORIO");
   }
 
   const db = getDb();
-  const consentInvite = isMenor ? createStudentConsentToken() : null;
+  const programQuery = await db.collection("therapy_public_programs")
+    .where("publicSlug", "==", String(programSlug).trim().toLowerCase()).limit(1).get();
+  const schoolSnap = await db.collection("therapy_schools").doc(String(schoolId).trim()).get();
+  if (programQuery.empty || !schoolSnap.exists) return sendError(res, 404, "CONVITE_ESCOLAR_INVALIDO");
+  const programDoc = programQuery.docs[0];
+  const program = programDoc.data();
+  const school = schoolSnap.data();
+  if (school.programId !== programDoc.id || school.status !== "active" || !publicProgram.safeCodeMatch(schoolCode, school.registrationCodeHash)) {
+    return sendError(res, 404, "CONVITE_ESCOLAR_INVALIDO");
+  }
+  if (!publicProgram.programIsOperational(program)) return sendError(res, 403, "PROGRAMA_FORA_DE_VIGENCIA");
+  if ((program.minAge !== null && program.minAge !== undefined && idade < Number(program.minAge))
+    || (program.maxAge !== null && program.maxAge !== undefined && idade > Number(program.maxAge))) {
+    return sendError(res, 400, "IDADE_FORA_DO_ESCOPO_DO_PROGRAMA");
+  }
+
+  // A marcação no cadastro é apenas um pedido de participação. Menores e
+  // maiores concluem o consentimento e os dados de segurança em etapa própria.
+  const consentInvite = createStudentConsentToken();
+  const fingerprint = studentRegistrationFingerprint({ schoolId: schoolSnap.id, schoolStudentCode, nome, dataNascimento: birth.normalized });
+  const duplicate = await db.collection("therapy_estudantes").where("registrationFingerprint", "==", fingerprint).limit(1).get();
+  if (!duplicate.empty) return sendError(res, 409, "ALUNO_JA_CADASTRADO_NESTA_ESCOLA");
+  const studentRef = db.collection("therapy_estudantes").doc();
+  const caseRef = db.collection("therapy_student_cases").doc(studentRef.id);
+  const registrationLockRef = db.collection("therapy_student_registration_locks").doc(fingerprint);
 
   const doc = {
+    schemaVersion: 2,
+    programId: programDoc.id,
+    programName: program.name,
+    programSlug: program.publicSlug,
+    contractNumber: program.contractNumber,
+    contractingAuthorityName: program.contractingAuthorityName,
+    schoolId: schoolSnap.id,
+    schoolName: school.name,
+    schoolInepCode: school.inepCode || null,
+    registrationFingerprint: fingerprint,
+    caseId: caseRef.id,
+    caseCode: publicProgram.createCaseCode(),
+    schoolStudentCode: publicProgram.cleanText(schoolStudentCode, 60),
     nome: String(nome).trim(),
+    nomeSocial: publicProgram.cleanText(nomeSocial, 120),
     dataNascimento: birth.normalized,
     idade: idade ?? null,
     isMenor,
-    escola: String(escola).trim(),
+    escola: school.name,
+    anoSerie: publicProgram.cleanText(anoSerie, 40),
     turma: turma ? String(turma).trim() : null,
-    cidade: String(cidade).trim(),
-    municipio: municipio ? String(municipio).trim() : String(cidade).trim(),
-    estado: String(estado).trim().toUpperCase().slice(0, 2),
+    turno: ["manha", "tarde", "noite", "integral"].includes(String(turno)) ? String(turno) : null,
+    preferredLanguage: publicProgram.cleanText(preferredLanguage, 60) || "Português (Brasil)",
+    cidade: program.municipality,
+    municipio: program.municipality,
+    estado: program.state,
     // Contato direto (maiores)
     email: isMenor ? null : String(email).trim().toLowerCase(),
     telefone: isMenor ? null : String(telefone).trim(),
+    studentEmail: isMenor && studentEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmail) ? String(studentEmail).trim().toLowerCase() : null,
+    studentPhone: isMenor && studentPhone ? String(studentPhone).trim() : null,
     // Responsável (menores)
     responsavelNome: isMenor ? String(responsavelNome).trim() : null,
     responsavelEmail: isMenor ? String(responsavelEmail).trim().toLowerCase() : null,
     responsavelTelefone: isMenor ? String(responsavelTelefone).trim() : null,
-    consentimentoParental: !isMenor,
+    responsavelVinculo: isMenor ? String(responsavelVinculo).trim() : null,
+    consentimentoParental: false,
+    participationConsentStatus: "pending",
     consentimentoToken: null,
     consentimentoTokenHash: consentInvite?.tokenHash || null,
     consentimentoTokenExpiresAt: consentInvite?.expiresAt || null,
-    consentimentoVersion: isMenor ? null : STUDENT_CONSENT_VERSION,
-    consentimentoAt: isMenor ? null : admin.firestore.FieldValue.serverTimestamp(),
+    consentimentoVersion: program.consentTermVersion || STUDENT_CONSENT_VERSION,
+    privacyNoticeVersion: program.privacyNoticeVersion,
+    assentTermVersion: program.assentTermVersion,
+    emergencyProtocolVersion: program.emergencyProtocolVersion,
+    consentimentoAt: null,
     declaracaoResponsavelNoCadastro: isMenor ? true : null,
     profissionalUid: null,
-    status: isMenor ? "pendente-consentimento" : "ativo",
+    status: isMenor ? "pending_guardian_consent" : "pending_participant_consent",
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };
 
-  const ref = await db.collection("therapy_estudantes").add(doc);
+  try {
+    await db.runTransaction(async tx => {
+      const [freshProgram, freshSchool, registrationLock] = await Promise.all([
+        tx.get(programDoc.ref), tx.get(schoolSnap.ref), tx.get(registrationLockRef)
+      ]);
+      const currentProgram = freshProgram.data();
+      const currentSchool = freshSchool.data();
+      if (registrationLock.exists) throw new Error("ALUNO_JA_CADASTRADO_NESTA_ESCOLA");
+      if (!publicProgram.programIsOperational(currentProgram)) throw new Error("PROGRAMA_FORA_DE_VIGENCIA");
+      if ((currentProgram.maxStudents && Number(currentProgram.totalStudents || 0) >= currentProgram.maxStudents)
+        || (currentSchool.maxStudents && Number(currentSchool.totalStudents || 0) >= currentSchool.maxStudents)) {
+        throw new Error("PROGRAMA_SEM_VAGAS");
+      }
+      tx.set(studentRef, doc);
+      tx.set(registrationLockRef, {
+        studentId: studentRef.id,
+        programId: programDoc.id,
+        schoolId: schoolSnap.id,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      tx.set(programDoc.ref, { totalStudents: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(schoolSnap.ref, { totalStudents: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+  } catch (error) {
+    if (error?.message === "PROGRAMA_FORA_DE_VIGENCIA") return sendError(res, 403, error.message);
+    if (error?.message === "PROGRAMA_SEM_VAGAS") return sendError(res, 409, error.message);
+    if (error?.message === "ALUNO_JA_CADASTRADO_NESTA_ESCOLA") return sendError(res, 409, error.message);
+    throw error;
+  }
 
-  // E-mail de consentimento para responsável (menor)
-  if (isMenor) {
+  await logStudentEvent({
+    studentId: studentRef.id,
+    caseId: caseRef.id,
+    programId: programDoc.id,
+    schoolId: schoolSnap.id,
+    type: "student_registered",
+    actor: { role: isMenor ? "guardian" : "student" },
+    detail: { status: doc.status }
+  });
+
+  // E-mail de decisão para o responsável ou para o próprio estudante maior.
+  {
     try {
       const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${encodeURIComponent(consentInvite.token)}`;
-      const guardianName = escapeStudentEmailHtml(doc.responsavelNome);
+      const guardianName = escapeStudentEmailHtml(isMenor ? doc.responsavelNome : doc.nome);
       const studentName = escapeStudentEmailHtml(doc.nome);
       const schoolName = escapeStudentEmailHtml(doc.escola);
       const className = escapeStudentEmailHtml(doc.turma || "—");
       await sendEmail({
-        to: doc.responsavelEmail,
+        to: isMenor ? doc.responsavelEmail : doc.email,
         subject: `Confirmação de consentimento — ${doc.nome} no Espaço Prelúdio`,
         html: `
           <p>Olá, ${guardianName}!</p>
-          <p>Foi solicitado o cadastro de <strong>${studentName}</strong> no programa de saúde mental escolar do Espaço Prelúdio.</p>
-          <p>Abra a página abaixo para ler as informações e manifestar expressamente sua decisão. Abrir o link, sozinho, não confirma o consentimento.</p>
+          <p>Foi solicitado o cadastro de <strong>${studentName}</strong> no programa <strong>${escapeStudentEmailHtml(program.name)}</strong>, executado pelo Espaço Prelúdio para ${escapeStudentEmailHtml(program.contractingAuthorityName)}.</p>
+          <p>Abra a página abaixo para ler as informações, completar os dados de segurança e manifestar expressamente sua decisão. Abrir o link, sozinho, não confirma o consentimento.</p>
           <p style="margin:24px 0;">
             <a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
               Revisar e decidir →
             </a>
           </p>
-          <p style="font-size:12px;color:#666;">Escola: ${schoolName} · Turma: ${className} · ${escapeStudentEmailHtml(doc.cidade)}/${escapeStudentEmailHtml(doc.estado)}</p>
+          <p style="font-size:12px;color:#666;">Escola: ${schoolName} · Turma: ${className} · ${escapeStudentEmailHtml(program.municipality)}/${escapeStudentEmailHtml(program.state)}</p>
           <p style="font-size:12px;color:#666;">O convite expira em 72 horas. Se não reconhece este cadastro, não confirme e avise o programa.</p>
         `
       });
     } catch (e) {
-      logError("aluno_consent_email_failed", e, { estudanteId: ref.id });
+      logError("aluno_consent_email_failed", e, { estudanteId: studentRef.id });
     }
   }
 
-  return res.json({ ok: true, id: ref.id, isMenor, status: doc.status });
+  return res.status(201).json({ ok: true, id: studentRef.id, caseCode: doc.caseCode, isMenor, status: doc.status });
 }));
 
 // GET apenas valida o convite e devolve o contexto mínimo. Não altera estado:
@@ -15725,7 +16257,7 @@ router.get("/public/aluno-consentimento/:token", publicStudentConsentLimiter, as
   const { data } = found;
 
   if (data.consentimentoParental) {
-    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome });
+    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome, status: data.status });
   }
 
   return res.json({
@@ -15733,14 +16265,23 @@ router.get("/public/aluno-consentimento/:token", publicStudentConsentLimiter, as
     alreadyConfirmed: false,
     nome: data.nome,
     escola: data.escola,
-    consentimentoVersion: STUDENT_CONSENT_VERSION
+    programa: data.programName || null,
+    contratante: data.contractingAuthorityName || null,
+    isMenor: !!data.isMenor,
+    responsavelVinculo: data.responsavelVinculo || null,
+    consentimentoVersion: data.consentimentoVersion || STUDENT_CONSENT_VERSION,
+    privacyNoticeVersion: data.privacyNoticeVersion || null,
+    emergencyProtocolVersion: data.emergencyProtocolVersion || null,
+    requiresOnboarding: true
   });
 }));
 
 // POST registra a manifestação expressa depois que o responsável leu a tela.
 router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  if (req.body?.confirm !== true) return sendError(res, 400, "CONFIRMACAO_EXPLICITA_OBRIGATORIA");
+  const decision = req.body?.decision || (req.body?.confirm === true ? "confirmed" : null);
+  const onboarding = publicProgram.validateConsentOnboarding({ ...(req.body || {}), decision });
+  if (!onboarding.ok) return sendError(res, 400, "DADOS_CONSENTIMENTO_INCOMPLETOS", { missing: onboarding.missing });
 
   const token = String(req.params.token || "").trim();
   if (!token) return sendError(res, 400, "TOKEN_INVALIDO");
@@ -15752,33 +16293,243 @@ router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, a
   const { doc, data } = found;
 
   if (data.consentimentoParental) {
-    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome });
+    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome, status: data.status });
   }
 
   const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex") : null;
 
-  await doc.ref.update({
-    consentimentoParental: true,
-    consentimentoAt: admin.firestore.FieldValue.serverTimestamp(),
-    consentimentoVersion: STUDENT_CONSENT_VERSION,
-    consentimentoIpHash: ipHash,
-    consentimentoUserAgent: String(req.headers["user-agent"] || "").slice(0, 300) || null,
-    consentimentoToken: null,
-    consentimentoTokenHash: null,
-    consentimentoTokenExpiresAt: null,
-    status: "ativo",
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  if (onboarding.value.decision === "declined") {
+    await db.runTransaction(async tx => {
+      const fresh = await tx.get(doc.ref);
+      if (!fresh.exists || fresh.data().consentimentoParental) return;
+      tx.set(doc.ref, {
+        participationConsentStatus: "declined",
+        consentDeclinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        consentimentoToken: null,
+        consentimentoTokenHash: null,
+        consentimentoTokenExpiresAt: null,
+        status: "declined",
+        capacityReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(db.collection("therapy_student_cases").doc(doc.id), {
+        schemaVersion: 1,
+        studentId: doc.id,
+        caseCode: data.caseCode || publicProgram.createCaseCode(),
+        programId: data.programId || null,
+        schoolId: data.schoolId || null,
+        status: "declined",
+        closeReason: data.isMenor ? "guardian_declined" : "participant_declined",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      if (data.programId) tx.set(db.collection("therapy_public_programs").doc(data.programId), {
+        totalStudents: admin.firestore.FieldValue.increment(-1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      if (data.schoolId) tx.set(db.collection("therapy_schools").doc(data.schoolId), {
+        totalStudents: admin.firestore.FieldValue.increment(-1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    });
+    await logStudentEvent({
+      studentId: doc.id, caseId: doc.id, programId: data.programId, schoolId: data.schoolId,
+      type: data.isMenor ? "guardian_consent_declined" : "participant_consent_declined", actor: { role: data.isMenor ? "guardian" : "student" }
+    });
+    await logAudit({ type: "student_guardian_consent_declined", estudanteId: doc.id, ipHash });
+    return res.json({ ok: true, decision: "declined", nome: data.nome, status: "declined" });
+  }
+
+  const managementToken = publicProgram.createOpaqueCode();
+  const consentVersion = data.consentimentoVersion || STUDENT_CONSENT_VERSION;
+
+  await db.runTransaction(async tx => {
+    const fresh = await tx.get(doc.ref);
+    if (!fresh.exists || fresh.data().consentimentoParental) return;
+    tx.set(doc.ref, {
+      consentimentoParental: true,
+      participationConsentStatus: "confirmed",
+      consentimentoAt: admin.firestore.FieldValue.serverTimestamp(),
+      consentimentoVersion: consentVersion,
+      consentimentoIpHash: ipHash,
+      consentimentoUserAgent: String(req.headers["user-agent"] || "").slice(0, 300) || null,
+      guardianRelationship: onboarding.value.guardianRelationship,
+      preferredContactChannel: onboarding.value.preferredContactChannel,
+      studentEmail: onboarding.value.studentEmail || data.studentEmail || null,
+      studentPhone: onboarding.value.studentPhone || data.studentPhone || null,
+      emergencyContact: {
+        name: onboarding.value.emergencyContactName,
+        relationship: onboarding.value.emergencyContactRelationship,
+        phone: onboarding.value.emergencyContactPhone
+      },
+      residenceAddress: {
+        street: onboarding.value.addressStreet,
+        number: onboarding.value.addressNumber,
+        complement: onboarding.value.addressComplement,
+        neighborhood: onboarding.value.addressNeighborhood,
+        city: onboarding.value.addressCity,
+        state: onboarding.value.addressState,
+        postalCode: onboarding.value.addressPostalCode
+      },
+      accessibilityNeeds: onboarding.value.accessibilityNeeds,
+      communicationNeeds: onboarding.value.communicationNeeds,
+      privacyConfirmed: true,
+      telehealthConfirmed: true,
+      emergencyProtocolConfirmed: true,
+      consentManagementTokenHash: publicProgram.hashOpaqueCode(managementToken),
+      consentManagementTokenCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      consentimentoToken: null,
+      consentimentoTokenHash: null,
+      consentimentoTokenExpiresAt: null,
+      status: "pending_triage",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    tx.set(db.collection("therapy_student_cases").doc(doc.id), {
+      schemaVersion: 1,
+      studentId: doc.id,
+      caseCode: data.caseCode || publicProgram.createCaseCode(),
+      programId: data.programId || null,
+      schoolId: data.schoolId || null,
+      status: "pending_triage",
+      assignedTherapistUid: null,
+      completedSessions: 0,
+      scheduledSessions: 0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
   });
 
   await logAudit({
     type: "student_guardian_consent_confirmed",
     estudanteId: doc.id,
-    consentimentoVersion: STUDENT_CONSENT_VERSION,
+    consentimentoVersion: consentVersion,
     ipHash
   });
 
-  return res.json({ ok: true, alreadyConfirmed: false, nome: data.nome, escola: data.escola });
+  await logStudentEvent({
+    studentId: doc.id, caseId: doc.id, programId: data.programId, schoolId: data.schoolId,
+    type: data.isMenor ? "guardian_consent_confirmed" : "participant_consent_confirmed", actor: { role: data.isMenor ? "guardian" : "student" }, detail: { consentVersion }
+  });
+
+  try {
+    const manageUrl = `${THERAPY_FRONTEND_BASE}/aluno-privacidade.html?token=${encodeURIComponent(managementToken)}`;
+    await sendEmail({
+      to: data.isMenor ? data.responsavelEmail : data.email,
+      subject: `Consentimento registrado — ${data.nome}`,
+      html: `<p>Olá, ${escapeStudentEmailHtml(data.isMenor ? data.responsavelNome : data.nome)}.</p>
+        <p>Sua autorização para a participação de <strong>${escapeStudentEmailHtml(data.nome)}</strong> foi registrada. O próximo passo é a triagem de viabilidade do atendimento remoto.</p>
+        <p>Você pode consultar a situação ou retirar a autorização de participação neste link individual:</p>
+        <p><a href="${manageUrl}">Gerenciar participação e privacidade</a></p>
+        <p style="font-size:12px;color:#666;">A retirada da autorização não elimina registros cuja guarda seja obrigatória e não impede o acesso aos serviços públicos disponíveis.</p>`
+    });
+  } catch (error) {
+    logError("student_consent_receipt_email_failed", error, { estudanteId: doc.id });
+  }
+
+  return res.json({ ok: true, alreadyConfirmed: false, decision: "confirmed", nome: data.nome, escola: data.escola, status: "pending_triage" });
+}));
+
+async function findStudentByManagementToken(db, token) {
+  if (!/^[A-Za-z0-9_-]{20,128}$/.test(String(token || ""))) return null;
+  const snap = await db.collection("therapy_estudantes")
+    .where("consentManagementTokenHash", "==", publicProgram.hashOpaqueCode(token))
+    .limit(1).get();
+  return snap.empty ? null : snap.docs[0];
+}
+
+router.get("/public/aluno-privacidade/:token", publicStudentConsentLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const doc = await findStudentByManagementToken(getDb(), req.params.token);
+  if (!doc) return sendError(res, 404, "LINK_GESTAO_INVALIDO");
+  const data = doc.data();
+  return res.json({
+    ok: true,
+    nome: data.nome,
+    programa: data.programName || null,
+    escola: data.schoolName || data.escola || null,
+    status: data.status,
+    participationConsentStatus: data.participationConsentStatus,
+    consentimentoAt: publicProgramMillis(data.consentimentoAt),
+    consentimentoVersion: data.consentimentoVersion || null
+  });
+}));
+
+router.post("/public/aluno-privacidade/:token/revogar", publicStudentConsentLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  if (req.body?.confirm !== true) return sendError(res, 400, "CONFIRMACAO_EXPLICITA_OBRIGATORIA");
+  const reason = publicProgram.cleanMultiline(req.body?.reason, 1000);
+  const db = getDb();
+  const doc = await findStudentByManagementToken(db, req.params.token);
+  if (!doc) return sendError(res, 404, "LINK_GESTAO_INVALIDO");
+  const data = doc.data();
+  if (data.participationConsentStatus === "revoked") return res.json({ ok: true, alreadyRevoked: true });
+
+  const futureSessions = await db.collection("therapy_sessions").where("studentId", "==", doc.id).limit(200).get();
+  const batch = db.batch();
+  let futureSessionsCanceled = 0;
+  const canceledByUsageMonth = new Map();
+  const scheduleLocksToDelete = [];
+  batch.set(doc.ref, {
+    participationConsentStatus: "revoked",
+    consentRevokedAt: admin.firestore.FieldValue.serverTimestamp(),
+    consentRevocationReason: reason,
+    status: "consent_revoked",
+    capacityReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  if (data.programId) batch.set(db.collection("therapy_public_programs").doc(data.programId), {
+    totalStudents: admin.firestore.FieldValue.increment(-1),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  if (data.schoolId) batch.set(db.collection("therapy_schools").doc(data.schoolId), {
+    totalStudents: admin.firestore.FieldValue.increment(-1),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  futureSessions.docs.forEach(sessionDoc => {
+    const session = sessionDoc.data();
+    if (["scheduled", "pending"].includes(session.status)) {
+      futureSessionsCanceled++;
+      if (session.publicProgramId && session.publicProgramUsageMonth) {
+        const usageId = `${session.publicProgramId}_${session.publicProgramUsageMonth}`;
+        canceledByUsageMonth.set(usageId, (canceledByUsageMonth.get(usageId) || 0) + 1);
+      }
+      batch.set(sessionDoc.ref, {
+        status: "canceled",
+        canceledBy: data.isMenor ? "guardian_consent_revoked" : "participant_consent_revoked",
+        cancelReason: data.isMenor ? "Autorização de participação retirada pelo responsável." : "Autorização de participação retirada pelo estudante.",
+        canceledAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      if (Array.isArray(session.scheduleLockIds)) scheduleLocksToDelete.push(...session.scheduleLockIds.slice(0, 50));
+    }
+  });
+  batch.set(db.collection("therapy_student_cases").doc(doc.id), {
+    status: "consent_revoked",
+    closeReason: data.isMenor ? "guardian_revoked" : "participant_revoked",
+    closedAt: admin.firestore.FieldValue.serverTimestamp(),
+    ...(futureSessionsCanceled > 0 ? { scheduledSessions: admin.firestore.FieldValue.increment(-futureSessionsCanceled) } : {}),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  for (const [usageId, count] of canceledByUsageMonth) {
+    batch.set(db.collection("therapy_public_program_usage").doc(usageId), {
+      activeSessions: admin.firestore.FieldValue.increment(-count),
+      canceledSessions: admin.firestore.FieldValue.increment(count),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
+  await batch.commit();
+  if (scheduleLocksToDelete.length) {
+    await Promise.all(scheduleLocksToDelete.map(lockId =>
+      db.collection("therapy_schedule_locks").doc(String(lockId)).delete()
+    ));
+  }
+  await logStudentEvent({
+    studentId: doc.id, caseId: doc.id, programId: data.programId, schoolId: data.schoolId,
+    type: "participation_consent_revoked", actor: { role: data.isMenor ? "guardian" : "student" }, detail: { futureSessionsCanceled }
+  });
+  await logAudit({ type: "student_participation_consent_revoked", estudanteId: doc.id });
+  return res.json({ ok: true, status: "consent_revoked" });
 }));
 
 // POST /therapy/admin/estudantes/:id/reenviar-consentimento — reenvia e-mail
@@ -15794,7 +16545,7 @@ router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler
   if (!snap.exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
 
   const data = snap.data();
-  if (!data.isMenor || data.consentimentoParental) return sendError(res, 400, "CONSENTIMENTO_NAO_NECESSARIO");
+  if (data.consentimentoParental || data.participationConsentStatus !== "pending") return sendError(res, 400, "CONSENTIMENTO_NAO_NECESSARIO");
 
   const consentInvite = createStudentConsentToken();
   await ref.update({
@@ -15806,9 +16557,9 @@ router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler
 
   const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${encodeURIComponent(consentInvite.token)}`;
   await sendEmail({
-    to: data.responsavelEmail,
+    to: data.isMenor ? data.responsavelEmail : data.email,
     subject: `[Reenvio] Confirmação de consentimento — ${data.nome}`,
-    html: `<p>Olá, ${escapeStudentEmailHtml(data.responsavelNome)}!</p>
+    html: `<p>Olá, ${escapeStudentEmailHtml(data.isMenor ? data.responsavelNome : data.nome)}!</p>
       <p>Segue um novo convite para revisar e decidir sobre o cadastro de <strong>${escapeStudentEmailHtml(data.nome)}</strong>. Abrir o link não confirma o consentimento.</p>
       <p><a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Revisar e decidir →</a></p>
       <p style="font-size:12px;color:#666;">Este convite expira em 72 horas.</p>`
@@ -15818,6 +16569,62 @@ router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler
 }));
 
 // GET /therapy/admin/estudantes — listagem com filtros
+function serializeStudentForStaff(doc) {
+  const e = doc.data ? doc.data() : doc;
+  return {
+    ...(doc.id ? { id: doc.id } : {}),
+    schemaVersion: e.schemaVersion || 1,
+    programId: e.programId || null,
+    programName: e.programName || null,
+    contractNumber: e.contractNumber || null,
+    contractingAuthorityName: e.contractingAuthorityName || null,
+    schoolId: e.schoolId || null,
+    schoolName: e.schoolName || e.escola || null,
+    schoolInepCode: e.schoolInepCode || null,
+    caseId: e.caseId || doc.id || null,
+    caseCode: e.caseCode || null,
+    schoolStudentCode: e.schoolStudentCode || null,
+    nome: e.nome || "",
+    nomeSocial: e.nomeSocial || null,
+    dataNascimento: e.dataNascimento || null,
+    idade: e.idade ?? null,
+    isMenor: !!e.isMenor,
+    escola: e.escola || e.schoolName || "",
+    anoSerie: e.anoSerie || null,
+    turma: e.turma || null,
+    turno: e.turno || null,
+    preferredLanguage: e.preferredLanguage || null,
+    cidade: e.cidade || "",
+    municipio: e.municipio || e.cidade || "",
+    estado: e.estado || "",
+    email: e.email || null,
+    telefone: e.telefone || null,
+    studentEmail: e.studentEmail || null,
+    studentPhone: e.studentPhone || null,
+    responsavelNome: e.responsavelNome || null,
+    responsavelEmail: e.responsavelEmail || null,
+    responsavelTelefone: e.responsavelTelefone || null,
+    responsavelVinculo: e.responsavelVinculo || e.guardianRelationship || null,
+    preferredContactChannel: e.preferredContactChannel || null,
+    emergencyContact: e.emergencyContact || null,
+    residenceAddress: e.residenceAddress || null,
+    accessibilityNeeds: e.accessibilityNeeds || null,
+    communicationNeeds: e.communicationNeeds || null,
+    consentimentoParental: !!e.consentimentoParental,
+    participationConsentStatus: e.participationConsentStatus || (e.consentimentoParental ? "confirmed" : "pending"),
+    consentimentoAt: publicProgramMillis(e.consentimentoAt),
+    consentimentoVersion: e.consentimentoVersion || null,
+    privacyNoticeVersion: e.privacyNoticeVersion || null,
+    assentTermVersion: e.assentTermVersion || null,
+    emergencyProtocolVersion: e.emergencyProtocolVersion || null,
+    consentRevokedAt: publicProgramMillis(e.consentRevokedAt),
+    profissionalUid: e.profissionalUid || null,
+    status: e.status || (e.consentimentoParental ? "pending_triage" : "pending_guardian_consent"),
+    createdAt: publicProgramMillis(e.createdAt),
+    updatedAt: publicProgramMillis(e.updatedAt)
+  };
+}
+
 router.get("/therapy/admin/estudantes", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const adminAuth = await verifyAdminTherapy(req, res);
@@ -15828,41 +16635,27 @@ router.get("/therapy/admin/estudantes", asyncHandler(async (req, res) => {
   const estado  = String(req.query?.estado  || "").trim().toUpperCase();
   const cidade  = String(req.query?.cidade  || "").trim().toLowerCase();
   const escola  = String(req.query?.escola  || "").trim().toLowerCase();
+  const programId = String(req.query?.programId || "").trim();
+  const schoolId = String(req.query?.schoolId || "").trim();
   const isMenorFilter = req.query?.isMenor;
   const q       = String(req.query?.q       || "").trim().toLowerCase();
 
   let query = db.collection("therapy_estudantes");
-  if (status !== "all") query = query.where("status", "==", status);
-  if (estado) query = query.where("estado", "==", estado);
+  // Mantém uma única igualdade no Firestore para a operação não depender de
+  // índices compostos diferentes para cada combinação de filtros do painel.
+  if (programId) query = query.where("programId", "==", programId);
+  else if (schoolId) query = query.where("schoolId", "==", schoolId);
+  else if (status !== "all") query = query.where("status", "==", status);
+  else if (estado) query = query.where("estado", "==", estado);
 
   const snap = await query.limit(2000).get();
 
-  let items = snap.docs.map(d => {
-    const e = d.data();
-    return {
-      id: d.id,
-      nome: e.nome || "",
-      dataNascimento: e.dataNascimento || null,
-      idade: e.idade ?? null,
-      isMenor: !!e.isMenor,
-      escola: e.escola || "",
-      turma: e.turma || null,
-      cidade: e.cidade || "",
-      municipio: e.municipio || e.cidade || "",
-      estado: e.estado || "",
-      email: e.email || null,
-      telefone: e.telefone || null,
-      responsavelNome: e.responsavelNome || null,
-      responsavelEmail: e.responsavelEmail || null,
-      responsavelTelefone: e.responsavelTelefone || null,
-      consentimentoParental: !!e.consentimentoParental,
-      consentimentoAt: e.consentimentoAt?.toMillis?.() || null,
-      profissionalUid: e.profissionalUid || null,
-      status: e.status || "ativo",
-      createdAt: e.createdAt?.toMillis?.() || null
-    };
-  });
+  let items = snap.docs.map(serializeStudentForStaff);
 
+  if (status !== "all") items = items.filter(e => e.status === status);
+  if (estado) items = items.filter(e => e.estado === estado);
+  if (programId) items = items.filter(e => e.programId === programId);
+  if (schoolId) items = items.filter(e => e.schoolId === schoolId);
   if (cidade)  items = items.filter(e => e.cidade.toLowerCase().includes(cidade) || e.municipio.toLowerCase().includes(cidade));
   if (escola)  items = items.filter(e => e.escola.toLowerCase().includes(escola));
   if (isMenorFilter === "true")  items = items.filter(e => e.isMenor);
@@ -15891,12 +16684,38 @@ router.get("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
   if (!snap.exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
 
   const e = snap.data();
+  const [caseSnap, programSnap, schoolSnap, sessionsSnap, eventsSnap] = await Promise.all([
+    db.collection("therapy_student_cases").doc(id).get(),
+    e.programId ? db.collection("therapy_public_programs").doc(e.programId).get() : Promise.resolve(null),
+    e.schoolId ? db.collection("therapy_schools").doc(e.schoolId).get() : Promise.resolve(null),
+    db.collection("therapy_sessions").where("studentId", "==", id).limit(200).get(),
+    db.collection("therapy_student_events").where("studentId", "==", id).limit(500).get()
+  ]);
+  const sessions = sessionsSnap.docs.map(doc => {
+    const s = doc.data();
+    return {
+      id: doc.id,
+      therapistUid: s.therapistUid || null,
+      therapistName: s.therapistDisplayName || null,
+      scheduledAt: publicProgramMillis(s.scheduledAt),
+      status: s.status || null,
+      completedAt: publicProgramMillis(s.completedAt),
+      canceledAt: publicProgramMillis(s.canceledAt),
+      cancelReason: s.cancelReason || null
+    };
+  }).sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
+  const events = eventsSnap.docs.map(doc => {
+    const event = doc.data();
+    return { id: doc.id, ...event, createdAt: publicProgramMillis(event.createdAt) };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return res.json({
     ok: true,
-    id: snap.id,
-    ...e,
-    createdAt: e.createdAt?.toMillis?.() || null,
-    consentimentoAt: e.consentimentoAt?.toMillis?.() || null
+    student: serializeStudentForStaff(snap),
+    case: caseSnap.exists ? serializePublicProgramDoc(caseSnap) : null,
+    program: programSnap?.exists ? serializePublicProgramDoc(programSnap) : null,
+    school: schoolSnap?.exists ? (() => { const item = serializePublicProgramDoc(schoolSnap); delete item.registrationCodeHash; return item; })() : null,
+    sessions,
+    events
   });
 }));
 
@@ -15918,19 +16737,549 @@ router.patch("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
       hint: "O responsável legal deve manifestar a decisão pelo convite individual e auditável."
     });
   }
-  if (current.isMenor && req.body?.status === "ativo" && !current.consentimentoParental) {
-    return sendError(res, 400, "CONSENTIMENTO_PARENTAL_PENDENTE");
+  if (req.body?.status !== undefined || req.body?.profissionalUid !== undefined) {
+    return sendError(res, 400, "USE_ACAO_ASSISTENCIAL_ESPECIFICA");
   }
 
-  const allowed = ["nome", "escola", "turma", "cidade", "municipio", "estado", "status",
+  const allowed = ["nome", "nomeSocial", "schoolStudentCode", "preferredLanguage", "anoSerie", "turma", "turno", "cidade", "municipio", "estado",
                    "responsavelNome", "responsavelEmail", "responsavelTelefone",
-                   "email", "telefone", "profissionalUid"];
+                   "responsavelVinculo", "email", "telefone", "studentEmail", "studentPhone",
+                   "preferredContactChannel", "accessibilityNeeds", "communicationNeeds"];
   const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
   for (const k of allowed) {
     if (req.body?.[k] !== undefined) updates[k] = req.body[k];
   }
   await ref.update(updates);
   return res.json({ ok: true });
+}));
+
+async function loadPublicStudentBundle(studentId) {
+  const db = getDb();
+  const [studentSnap, caseSnap] = await Promise.all([
+    db.collection("therapy_estudantes").doc(studentId).get(),
+    db.collection("therapy_student_cases").doc(studentId).get()
+  ]);
+  if (!studentSnap.exists) return null;
+  const student = studentSnap.data();
+  const [programSnap, schoolSnap] = await Promise.all([
+    student.programId ? db.collection("therapy_public_programs").doc(student.programId).get() : Promise.resolve(null),
+    student.schoolId ? db.collection("therapy_schools").doc(student.schoolId).get() : Promise.resolve(null)
+  ]);
+  return {
+    studentRef: studentSnap.ref,
+    student,
+    caseRef: db.collection("therapy_student_cases").doc(studentId),
+    caseSnap,
+    caseData: caseSnap.exists ? caseSnap.data() : null,
+    programSnap,
+    program: programSnap?.exists ? programSnap.data() : null,
+    schoolSnap,
+    school: schoolSnap?.exists ? schoolSnap.data() : null
+  };
+}
+
+function actorCanAccessPublicCase(actor, bundle) {
+  if (actor?.isAdmin) return true;
+  if (!actor?.isPsychologist || !bundle?.caseData) return false;
+  return bundle.caseData.assignedTherapistUid === actor.uid
+    && Array.isArray(bundle.program?.therapistUids)
+    && bundle.program.therapistUids.includes(actor.uid);
+}
+
+function requireAssignedPsychologist(res, actor, bundle) {
+  if (!actor?.isPsychologist) {
+    sendError(res, 403, "ATO_CLINICO_EXIGE_PSICOLOGO_HABILITADO");
+    return false;
+  }
+  if (bundle?.caseData?.assignedTherapistUid !== actor.uid) {
+    sendError(res, 403, "CASO_NAO_ATRIBUIDO_A_ESTE_PROFISSIONAL");
+    return false;
+  }
+  if (!Array.isArray(bundle.program?.therapistUids) || !bundle.program.therapistUids.includes(actor.uid)) {
+    sendError(res, 403, "PROFISSIONAL_FORA_DA_EQUIPE_DO_CONTRATO");
+    return false;
+  }
+  return true;
+}
+
+// Atribuição administrativa: somente psicólogos CRP verificados e integrantes do contrato.
+router.post("/therapy/admin/estudantes/:id/atribuir", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminActor = await verifyAdminTherapy(req, res);
+  if (!adminActor) return;
+  const studentId = String(req.params.id || "").trim();
+  const therapistUid = String(req.body?.therapistUid || "").trim();
+  if (!therapistUid) return sendError(res, 400, "PROFISSIONAL_OBRIGATORIO");
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!bundle.program || !bundle.caseData) return sendError(res, 409, "CASO_PUBLICO_INCOMPLETO");
+  if (!publicProgram.programIsOperational(bundle.program)) return sendError(res, 409, "PROGRAMA_FORA_DE_VIGENCIA");
+  if (bundle.student.participationConsentStatus !== "confirmed") return sendError(res, 409, "CONSENTIMENTO_NAO_CONFIRMADO");
+  if (!["pending_triage", "triage_in_progress", "waiting_assignment", "assigned"].includes(bundle.caseData.status)) {
+    return sendError(res, 409, "STATUS_NAO_PERMITE_ATRIBUICAO", { status: bundle.caseData.status });
+  }
+  if (!Array.isArray(bundle.program.therapistUids) || !bundle.program.therapistUids.includes(therapistUid)) {
+    return sendError(res, 400, "PROFISSIONAL_FORA_DA_EQUIPE_DO_CONTRATO");
+  }
+  const therapistSnap = await getDb().collection("therapists").doc(therapistUid).get();
+  const therapist = therapistSnap.exists ? therapistSnap.data() : null;
+  if (!therapist || therapist.verificationStatus !== "verified" || (therapist.tipoConselho !== "CRP" && !therapist.crp)) {
+    return sendError(res, 400, "PSICOLOGO_NAO_VERIFICADO");
+  }
+  const targetStatus = ["suitable", "suitable_with_conditions"].includes(bundle.caseData.remoteViability) ? "assigned" : "pending_triage";
+  const batch = getDb().batch();
+  batch.set(bundle.studentRef, {
+    profissionalUid: therapistUid,
+    profissionalNome: therapist.displayName || null,
+    status: targetStatus,
+    assignedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  batch.set(bundle.caseRef, {
+    assignedTherapistUid: therapistUid,
+    assignedTherapistName: therapist.displayName || null,
+    assignedAt: admin.firestore.FieldValue.serverTimestamp(),
+    assignedBy: adminActor.email || adminActor.uid,
+    status: targetStatus,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({
+    studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+    type: "case_assigned", actor: { ...adminActor, role: "admin" }, detail: { therapistUid, therapistName: therapist.displayName || null }
+  });
+  await createNotification({
+    therapistUid,
+    type: "public_case_assigned",
+    title: "Novo caso de programa público",
+    body: `${bundle.student.nomeSocial || bundle.student.nome} aguarda triagem de viabilidade.`,
+    link: `./casos-publicos.html?id=${encodeURIComponent(studentId)}`,
+    data: { studentId, caseCode: bundle.student.caseCode || null }
+  });
+  return res.json({ ok: true, status: targetStatus, therapistUid });
+}));
+
+router.post("/therapy/admin/estudantes/:id/suspender", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const bundle = await loadPublicStudentBundle(String(req.params.id || ""));
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  const reason = publicProgram.cleanMultiline(req.body?.reason, 1000);
+  if (!reason) return sendError(res, 400, "MOTIVO_OBRIGATORIO");
+  const batch = getDb().batch();
+  batch.set(bundle.studentRef, { status: "suspended", suspensionReason: reason, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  batch.set(bundle.caseRef, { status: "suspended", suspensionReason: reason, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({ studentId: bundle.studentRef.id, caseId: bundle.studentRef.id, programId: bundle.student.programId, schoolId: bundle.student.schoolId, type: "case_suspended", actor: { ...actor, role: "admin" }, detail: { reason } });
+  return res.json({ ok: true, status: "suspended" });
+}));
+
+// Casos atribuídos ao psicólogo. Dados de contrato e escola são contexto;
+// o conteúdo clínico nunca integra painel do contratante.
+router.get("/therapy/programa-publico/casos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  let query = getDb().collection("therapy_student_cases");
+  if (!actor.isAdmin) query = query.where("assignedTherapistUid", "==", actor.uid);
+  const snap = await query.limit(500).get();
+  const status = String(req.query?.status || "all");
+  const items = [];
+  for (const caseDoc of snap.docs) {
+    const caseData = caseDoc.data();
+    if (status !== "all" && caseData.status !== status) continue;
+    const studentSnap = await getDb().collection("therapy_estudantes").doc(caseData.studentId || caseDoc.id).get();
+    if (!studentSnap.exists) continue;
+    const student = serializeStudentForStaff(studentSnap);
+    items.push({
+      id: caseDoc.id,
+      caseCode: caseData.caseCode || student.caseCode,
+      status: caseData.status,
+      assignedTherapistUid: caseData.assignedTherapistUid || null,
+      remoteViability: caseData.remoteViability || null,
+      urgencyLevel: caseData.urgencyLevel || null,
+      completedSessions: caseData.completedSessions || 0,
+      nextSessionAt: publicProgramMillis(caseData.nextSessionAt),
+      updatedAt: publicProgramMillis(caseData.updatedAt),
+      student
+    });
+  }
+  items.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  return res.json({ ok: true, items, total: items.length });
+}));
+
+router.get("/therapy/programa-publico/casos/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const bundle = await loadPublicStudentBundle(String(req.params.id || ""));
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!actorCanAccessPublicCase(actor, bundle)) return sendError(res, 403, "ACESSO_NEGADO");
+  return res.json({
+    ok: true,
+    student: serializeStudentForStaff({ id: bundle.studentRef.id, data: () => bundle.student }),
+    case: bundle.caseData ? serializePublicProgramDoc(bundle.caseData) : null,
+    program: bundle.program ? {
+      id: bundle.programSnap.id,
+      name: bundle.program.name,
+      contractNumber: bundle.program.contractNumber,
+      endDate: bundle.program.endDate,
+      maxSessionsPerStudent: bundle.program.maxSessionsPerStudent,
+      sessionDurationMinutes: bundle.program.sessionDurationMinutes,
+      healthNetworkReference: bundle.program.healthNetworkReference,
+      emergencyNetworkReference: bundle.program.emergencyNetworkReference,
+      clinicalProtocolVersion: bundle.program.clinicalProtocolVersion,
+      emergencyProtocolVersion: bundle.program.emergencyProtocolVersion
+    } : null,
+    school: bundle.school ? { id: bundle.schoolSnap.id, name: bundle.school.name, healthReferenceName: bundle.school.healthReferenceName, healthReferencePhone: bundle.school.healthReferencePhone } : null
+  });
+}));
+
+router.post("/therapy/programa-publico/casos/:id/triagem", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const studentId = String(req.params.id || "");
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!requireAssignedPsychologist(res, actor, bundle)) return;
+  if (bundle.student.participationConsentStatus !== "confirmed") return sendError(res, 409, "CONSENTIMENTO_NAO_CONFIRMADO");
+  if (!publicProgram.programIsOperational(bundle.program)) return sendError(res, 409, "PROGRAMA_FORA_DE_VIGENCIA");
+  if (!['pending_triage', 'triage_in_progress', 'assigned'].includes(bundle.caseData?.status)) {
+    return sendError(res, 409, "STATUS_NAO_PERMITE_TRIAGEM", { status: bundle.caseData?.status });
+  }
+  const validated = publicProgram.validateTriage(req.body || {});
+  if (!validated.ok) return sendError(res, 400, "TRIAGEM_INCOMPLETA", { missing: validated.missing });
+  const triage = validated.value;
+  const criticalRisk = triage.riskFlags.suicideOrSelfHarm || triage.riskFlags.violenceOrRightsViolation || triage.riskFlags.acutePsychiatric || triage.riskFlags.acuteMedical;
+  if (triage.urgencyLevel === "emergency" && triage.remoteViability !== "not_suitable") {
+    return sendError(res, 400, "EMERGENCIA_EXIGE_ENCAMINHAMENTO_PRESENCIAL");
+  }
+  if (criticalRisk && triage.remoteViability === "suitable") {
+    return sendError(res, 400, "RISCO_CRITICO_EXIGE_CONDICOES_OU_ENCAMINHAMENTO");
+  }
+  let targetStatus = "assigned";
+  if (triage.assentStatus === "declined") targetStatus = "declined";
+  else if (triage.remoteViability === "not_suitable" || triage.urgencyLevel === "emergency") targetStatus = "referral_required";
+  const update = {
+    ...triage,
+    status: targetStatus,
+    triageCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
+    triageCompletedBy: actor.uid,
+    triageProfessionalName: actor.therapist?.displayName || null,
+    triageCrp: actor.therapist?.numeroConselho || actor.therapist?.crp || null,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  const batch = getDb().batch();
+  batch.set(bundle.caseRef, update, { merge: true });
+  batch.set(bundle.studentRef, {
+    status: targetStatus,
+    assentStatus: triage.assentStatus,
+    assentAt: triage.assentStatus === "obtained" ? admin.firestore.FieldValue.serverTimestamp() : null,
+    remoteViability: triage.remoteViability,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({
+    studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+    type: "clinical_triage_completed", actor, detail: { targetStatus, remoteViability: triage.remoteViability, urgencyLevel: triage.urgencyLevel, assentStatus: triage.assentStatus, criticalRisk }
+  });
+  await logAudit({ type: "public_case_triage_completed", estudanteId: studentId, therapistUid: actor.uid, status: targetStatus });
+  return res.json({ ok: true, status: targetStatus });
+}));
+
+router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const studentId = String(req.params.id || "");
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!requireAssignedPsychologist(res, actor, bundle)) return;
+  if (!['assigned', 'care_active'].includes(bundle.caseData?.status)) return sendError(res, 409, "CASO_NAO_LIBERADO_PARA_AGENDAMENTO");
+  if (!['suitable', 'suitable_with_conditions'].includes(bundle.caseData?.remoteViability)) return sendError(res, 409, "ATENDIMENTO_REMOTO_NAO_APROVADO");
+  if (bundle.student.participationConsentStatus !== "confirmed") return sendError(res, 409, "CONSENTIMENTO_NAO_CONFIRMADO");
+  if (!publicProgram.programIsOperational(bundle.program)) return sendError(res, 409, "PROGRAMA_FORA_DE_VIGENCIA");
+  const scheduledAt = Number(req.body?.scheduledAt || 0);
+  if (!Number.isFinite(scheduledAt) || scheduledAt < Date.now() + 5 * 60 * 1000) return sendError(res, 400, "HORARIO_INVALIDO");
+  if (scheduledAt % (5 * 60 * 1000) !== 0) return sendError(res, 400, "HORARIO_DEVE_USAR_INTERVALOS_DE_5_MINUTOS");
+  const scheduledLocalDate = publicProgram.dateInSaoPaulo(scheduledAt);
+  if (bundle.program.startDate && scheduledLocalDate < bundle.program.startDate) return sendError(res, 400, "HORARIO_FORA_DA_VIGENCIA_CONTRATUAL");
+  if (bundle.program.endDate && scheduledLocalDate > bundle.program.endDate) return sendError(res, 400, "HORARIO_FORA_DA_VIGENCIA_CONTRATUAL");
+  const db = getDb();
+  const [studentSessions, programSessions, therapistSessions, blackouts, pendingRequests] = await Promise.all([
+    db.collection("therapy_sessions").where("studentId", "==", studentId).limit(500).get(),
+    db.collection("therapy_sessions").where("publicProgramId", "==", bundle.student.programId).limit(5000).get(),
+    db.collection("therapy_sessions").where("therapistUid", "==", actor.uid).limit(5000).get(),
+    db.collection("therapy_agenda_blackouts").where("therapistUid", "==", actor.uid).limit(1000).get(),
+    db.collection("therapy_scheduling_requests").where("therapistUid", "==", actor.uid).limit(1000).get()
+  ]);
+  const durationMs = Number(bundle.program.sessionDurationMinutes || 50) * 60 * 1000;
+  const scheduledEnd = scheduledAt + durationMs;
+  const overlaps = (start, end) => scheduledAt < end && scheduledEnd > start;
+  const sessionConflict = therapistSessions.docs.some(doc => {
+    const session = doc.data();
+    if (["canceled", "rejected", "completed"].includes(session.status)) return false;
+    const start = publicProgramMillis(session.scheduledAt) || 0;
+    const end = start + Number(session.durationMinutes || 50) * 60 * 1000;
+    return start > 0 && overlaps(start, end);
+  });
+  const blackoutConflict = blackouts.docs.some(doc => {
+    const item = doc.data();
+    const start = publicProgramMillis(item.startAt) || 0;
+    const end = publicProgramMillis(item.endAt) || 0;
+    return start > 0 && end > start && overlaps(start, end);
+  });
+  const pendingConflict = pendingRequests.docs.some(doc => {
+    const request = doc.data();
+    if (request.status !== "pending" || (request.expiresAt && publicProgramMillis(request.expiresAt) < Date.now())) return false;
+    const start = publicProgramMillis(request.requestedSlot) || 0;
+    const end = publicProgramMillis(request.requestedSlotEnd) || (start + durationMs);
+    return start > 0 && overlaps(start, end);
+  });
+  if (sessionConflict || blackoutConflict || pendingConflict) return sendError(res, 409, "HORARIO_INDISPONIVEL");
+  const relevantStudentSessions = studentSessions.docs.filter(doc => !["canceled", "rejected"].includes(doc.data().status));
+  if (bundle.program.maxSessionsPerStudent && relevantStudentSessions.length >= bundle.program.maxSessionsPerStudent) {
+    return sendError(res, 409, "LIMITE_DE_SESSOES_DO_ALUNO_ATINGIDO");
+  }
+  const usageMonth = scheduledLocalDate.slice(0, 7);
+  const sessionsThisMonth = programSessions.docs.filter(doc => {
+    const session = doc.data();
+    const at = publicProgramMillis(session.scheduledAt) || 0;
+    return at > 0 && publicProgram.dateInSaoPaulo(at)?.slice(0, 7) === usageMonth && !["canceled", "rejected"].includes(session.status);
+  }).length;
+  if (bundle.program.maxMonthlySessions && sessionsThisMonth >= bundle.program.maxMonthlySessions) {
+    return sendError(res, 409, "LIMITE_MENSAL_DO_CONTRATO_ATINGIDO");
+  }
+
+  const therapist = actor.therapist;
+  const therapistEmail = await resolveTherapistEmail(actor.uid, therapist);
+  const sessionId = newId("sess");
+  const room = `therapy_${sessionId}`;
+  const e2eeKey = crypto.randomBytes(32).toString("base64");
+  const joinPayload = {
+    token_type: "therapy_join",
+    sessionId,
+    therapistUid: actor.uid,
+    livekitRoom: room,
+    patientNameHint: bundle.student.nomeSocial || bundle.student.nome,
+    iat: Date.now(),
+    // O convite pode ser criado dias antes, mas continua estritamente vinculado
+    // a uma unica sessao e expira duas horas depois do horario contratado.
+    exp: Math.max(Date.now() + JOIN_TOKEN_VALIDITY_MS, scheduledAt + JOIN_TOKEN_VALIDITY_MS)
+  };
+  const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
+  const patientEmail = bundle.student.isMenor ? bundle.student.responsavelEmail : bundle.student.email;
+  const patientPhoneRaw = bundle.student.isMenor ? bundle.student.responsavelTelefone : bundle.student.telefone;
+  const normalizedPhone = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
+  const usageRef = db.collection("therapy_public_program_usage").doc(`${bundle.student.programId}_${usageMonth}`);
+  const sessionRef = db.collection("therapy_sessions").doc(sessionId);
+  const lockBucketMs = 5 * 60 * 1000;
+  const scheduleLockIds = [];
+  for (let bucket = Math.floor(scheduledAt / lockBucketMs) * lockBucketMs; bucket < scheduledEnd; bucket += lockBucketMs) {
+    scheduleLockIds.push(`${actor.uid}_${bucket}`);
+  }
+  const scheduleLockRefs = scheduleLockIds.map(id => db.collection("therapy_schedule_locks").doc(id));
+  const sessionDocument = {
+    sessionId,
+    therapistUid: actor.uid,
+    therapistDisplayName: therapist.displayName || "",
+    therapistEmail,
+    patientName: bundle.student.nomeSocial || bundle.student.nome,
+    patientId: null,
+    patientEmail: patientEmail || null,
+    patientPhone: normalizedPhone.length >= 12 ? normalizedPhone : null,
+    studentId,
+    publicProgramCaseId: studentId,
+    publicProgramId: bundle.student.programId,
+    publicSchoolId: bundle.student.schoolId,
+    publicProgramUsageMonth: usageMonth,
+    scheduleLockIds,
+    contractNumber: bundle.program.contractNumber,
+    fundingSource: "public_contract",
+    paymentStatus: "not_applicable",
+    consentAiSummary: false,
+    aiDisabledReason: "public_youth_program",
+    livekitRoom: room,
+    e2eeKey,
+    scheduledAt,
+    durationMinutes: bundle.program.sessionDurationMinutes || 50,
+    status: "scheduled",
+    joinTokenExp: joinPayload.exp,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  try {
+    await db.runTransaction(async tx => {
+      const [freshCase, freshProgram, usage, scheduleLocks] = await Promise.all([
+        tx.get(bundle.caseRef), tx.get(bundle.programSnap.ref), tx.get(usageRef),
+        Promise.all(scheduleLockRefs.map(ref => tx.get(ref)))
+      ]);
+      const caseData = freshCase.data() || {};
+      const programData = freshProgram.data() || {};
+      const activeForStudent = Number(caseData.completedSessions || 0) + Number(caseData.scheduledSessions || 0);
+      const activeForMonth = usage.exists ? Number(usage.data()?.activeSessions || 0) : sessionsThisMonth;
+      if (!["assigned", "care_active"].includes(caseData.status)) throw new Error("CASO_NAO_LIBERADO_PARA_AGENDAMENTO");
+      if (scheduleLocks.some(lock => lock.exists && Number(lock.data()?.expiresAt || 0) > Date.now())) throw new Error("HORARIO_INDISPONIVEL");
+      if (programData.maxSessionsPerStudent && activeForStudent >= Number(programData.maxSessionsPerStudent)) throw new Error("LIMITE_DE_SESSOES_DO_ALUNO_ATINGIDO");
+      if (programData.maxMonthlySessions && activeForMonth >= Number(programData.maxMonthlySessions)) throw new Error("LIMITE_MENSAL_DO_CONTRATO_ATINGIDO");
+      tx.set(sessionRef, sessionDocument);
+      scheduleLockRefs.forEach(ref => tx.set(ref, {
+        therapistUid: actor.uid,
+        sessionId,
+        scheduledAt,
+        expiresAt: scheduledEnd,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }));
+      tx.set(bundle.caseRef, {
+        status: "care_active",
+        scheduledSessions: admin.firestore.FieldValue.increment(1),
+        nextSessionAt: scheduledAt,
+        lastScheduledAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(bundle.studentRef, { status: "care_active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(bundle.programSnap.ref, { totalSessions: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(usageRef, {
+        programId: bundle.student.programId,
+        month: usageMonth,
+        activeSessions: usage.exists ? admin.firestore.FieldValue.increment(1) : activeForMonth + 1,
+        totalScheduled: usage.exists ? admin.firestore.FieldValue.increment(1) : activeForMonth + 1,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    });
+  } catch (error) {
+    if (["CASO_NAO_LIBERADO_PARA_AGENDAMENTO", "HORARIO_INDISPONIVEL", "LIMITE_DE_SESSOES_DO_ALUNO_ATINGIDO", "LIMITE_MENSAL_DO_CONTRATO_ATINGIDO"].includes(error?.message)) {
+      return sendError(res, 409, error.message);
+    }
+    throw error;
+  }
+
+  let joinCode = null;
+  try { joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp }); }
+  catch (error) { logWarn("public_program_join_code_failed", { sessionId, error: error.message }); }
+  if (patientEmail) {
+    const cancelTokenInfo = buildCancelToken(sessionId);
+    const tpl = templateConfirmation({
+      patientName: bundle.student.nomeSocial || bundle.student.nome,
+      therapistName: therapist.displayName || "seu psicólogo",
+      scheduledAt,
+      joinUrl: buildPatientJoinUrl(joinCode || joinToken),
+      cancelUrl: buildPatientCancelUrl(cancelTokenInfo.token),
+      minCancelHours: THERAPY_MIN_CANCEL_HOURS_PATIENT
+    });
+    sendEmail({ to: patientEmail, replyTo: therapistEmail || undefined, ...tpl }).catch(error =>
+      logError("public_program_confirmation_email_failed", error, { sessionId, studentId })
+    );
+  }
+  await logStudentEvent({
+    studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+    type: "public_session_scheduled", actor, detail: { sessionId, scheduledAt }
+  });
+  await logAudit({ type: "public_program_session_created", sessionId, estudanteId: studentId, therapistUid: actor.uid });
+  getIo()?.to(actor.uid).emit("sessoes:changed");
+  return res.status(201).json({ ok: true, sessionId, scheduledAt, status: "scheduled" });
+}));
+
+router.post("/therapy/programa-publico/casos/:id/encaminhar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const studentId = String(req.params.id || "");
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!requireAssignedPsychologist(res, actor, bundle)) return;
+  if (!["referral_required", "assigned", "care_active", "referred_in_person", "referred_network"].includes(bundle.caseData?.status)) {
+    return sendError(res, 409, "STATUS_NAO_PERMITE_ENCAMINHAMENTO", { status: bundle.caseData?.status });
+  }
+  const referralType = ["in_person", "health_network", "protection_network", "emergency"].includes(req.body?.referralType) ? req.body.referralType : null;
+  const destination = publicProgram.cleanText(req.body?.destination, 240);
+  const reason = publicProgram.cleanMultiline(req.body?.reason, 2500);
+  const contact = publicProgram.cleanText(req.body?.contact, 240);
+  const confirmationStatus = ["pending", "sent", "received", "accepted"].includes(req.body?.confirmationStatus) ? req.body.confirmationStatus : "pending";
+  if (!referralType || !destination || !reason || !contact) return sendError(res, 400, "ENCAMINHAMENTO_INCOMPLETO");
+  const targetStatus = referralType === "in_person" || referralType === "emergency" ? "referred_in_person" : "referred_network";
+  const referralRef = getDb().collection("therapy_student_referrals").doc();
+  const batch = getDb().batch();
+  batch.set(referralRef, {
+    studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+    referralType, destination, reason, contact, confirmationStatus,
+    referredBy: actor.uid, referredByName: actor.therapist?.displayName || null,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  batch.set(bundle.caseRef, { status: targetStatus, lastReferralId: referralRef.id, lastReferralAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  batch.set(bundle.studentRef, { status: targetStatus, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({ studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId, type: "case_referred", actor, detail: { referralId: referralRef.id, referralType, destination, confirmationStatus } });
+  await logAudit({ type: "public_case_referred", estudanteId: studentId, therapistUid: actor.uid, referralType });
+  return res.status(201).json({ ok: true, referralId: referralRef.id, status: targetStatus });
+}));
+
+router.post("/therapy/programa-publico/casos/:id/encerrar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const studentId = String(req.params.id || "");
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!requireAssignedPsychologist(res, actor, bundle)) return;
+  if (!["assigned", "care_active", "referred_in_person", "referred_network"].includes(bundle.caseData?.status)) {
+    return sendError(res, 409, "STATUS_NAO_PERMITE_ENCERRAMENTO", { status: bundle.caseData?.status });
+  }
+  const reason = publicProgram.cleanMultiline(req.body?.reason, 2500);
+  const outcome = ["goals_met", "partial", "referred", "withdrawal", "lost_contact", "other"].includes(req.body?.outcome) ? req.body.outcome : null;
+  if (!reason || !outcome) return sendError(res, 400, "ENCERRAMENTO_INCOMPLETO");
+  const batch = getDb().batch();
+  batch.set(bundle.caseRef, {
+    status: "discharged", outcome, closeReason: reason,
+    closedAt: admin.firestore.FieldValue.serverTimestamp(), closedBy: actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  batch.set(bundle.studentRef, { status: "discharged", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({ studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId, type: "case_discharged", actor, detail: { outcome } });
+  await logAudit({ type: "public_case_discharged", estudanteId: studentId, therapistUid: actor.uid, outcome });
+  return res.json({ ok: true, status: "discharged" });
+}));
+
+router.get("/therapy/admin/programa-publico/programas/:id/indicadores", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyAdminTherapy(req, res);
+  if (!actor) return;
+  const programId = String(req.params.id || "");
+  const db = getDb();
+  const [programSnap, studentsSnap, casesSnap, sessionsSnap] = await Promise.all([
+    db.collection("therapy_public_programs").doc(programId).get(),
+    db.collection("therapy_estudantes").where("programId", "==", programId).limit(5000).get(),
+    db.collection("therapy_student_cases").where("programId", "==", programId).limit(5000).get(),
+    db.collection("therapy_sessions").where("publicProgramId", "==", programId).limit(5000).get()
+  ]);
+  if (!programSnap.exists) return sendError(res, 404, "PROGRAMA_NAO_ENCONTRADO");
+  const students = studentsSnap.docs.map(doc => doc.data());
+  const cases = casesSnap.docs.map(doc => doc.data());
+  const sessions = sessionsSnap.docs.map(doc => doc.data());
+  const countBy = (items, field) => items.reduce((acc, item) => { const key = item[field] || "unknown"; acc[key] = (acc[key] || 0) + 1; return acc; }, {});
+  const completed = sessions.filter(session => session.status === "completed");
+  const canceled = sessions.filter(session => session.status === "canceled");
+  const attendedStudentIds = new Set(completed.map(session => session.studentId).filter(Boolean));
+  return res.json({
+    ok: true,
+    program: { id: programSnap.id, name: programSnap.data().name, contractNumber: programSnap.data().contractNumber },
+    generatedAt: Date.now(),
+    totals: {
+      students: students.length,
+      consentConfirmed: students.filter(student => student.participationConsentStatus === "confirmed").length,
+      cases: cases.length,
+      sessions: sessions.length,
+      completedSessions: completed.length,
+      canceledSessions: canceled.length,
+      studentsAttended: attendedStudentIds.size
+    },
+    caseStatus: countBy(cases, "status"),
+    remoteViability: countBy(cases.filter(item => item.remoteViability), "remoteViability"),
+    schoolDistribution: students.reduce((acc, student) => { const key = student.schoolName || student.escola || "Não informada"; acc[key] = (acc[key] || 0) + 1; return acc; }, {})
+  });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
