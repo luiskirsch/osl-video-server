@@ -48,6 +48,14 @@ const smsService = require("../services/sms");
 const supportBot = require("../services/support-bot");
 const marketing = require("../services/marketing");
 const pushService = require("../services/push");
+const {
+  STUDENT_CONSENT_TTL_MS,
+  STUDENT_CONSENT_VERSION,
+  parseStudentBirthDate,
+  createStudentConsentToken,
+  hashStudentConsentToken,
+  escapeStudentEmailHtml
+} = require("../services/student-consent");
 const { withRetry } = require("../services/retry");
 const whisperSvc = require("../services/whisper");
 const sessionSummarySvc = require("../services/session-summary");
@@ -15560,34 +15568,72 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
 // Coleção: therapy_estudantes
 // ═════════════════════════════════════════════════════════════════════════
 
-function calcIdade(dataNascimento) {
-  if (!dataNascimento) return null;
-  const [ano, mes, dia] = String(dataNascimento).split("-").map(Number);
-  const hoje = new Date();
-  let idade = hoje.getFullYear() - ano;
-  if (hoje.getMonth() + 1 < mes || (hoje.getMonth() + 1 === mes && hoje.getDate() < dia)) idade--;
-  return idade;
+const publicStudentRegistrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde 1h e tente novamente." }
+});
+
+const publicStudentConsentLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde e tente novamente." }
+});
+
+async function findStudentByConsentToken(db, token) {
+  if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) return null;
+
+  let snap = await db.collection("therapy_estudantes")
+    .where("consentimentoTokenHash", "==", hashStudentConsentToken(token))
+    .limit(1).get();
+
+  // Compatibilidade temporária com convites emitidos antes da migração para
+  // hash. Eles também passam a respeitar a janela de 72h calculada a partir
+  // da criação do cadastro, evitando consentimentos indefinidamente válidos.
+  let legacy = false;
+  if (snap.empty) {
+    snap = await db.collection("therapy_estudantes")
+      .where("consentimentoToken", "==", token)
+      .limit(1).get();
+    legacy = !snap.empty;
+  }
+  if (snap.empty) return null;
+
+  const doc = snap.docs[0];
+  const data = doc.data();
+  const createdAt = data.createdAt?.toMillis?.() || 0;
+  const expiresAt = Number(data.consentimentoTokenExpiresAt)
+    || (legacy && createdAt ? createdAt + STUDENT_CONSENT_TTL_MS : 0);
+  if (!data.consentimentoParental && (!expiresAt || Date.now() > expiresAt)) {
+    return { doc, data, expired: true };
+  }
+  return { doc, data, expired: false };
 }
 
 // POST /public/aluno-cadastro — registro público (pais ou aluno maior)
-router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
+router.post("/public/aluno-cadastro", publicStudentRegistrationLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
   const {
     nome, dataNascimento, escola, turma, cidade, municipio, estado,
     email, telefone,
-    responsavelNome, responsavelEmail, responsavelTelefone, responsavelCpf,
+    responsavelNome, responsavelEmail, responsavelTelefone,
     consentimentoResponsavel
   } = req.body || {};
 
   if (!nome || String(nome).trim().length < 2) return sendError(res, 400, "NOME_OBRIGATORIO");
-  if (!dataNascimento) return sendError(res, 400, "DATA_NASCIMENTO_OBRIGATORIA");
+  const birth = parseStudentBirthDate(dataNascimento);
+  if (!birth) return sendError(res, 400, "DATA_NASCIMENTO_INVALIDA");
   if (!escola || String(escola).trim().length < 2) return sendError(res, 400, "ESCOLA_OBRIGATORIA");
   if (!cidade || String(cidade).trim().length < 1) return sendError(res, 400, "CIDADE_OBRIGATORIA");
   if (!estado || String(estado).trim().length !== 2) return sendError(res, 400, "ESTADO_OBRIGATORIO");
 
-  const idade = calcIdade(dataNascimento);
-  const isMenor = idade !== null && idade < 18;
+  const idade = birth.age;
+  const isMenor = idade < 18;
 
   if (isMenor) {
     if (!responsavelNome || String(responsavelNome).trim().length < 2) return sendError(res, 400, "RESPONSAVEL_NOME_OBRIGATORIO");
@@ -15600,11 +15646,11 @@ router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
   }
 
   const db = getDb();
-  const token = isMenor ? (Date.now().toString(36) + randomSuffix(20)) : null;
+  const consentInvite = isMenor ? createStudentConsentToken() : null;
 
   const doc = {
     nome: String(nome).trim(),
-    dataNascimento: String(dataNascimento).trim(),
+    dataNascimento: birth.normalized,
     idade: idade ?? null,
     isMenor,
     escola: String(escola).trim(),
@@ -15619,10 +15665,13 @@ router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
     responsavelNome: isMenor ? String(responsavelNome).trim() : null,
     responsavelEmail: isMenor ? String(responsavelEmail).trim().toLowerCase() : null,
     responsavelTelefone: isMenor ? String(responsavelTelefone).trim() : null,
-    responsavelCpf: responsavelCpf ? String(responsavelCpf).trim() : null,
-    consentimentoParental: !isMenor, // maiores já têm consentimento
-    consentimentoToken: token,
+    consentimentoParental: !isMenor,
+    consentimentoToken: null,
+    consentimentoTokenHash: consentInvite?.tokenHash || null,
+    consentimentoTokenExpiresAt: consentInvite?.expiresAt || null,
+    consentimentoVersion: isMenor ? null : STUDENT_CONSENT_VERSION,
     consentimentoAt: isMenor ? null : admin.firestore.FieldValue.serverTimestamp(),
+    declaracaoResponsavelNoCadastro: isMenor ? true : null,
     profissionalUid: null,
     status: isMenor ? "pendente-consentimento" : "ativo",
     createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -15633,21 +15682,25 @@ router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
   // E-mail de consentimento para responsável (menor)
   if (isMenor) {
     try {
-      const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${token}`;
+      const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${encodeURIComponent(consentInvite.token)}`;
+      const guardianName = escapeStudentEmailHtml(doc.responsavelNome);
+      const studentName = escapeStudentEmailHtml(doc.nome);
+      const schoolName = escapeStudentEmailHtml(doc.escola);
+      const className = escapeStudentEmailHtml(doc.turma || "—");
       await sendEmail({
         to: doc.responsavelEmail,
         subject: `Confirmação de consentimento — ${doc.nome} no Espaço Prelúdio`,
         html: `
-          <p>Olá, ${doc.responsavelNome}!</p>
-          <p>O cadastro de <strong>${doc.nome}</strong> no programa de saúde mental escolar do Espaço Prelúdio foi realizado.</p>
-          <p>Para ativar o acesso, confirme seu consentimento clicando no botão abaixo:</p>
+          <p>Olá, ${guardianName}!</p>
+          <p>Foi solicitado o cadastro de <strong>${studentName}</strong> no programa de saúde mental escolar do Espaço Prelúdio.</p>
+          <p>Abra a página abaixo para ler as informações e manifestar expressamente sua decisão. Abrir o link, sozinho, não confirma o consentimento.</p>
           <p style="margin:24px 0;">
             <a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">
-              Confirmar consentimento →
+              Revisar e decidir →
             </a>
           </p>
-          <p style="font-size:12px;color:#666;">Escola: ${doc.escola} · Turma: ${doc.turma || "—"} · ${doc.cidade}/${doc.estado}</p>
-          <p style="font-size:12px;color:#666;">Se não reconhece este cadastro, ignore este e-mail.</p>
+          <p style="font-size:12px;color:#666;">Escola: ${schoolName} · Turma: ${className} · ${escapeStudentEmailHtml(doc.cidade)}/${escapeStudentEmailHtml(doc.estado)}</p>
+          <p style="font-size:12px;color:#666;">O convite expira em 72 horas. Se não reconhece este cadastro, não confirme e avise o programa.</p>
         `
       });
     } catch (e) {
@@ -15658,31 +15711,71 @@ router.post("/public/aluno-cadastro", asyncHandler(async (req, res) => {
   return res.json({ ok: true, id: ref.id, isMenor, status: doc.status });
 }));
 
-// GET /public/aluno-consentimento/:token — confirma consentimento parental via link de e-mail
-router.get("/public/aluno-consentimento/:token", asyncHandler(async (req, res) => {
+// GET apenas valida o convite e devolve o contexto mínimo. Não altera estado:
+// scanners de e-mail e prefetch de navegador não podem consentir em nome do responsável.
+router.get("/public/aluno-consentimento/:token", publicStudentConsentLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const token = String(req.params.token || "").trim();
   if (!token) return sendError(res, 400, "TOKEN_INVALIDO");
 
   const db = getDb();
-  const snap = await db.collection("therapy_estudantes")
-    .where("consentimentoToken", "==", token)
-    .limit(1).get();
-
-  if (snap.empty) return sendError(res, 404, "TOKEN_NAO_ENCONTRADO");
-
-  const doc = snap.docs[0];
-  const data = doc.data();
+  const found = await findStudentByConsentToken(db, token);
+  if (!found) return sendError(res, 404, "TOKEN_NAO_ENCONTRADO");
+  if (found.expired) return sendError(res, 410, "TOKEN_EXPIRADO");
+  const { data } = found;
 
   if (data.consentimentoParental) {
     return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome });
   }
 
+  return res.json({
+    ok: true,
+    alreadyConfirmed: false,
+    nome: data.nome,
+    escola: data.escola,
+    consentimentoVersion: STUDENT_CONSENT_VERSION
+  });
+}));
+
+// POST registra a manifestação expressa depois que o responsável leu a tela.
+router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  if (req.body?.confirm !== true) return sendError(res, 400, "CONFIRMACAO_EXPLICITA_OBRIGATORIA");
+
+  const token = String(req.params.token || "").trim();
+  if (!token) return sendError(res, 400, "TOKEN_INVALIDO");
+
+  const db = getDb();
+  const found = await findStudentByConsentToken(db, token);
+  if (!found) return sendError(res, 404, "TOKEN_NAO_ENCONTRADO");
+  if (found.expired) return sendError(res, 410, "TOKEN_EXPIRADO");
+  const { doc, data } = found;
+
+  if (data.consentimentoParental) {
+    return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome });
+  }
+
+  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex") : null;
+
   await doc.ref.update({
     consentimentoParental: true,
     consentimentoAt: admin.firestore.FieldValue.serverTimestamp(),
+    consentimentoVersion: STUDENT_CONSENT_VERSION,
+    consentimentoIpHash: ipHash,
+    consentimentoUserAgent: String(req.headers["user-agent"] || "").slice(0, 300) || null,
+    consentimentoToken: null,
+    consentimentoTokenHash: null,
+    consentimentoTokenExpiresAt: null,
     status: "ativo",
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await logAudit({
+    type: "student_guardian_consent_confirmed",
+    estudanteId: doc.id,
+    consentimentoVersion: STUDENT_CONSENT_VERSION,
+    ipHash
   });
 
   return res.json({ ok: true, alreadyConfirmed: false, nome: data.nome, escola: data.escola });
@@ -15703,16 +15796,22 @@ router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler
   const data = snap.data();
   if (!data.isMenor || data.consentimentoParental) return sendError(res, 400, "CONSENTIMENTO_NAO_NECESSARIO");
 
-  const token = data.consentimentoToken || (Date.now().toString(36) + randomSuffix(20));
-  await ref.update({ consentimentoToken: token });
+  const consentInvite = createStudentConsentToken();
+  await ref.update({
+    consentimentoToken: null,
+    consentimentoTokenHash: consentInvite.tokenHash,
+    consentimentoTokenExpiresAt: consentInvite.expiresAt,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
 
-  const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${token}`;
+  const confirmUrl = `${THERAPY_FRONTEND_BASE}/aluno-consentimento.html?token=${encodeURIComponent(consentInvite.token)}`;
   await sendEmail({
     to: data.responsavelEmail,
     subject: `[Reenvio] Confirmação de consentimento — ${data.nome}`,
-    html: `<p>Olá, ${data.responsavelNome}!</p>
-      <p>Segue o link para confirmar o consentimento de <strong>${data.nome}</strong>:</p>
-      <p><a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Confirmar →</a></p>`
+    html: `<p>Olá, ${escapeStudentEmailHtml(data.responsavelNome)}!</p>
+      <p>Segue um novo convite para revisar e decidir sobre o cadastro de <strong>${escapeStudentEmailHtml(data.nome)}</strong>. Abrir o link não confirma o consentimento.</p>
+      <p><a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Revisar e decidir →</a></p>
+      <p style="font-size:12px;color:#666;">Este convite expira em 72 horas.</p>`
   });
 
   return res.json({ ok: true });
@@ -15810,18 +15909,25 @@ router.patch("/therapy/admin/estudantes/:id", asyncHandler(async (req, res) => {
   const id = String(req.params.id || "").trim();
   const db = getDb();
   const ref = db.collection("therapy_estudantes").doc(id);
-  if (!(await ref.get()).exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  const currentSnap = await ref.get();
+  if (!currentSnap.exists) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  const current = currentSnap.data();
+
+  if (req.body?.consentimentoParental !== undefined) {
+    return sendError(res, 400, "CONSENTIMENTO_NAO_PODE_SER_ALTERADO_PELO_ADMIN", {
+      hint: "O responsável legal deve manifestar a decisão pelo convite individual e auditável."
+    });
+  }
+  if (current.isMenor && req.body?.status === "ativo" && !current.consentimentoParental) {
+    return sendError(res, 400, "CONSENTIMENTO_PARENTAL_PENDENTE");
+  }
 
   const allowed = ["nome", "escola", "turma", "cidade", "municipio", "estado", "status",
                    "responsavelNome", "responsavelEmail", "responsavelTelefone",
-                   "email", "telefone", "profissionalUid", "consentimentoParental"];
+                   "email", "telefone", "profissionalUid"];
   const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
   for (const k of allowed) {
     if (req.body?.[k] !== undefined) updates[k] = req.body[k];
-  }
-  if (updates.consentimentoParental === true && !updates.consentimentoAt) {
-    updates.consentimentoAt = admin.firestore.FieldValue.serverTimestamp();
-    updates.status = "ativo";
   }
   await ref.update(updates);
   return res.json({ ok: true });

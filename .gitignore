@@ -6,6 +6,8 @@ node_modules
 *.log
 *.log.*
 .claude/
+.cdp-audit-profile/
+.codex-cdp-*.js
 local-pids.txt
 local-server.err.log
 local-tunnel.err.log
