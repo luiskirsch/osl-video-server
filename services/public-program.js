@@ -384,6 +384,15 @@ function createCaseCode() {
   return `EP-${new Date().getUTCFullYear()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
+function studentPortalAccessEmail(student) {
+  return String(student?.isMenor ? student?.responsavelEmail : student?.email || '').trim().toLowerCase();
+}
+
+function studentPortalParticipationIsActive(student) {
+  return student?.participationConsentStatus === 'confirmed'
+    && !['declined', 'consent_revoked'].includes(student?.status);
+}
+
 module.exports = {
   PROVIDER_REQUIRED_FIELDS,
   PROGRAM_STATUSES,
@@ -407,5 +416,7 @@ module.exports = {
   validateTriage,
   canTransitionCase,
   programIsOperational,
-  createCaseCode
+  createCaseCode,
+  studentPortalAccessEmail,
+  studentPortalParticipationIsActive
 };

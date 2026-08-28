@@ -13,7 +13,9 @@ const {
   validateTriage,
   canTransitionCase,
   programIsOperational,
-  dateInSaoPaulo
+  dateInSaoPaulo,
+  studentPortalAccessEmail,
+  studentPortalParticipationIsActive
 } = require('../services/public-program');
 
 test('convite escolar só confere com o código original', () => {
@@ -92,4 +94,15 @@ test('contrato exige contato do DPO público e escola exige etapas atendidas', (
   assert.ok(program.missing.includes('publicDpoEmail'));
   const school = validateSchool({ name: 'Escola', educationStages: [] });
   assert.ok(school.missing.includes('educationStages'));
+});
+
+test('portal municipal usa responsável para menor e o próprio aluno para maior', () => {
+  assert.equal(studentPortalAccessEmail({ isMenor: true, responsavelEmail: 'RESPONSAVEL@EXEMPLO.COM', studentEmail: 'aluno@escola.edu.br' }), 'responsavel@exemplo.com');
+  assert.equal(studentPortalAccessEmail({ isMenor: false, email: 'ALUNO@EXEMPLO.COM' }), 'aluno@exemplo.com');
+});
+
+test('portal municipal só libera participação confirmada e ativa', () => {
+  assert.equal(studentPortalParticipationIsActive({ participationConsentStatus: 'confirmed', status: 'care_active' }), true);
+  assert.equal(studentPortalParticipationIsActive({ participationConsentStatus: 'pending', status: 'pending_guardian_consent' }), false);
+  assert.equal(studentPortalParticipationIsActive({ participationConsentStatus: 'confirmed', status: 'consent_revoked' }), false);
 });

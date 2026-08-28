@@ -16020,6 +16020,14 @@ const publicStudentConsentLimiter = rateLimit({
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde e tente novamente." }
 });
 
+const studentPortalLinkLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas tentativas. Aguarde e tente novamente." }
+});
+
 function studentRegistrationFingerprint({ schoolId, schoolStudentCode, nome, dataNascimento }) {
   return crypto.createHmac("sha256", ACCESS_TOKEN_SECRET)
     .update(`${String(schoolId)}|${String(schoolStudentCode).trim().toLowerCase()}|${String(nome).trim().toLowerCase()}|${String(dataNascimento)}`)
@@ -16414,11 +16422,14 @@ router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, a
 
   try {
     const manageUrl = `${THERAPY_FRONTEND_BASE}/aluno-privacidade.html?token=${encodeURIComponent(managementToken)}`;
+    const portalUrl = `${THERAPY_FRONTEND_BASE}/aluno-login.html`;
     await sendEmail({
       to: data.isMenor ? data.responsavelEmail : data.email,
       subject: `Consentimento registrado — ${data.nome}`,
       html: `<p>Olá, ${escapeStudentEmailHtml(data.isMenor ? data.responsavelNome : data.nome)}.</p>
         <p>Sua autorização para a participação de <strong>${escapeStudentEmailHtml(data.nome)}</strong> foi registrada. O próximo passo é a triagem de viabilidade do atendimento remoto.</p>
+        <p>Crie seu acesso protegido usando este mesmo e-mail para acompanhar o programa e os próximos atendimentos:</p>
+        <p><a href="${portalUrl}">Acessar o Atendimento ao Aluno</a></p>
         <p>Você pode consultar a situação ou retirar a autorização de participação neste link individual:</p>
         <p><a href="${manageUrl}">Gerenciar participação e privacidade</a></p>
         <p style="font-size:12px;color:#666;">A retirada da autorização não elimina registros cuja guarda seja obrigatória e não impede o acesso aos serviços públicos disponíveis.</p>`
@@ -16530,6 +16541,125 @@ router.post("/public/aluno-privacidade/:token/revogar", publicStudentConsentLimi
   });
   await logAudit({ type: "student_participation_consent_revoked", estudanteId: doc.id });
   return res.json({ ok: true, status: "consent_revoked" });
+}));
+
+// ═════════════════════════════════════════════════════════════════════════
+// PORTAL DO ALUNO — conta Firebase vinculada ao cadastro escolar confirmado
+// Para menores, o acesso pertence ao e-mail do responsável. Para maiores,
+// pertence ao próprio e-mail informado no cadastro. O e-mail Firebase precisa
+// estar verificado antes do primeiro vínculo.
+// ═════════════════════════════════════════════════════════════════════════
+
+async function studentPortalPayload(studentDocs) {
+  const db = getDb();
+  const items = await Promise.all(studentDocs.map(async studentDoc => {
+    const student = studentDoc.data();
+    const [caseSnap, sessionsSnap] = await Promise.all([
+      db.collection("therapy_student_cases").doc(studentDoc.id).get(),
+      db.collection("therapy_sessions").where("studentId", "==", studentDoc.id).limit(100).get()
+    ]);
+    const caseData = caseSnap.exists ? caseSnap.data() : {};
+    const sessions = sessionsSnap.docs.map(sessionDoc => {
+      const session = sessionDoc.data();
+      return {
+        id: sessionDoc.id,
+        scheduledAt: publicProgramMillis(session.scheduledAt),
+        durationMinutes: Number(session.durationMinutes || 50),
+        status: session.status || "scheduled",
+        therapistName: session.therapistDisplayName || caseData.assignedTherapistName || null
+      };
+    }).sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
+    return {
+      id: studentDoc.id,
+      name: student.nomeSocial || student.nome || "Aluno(a)",
+      caseCode: student.caseCode || null,
+      programName: student.programName || null,
+      contractingAuthorityName: student.contractingAuthorityName || null,
+      schoolName: student.schoolName || student.escola || null,
+      status: caseData.status || student.status || null,
+      participationConsentStatus: student.participationConsentStatus || null,
+      therapistName: caseData.assignedTherapistName || null,
+      nextSessionAt: publicProgramMillis(caseData.nextSessionAt),
+      sessions
+    };
+  }));
+  return { ok: true, items };
+}
+
+router.post("/therapy/aluno/vincular", studentPortalLinkLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const user = await admin.auth().getUser(uid);
+  const email = String(user.email || "").trim().toLowerCase();
+  if (!email) return sendError(res, 400, "CONTA_SEM_EMAIL");
+  if (!user.emailVerified) return sendError(res, 403, "EMAIL_NAO_VERIFICADO");
+
+  const db = getDb();
+  const [guardianSnap, adultSnap] = await Promise.all([
+    db.collection("therapy_estudantes").where("responsavelEmail", "==", email).limit(20).get(),
+    db.collection("therapy_estudantes").where("email", "==", email).limit(20).get()
+  ]);
+  const candidates = [...new Map([...guardianSnap.docs, ...adultSnap.docs].map(doc => [doc.id, doc])).values()];
+  if (!candidates.length) return sendError(res, 404, "CADASTRO_DE_ALUNO_NAO_ENCONTRADO");
+
+  const active = candidates.filter(doc => publicProgram.studentPortalParticipationIsActive(doc.data()));
+  if (!active.length) {
+    const pending = candidates.some(doc => doc.data()?.participationConsentStatus === "pending");
+    return sendError(res, pending ? 409 : 403, pending ? "CONSENTIMENTO_AINDA_PENDENTE" : "PARTICIPACAO_NAO_ATIVA");
+  }
+
+  const linked = [];
+  let conflict = false;
+  for (const candidate of active) {
+    const didLink = await db.runTransaction(async tx => {
+      const fresh = await tx.get(candidate.ref);
+      if (!fresh.exists) return false;
+      const student = fresh.data();
+      if (!publicProgram.studentPortalParticipationIsActive(student) || publicProgram.studentPortalAccessEmail(student) !== email) return false;
+      if (student.portalAccountUid && student.portalAccountUid !== uid) return "conflict";
+      tx.set(candidate.ref, {
+        portalAccountUid: uid,
+        portalAccountEmail: email,
+        portalLinkedAt: student.portalAccountUid ? (student.portalLinkedAt || admin.firestore.FieldValue.serverTimestamp()) : admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      return true;
+    });
+    if (didLink === "conflict") conflict = true;
+    if (didLink === true) linked.push(candidate);
+  }
+
+  if (!linked.length) return sendError(res, conflict ? 409 : 403, conflict ? "CONTA_DE_ALUNO_JA_VINCULADA" : "ACESSO_DO_ALUNO_NAO_AUTORIZADO");
+  await Promise.all(linked.map(doc => logStudentEvent({
+    studentId: doc.id,
+    caseId: doc.id,
+    programId: doc.data().programId || null,
+    schoolId: doc.data().schoolId || null,
+    type: "student_portal_account_linked",
+    actor: { uid, email, role: doc.data().isMenor ? "guardian" : "student" }
+  })));
+  return res.json(await studentPortalPayload(linked));
+}));
+
+router.get("/therapy/aluno/me", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const user = await admin.auth().getUser(uid);
+  const email = String(user.email || "").trim().toLowerCase();
+  if (!email || !user.emailVerified) return sendError(res, 403, "EMAIL_NAO_VERIFICADO");
+  const snap = await getDb().collection("therapy_estudantes").where("portalAccountUid", "==", uid).limit(20).get();
+  if (snap.empty) return sendError(res, 404, "CONTA_DE_ALUNO_NAO_VINCULADA");
+  const active = snap.docs.filter(doc => {
+    const student = doc.data();
+    return publicProgram.studentPortalParticipationIsActive(student)
+      && publicProgram.studentPortalAccessEmail(student) === email
+      && String(student.portalAccountEmail || "").trim().toLowerCase() === email;
+  });
+  if (!active.length) return sendError(res, 403, "PARTICIPACAO_NAO_ATIVA");
+  return res.json(await studentPortalPayload(active));
 }));
 
 // POST /therapy/admin/estudantes/:id/reenviar-consentimento — reenvia e-mail
