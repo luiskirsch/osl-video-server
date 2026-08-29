@@ -30,6 +30,12 @@ const publicSlug = "programa-aurora-demo-2026";
 const registrationCode = crypto.randomBytes(24).toString("base64url");
 const hashCode = value => crypto.createHash("sha256").update(value).digest("hex");
 const now = FieldValue.serverTimestamp();
+const demoDate = daysAgo => {
+  const date = new Date(Date.now() - daysAgo * 86400000);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" })
+    .formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
 
 async function refuseRealDocument(ref, label) {
   const snap = await ref.get();
@@ -147,6 +153,20 @@ async function main() {
     studentId: IDS.student, caseId: IDS.student, programId: IDS.program, schoolId: IDS.school, type: "demo_journey_reset",
     actorUid: user.uid, actorEmail: operatorEmail, actorRole: "demo_operator", detail: { syntheticData: true, clinicalUseAllowed: false }, createdAt: now
   });
+  const learningRef = db.collection("therapy_student_learning").doc(`${user.uid}_${IDS.student}`);
+  const demoLearning = [
+    ["course_emotional_literacy", "course", 80, 3], ["course_focus_learning", "course", 80, 2], ["course_digital_balance", "course", 70, 1],
+    ["breathe_60", "practice", 10, 0], ["focus_5", "practice", 15, 0], ["gratitude_3", "practice", 10, 0],
+    ["breathe_60", "practice", 10, 1], ["focus_5", "practice", 15, 1], ["emotion_checkin", "practice", 10, 1],
+    ["breathe_60", "practice", 10, 2], ["active_pause", "practice", 10, 2], ["kindness_mission", "mission", 20, 2],
+    ["focus_5", "practice", 15, 3], ["gratitude_3", "practice", 10, 3]
+  ];
+  batch.set(learningRef, { uid: user.uid, studentId: IDS.student, programId: IDS.program, schoolId: IDS.school, syntheticData: true, updatedAt: now });
+  for (const [activityId, kind, points, daysAgo] of demoLearning) {
+    const completionDate = demoDate(daysAgo);
+    const completionId = kind === "course" ? activityId : `${activityId}_${completionDate}`;
+    batch.set(learningRef.collection("completions").doc(completionId), { activityId, kind, points, completionDate, completedAt: now, syntheticData: true });
+  }
   await batch.commit();
   const frontendBase = "https://espacopreludio.com.br";
   const registrationUrl = `${frontendBase}/aluno-cadastro.html?programa=${encodeURIComponent(publicSlug)}&escola=${encodeURIComponent(IDS.school)}&convite=${encodeURIComponent(registrationCode)}`;

@@ -57,6 +57,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
+const studentDevelopment = require("../services/student-development");
 const { withRetry } = require("../services/retry");
 const whisperSvc = require("../services/whisper");
 const sessionSummarySvc = require("../services/session-summary");
@@ -16685,6 +16686,106 @@ router.get("/therapy/aluno/me", asyncHandler(async (req, res) => {
   });
   if (!active.length) return sendError(res, 403, "PARTICIPACAO_NAO_ATIVA");
   return res.json(await studentPortalPayload(active));
+}));
+
+async function loadOwnedStudentForDevelopment(req, res, studentId) {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return null;
+  const user = await admin.auth().getUser(uid);
+  const email = String(user.email || "").trim().toLowerCase();
+  if (!email || !user.emailVerified) {
+    sendError(res, 403, "EMAIL_NAO_VERIFICADO");
+    return null;
+  }
+  const studentSnap = await getDb().collection("therapy_estudantes").doc(studentId).get();
+  if (!studentSnap.exists) {
+    sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+    return null;
+  }
+  const student = studentSnap.data();
+  const ownsRecord = student.portalAccountUid === uid
+    && String(student.portalAccountEmail || "").trim().toLowerCase() === email
+    && publicProgram.studentPortalAccessEmail(student) === email
+    && publicProgram.studentPortalParticipationIsActive(student);
+  if (!ownsRecord) {
+    sendError(res, 403, "ACESSO_DO_ALUNO_NAO_AUTORIZADO");
+    return null;
+  }
+  return { uid, email, studentSnap, student };
+}
+
+function studentLearningProfileId(uid, studentId) {
+  return `${uid}_${studentId}`.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 240);
+}
+
+async function studentDevelopmentPayload(uid, studentId) {
+  const profileRef = getDb().collection("therapy_student_learning").doc(studentLearningProfileId(uid, studentId));
+  const completions = await profileRef.collection("completions").limit(500).get();
+  const entries = completions.docs.map(doc => {
+    const item = doc.data();
+    return {
+      id: doc.id,
+      activityId: item.activityId,
+      kind: item.kind,
+      points: item.points,
+      completionDate: item.completionDate,
+      completedAt: publicProgramMillis(item.completedAt)
+    };
+  }).sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+  const today = publicProgram.dateInSaoPaulo();
+  return { ...studentDevelopment.summarize(entries, today), today, recent: entries.slice(0, 12) };
+}
+
+router.get("/therapy/aluno/desenvolvimento/:studentId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const studentId = String(req.params.studentId || "").trim();
+  const actor = await loadOwnedStudentForDevelopment(req, res, studentId);
+  if (!actor) return;
+  return res.json({ ok: true, studentId, progress: await studentDevelopmentPayload(actor.uid, studentId) });
+}));
+
+router.post("/therapy/aluno/desenvolvimento/:studentId/concluir", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const studentId = String(req.params.studentId || "").trim();
+  const actor = await loadOwnedStudentForDevelopment(req, res, studentId);
+  if (!actor) return;
+  const activityId = String(req.body?.activityId || "").trim();
+  const activity = studentDevelopment.getItem(activityId);
+  if (!activity) return sendError(res, 400, "ATIVIDADE_DESCONHECIDA");
+  const completionDate = publicProgram.dateInSaoPaulo();
+  const entryId = studentDevelopment.entryIdFor(activityId, completionDate);
+  const profileRef = getDb().collection("therapy_student_learning").doc(studentLearningProfileId(actor.uid, studentId));
+  const completionRef = profileRef.collection("completions").doc(entryId);
+  let alreadyCompleted = false;
+  await getDb().runTransaction(async tx => {
+    const existing = await tx.get(completionRef);
+    if (existing.exists) {
+      alreadyCompleted = true;
+      return;
+    }
+    tx.set(completionRef, {
+      activityId,
+      kind: activity.kind,
+      points: activity.points,
+      completionDate,
+      completedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    tx.set(profileRef, {
+      uid: actor.uid,
+      studentId,
+      programId: actor.student.programId || null,
+      schoolId: actor.student.schoolId || null,
+      lastActivityId: activityId,
+      lastActivityAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+  return res.json({
+    ok: true,
+    alreadyCompleted,
+    awardedPoints: alreadyCompleted ? 0 : activity.points,
+    progress: await studentDevelopmentPayload(actor.uid, studentId)
+  });
 }));
 
 // POST /therapy/admin/estudantes/:id/reenviar-consentimento — reenvia e-mail
