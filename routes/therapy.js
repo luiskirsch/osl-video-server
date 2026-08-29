@@ -16566,7 +16566,9 @@ async function studentPortalPayload(studentDocs) {
         scheduledAt: publicProgramMillis(session.scheduledAt),
         durationMinutes: Number(session.durationMinutes || 50),
         status: session.status || "scheduled",
-        therapistName: session.therapistDisplayName || caseData.assignedTherapistName || null
+        therapistName: session.therapistDisplayName || caseData.assignedTherapistName || null,
+        demo: session.syntheticData === true,
+        clinicalUseAllowed: session.clinicalUseAllowed !== false
       };
     }).sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
     return {
@@ -16580,6 +16582,8 @@ async function studentPortalPayload(studentDocs) {
       participationConsentStatus: student.participationConsentStatus || null,
       therapistName: caseData.assignedTherapistName || null,
       nextSessionAt: publicProgramMillis(caseData.nextSessionAt),
+      demo: student.syntheticData === true && caseData.syntheticData === true,
+      clinicalUseAllowed: student.clinicalUseAllowed !== false && caseData.clinicalUseAllowed !== false,
       sessions
     };
   }));
@@ -16704,6 +16708,8 @@ function serializeStudentForStaff(doc) {
   return {
     ...(doc.id ? { id: doc.id } : {}),
     schemaVersion: e.schemaVersion || 1,
+    syntheticData: e.syntheticData === true,
+    clinicalUseAllowed: e.clinicalUseAllowed !== false,
     programId: e.programId || null,
     programName: e.programName || null,
     contractNumber: e.contractNumber || null,
@@ -16916,7 +16922,27 @@ function actorCanAccessPublicCase(actor, bundle) {
     && bundle.program.therapistUids.includes(actor.uid);
 }
 
+function isSyntheticPublicProgramDemo(bundle) {
+  return bundle?.program?.demoMode === true
+    && bundle?.program?.syntheticData === true
+    && bundle?.program?.clinicalUseAllowed === false
+    && bundle?.student?.syntheticData === true
+    && bundle?.student?.clinicalUseAllowed === false
+    && bundle?.caseData?.syntheticData === true
+    && bundle?.caseData?.clinicalUseAllowed === false;
+}
+
+function actorCanOperateSyntheticDemo(actor, bundle) {
+  return actor?.isAdmin === true
+    && actor?.therapist?.demoProgramOperator === true
+    && isSyntheticPublicProgramDemo(bundle)
+    && bundle?.caseData?.assignedTherapistUid === actor.uid
+    && Array.isArray(bundle?.program?.therapistUids)
+    && bundle.program.therapistUids.includes(actor.uid);
+}
+
 function requireAssignedPsychologist(res, actor, bundle) {
+  if (actorCanOperateSyntheticDemo(actor, bundle)) return true;
   if (!actor?.isPsychologist) {
     sendError(res, 403, "ATO_CLINICO_EXIGE_PSICOLOGO_HABILITADO");
     return false;
@@ -17032,6 +17058,8 @@ router.get("/therapy/programa-publico/casos", asyncHandler(async (req, res) => {
       completedSessions: caseData.completedSessions || 0,
       nextSessionAt: publicProgramMillis(caseData.nextSessionAt),
       updatedAt: publicProgramMillis(caseData.updatedAt),
+      syntheticData: caseData.syntheticData === true,
+      clinicalUseAllowed: caseData.clinicalUseAllowed !== false,
       student
     });
   }
@@ -17050,6 +17078,8 @@ router.get("/therapy/programa-publico/casos/:id", asyncHandler(async (req, res) 
     ok: true,
     student: serializeStudentForStaff({ id: bundle.studentRef.id, data: () => bundle.student }),
     case: bundle.caseData ? serializePublicProgramDoc(bundle.caseData) : null,
+    demo: isSyntheticPublicProgramDemo(bundle),
+    demoOperator: actorCanOperateSyntheticDemo(actor, bundle),
     program: bundle.program ? {
       id: bundle.programSnap.id,
       name: bundle.program.name,
@@ -17064,6 +17094,42 @@ router.get("/therapy/programa-publico/casos/:id", asyncHandler(async (req, res) 
     } : null,
     school: bundle.school ? { id: bundle.schoolSnap.id, name: bundle.school.name, healthReferenceName: bundle.school.healthReferenceName, healthReferencePhone: bundle.school.healthReferencePhone } : null
   });
+}));
+
+router.post("/therapy/programa-publico/casos/:id/iniciar-triagem", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const actor = await verifyPublicProgramActor(req, res);
+  if (!actor) return;
+  const studentId = String(req.params.id || "").trim();
+  const bundle = await loadPublicStudentBundle(studentId);
+  if (!bundle) return sendError(res, 404, "ESTUDANTE_NAO_ENCONTRADO");
+  if (!requireAssignedPsychologist(res, actor, bundle)) return;
+  if (bundle.student.participationConsentStatus !== "confirmed") return sendError(res, 409, "CONSENTIMENTO_NAO_CONFIRMADO");
+  if (!publicProgram.programIsOperational(bundle.program)) return sendError(res, 409, "PROGRAMA_FORA_DE_VIGENCIA");
+  if (bundle.caseData?.status !== "pending_triage") {
+    return sendError(res, 409, "STATUS_NAO_PERMITE_INICIAR_TRIAGEM", { status: bundle.caseData?.status });
+  }
+  const demo = isSyntheticPublicProgramDemo(bundle);
+  const batch = getDb().batch();
+  batch.set(bundle.caseRef, {
+    status: "triage_in_progress",
+    triageStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+    triageStartedBy: actor.uid,
+    triageMode: demo ? "synthetic_demo" : "clinical",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  batch.set(bundle.studentRef, {
+    status: "triage_in_progress",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await batch.commit();
+  await logStudentEvent({
+    studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+    type: demo ? "demo_triage_started" : "clinical_triage_started", actor,
+    detail: { demo }
+  });
+  await logAudit({ type: demo ? "public_demo_triage_started" : "public_case_triage_started", estudanteId: studentId, actorUid: actor.uid });
+  return res.json({ ok: true, status: "triage_in_progress", demo });
 }));
 
 router.post("/therapy/programa-publico/casos/:id/triagem", asyncHandler(async (req, res) => {
@@ -17097,8 +17163,13 @@ router.post("/therapy/programa-publico/casos/:id/triagem", asyncHandler(async (r
     status: targetStatus,
     triageCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
     triageCompletedBy: actor.uid,
-    triageProfessionalName: actor.therapist?.displayName || null,
-    triageCrp: actor.therapist?.numeroConselho || actor.therapist?.crp || null,
+    triageProfessionalName: actorCanOperateSyntheticDemo(actor, bundle)
+      ? "Operador de demonstração"
+      : (actor.therapist?.displayName || null),
+    triageCrp: actorCanOperateSyntheticDemo(actor, bundle)
+      ? null
+      : (actor.therapist?.numeroConselho || actor.therapist?.crp || null),
+    syntheticDemoOperation: actorCanOperateSyntheticDemo(actor, bundle),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
   const batch = getDb().batch();
@@ -17138,6 +17209,53 @@ router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (r
   if (bundle.program.startDate && scheduledLocalDate < bundle.program.startDate) return sendError(res, 400, "HORARIO_FORA_DA_VIGENCIA_CONTRATUAL");
   if (bundle.program.endDate && scheduledLocalDate > bundle.program.endDate) return sendError(res, 400, "HORARIO_FORA_DA_VIGENCIA_CONTRATUAL");
   const db = getDb();
+  if (actorCanOperateSyntheticDemo(actor, bundle)) {
+    const sessionId = newId("demo_sess");
+    const sessionRef = db.collection("therapy_sessions").doc(sessionId);
+    const batch = db.batch();
+    batch.set(sessionRef, {
+      sessionId,
+      therapistUid: actor.uid,
+      therapistDisplayName: "Operador de demonstração",
+      therapistEmail: actor.email || null,
+      patientName: bundle.student.nomeSocial || bundle.student.nome,
+      patientId: null,
+      patientEmail: bundle.student.email || null,
+      studentId,
+      publicProgramCaseId: studentId,
+      publicProgramId: bundle.student.programId,
+      publicSchoolId: bundle.student.schoolId,
+      contractNumber: bundle.program.contractNumber,
+      fundingSource: "synthetic_demo",
+      paymentStatus: "not_applicable",
+      scheduledAt,
+      durationMinutes: bundle.program.sessionDurationMinutes || 50,
+      status: "scheduled",
+      syntheticData: true,
+      clinicalUseAllowed: false,
+      externalNotificationsSent: false,
+      videoRoomCreated: false,
+      demoNotice: "Sessão fictícia. Não gera atendimento, cobrança, mensagem ou sala de vídeo.",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    batch.set(bundle.caseRef, {
+      status: "care_active",
+      scheduledSessions: admin.firestore.FieldValue.increment(1),
+      nextSessionAt: scheduledAt,
+      lastScheduledAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    batch.set(bundle.studentRef, { status: "care_active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    batch.set(bundle.programSnap.ref, { totalSessions: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await batch.commit();
+    await logStudentEvent({
+      studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
+      type: "demo_session_scheduled", actor, detail: { sessionId, scheduledAt, externalNotificationsSent: false }
+    });
+    await logAudit({ type: "public_demo_session_created", sessionId, estudanteId: studentId, actorUid: actor.uid });
+    return res.status(201).json({ ok: true, sessionId, scheduledAt, status: "scheduled", demo: true });
+  }
   const [studentSessions, programSessions, therapistSessions, blackouts, pendingRequests] = await Promise.all([
     db.collection("therapy_sessions").where("studentId", "==", studentId).limit(500).get(),
     db.collection("therapy_sessions").where("publicProgramId", "==", bundle.student.programId).limit(5000).get(),
