@@ -148,10 +148,11 @@ async function main() {
     actorUid: user.uid, actorEmail: operatorEmail, actorRole: "demo_operator", detail: { syntheticData: true, clinicalUseAllowed: false }, createdAt: now
   });
   await batch.commit();
-  const registrationUrl = `https://luiskirsch.github.io/aluno-cadastro.html?programa=${encodeURIComponent(publicSlug)}&escola=${encodeURIComponent(IDS.school)}&convite=${encodeURIComponent(registrationCode)}`;
+  const frontendBase = "https://espacopreludio.com.br";
+  const registrationUrl = `${frontendBase}/aluno-cadastro.html?programa=${encodeURIComponent(publicSlug)}&escola=${encodeURIComponent(IDS.school)}&convite=${encodeURIComponent(registrationCode)}`;
   console.log(JSON.stringify({ ok: true, operatorEmail, operatorUid: user.uid, ids: IDS, registrationCode, registrationUrl,
-    studentPortalUrl: "https://luiskirsch.github.io/aluno-painel.html",
-    adminStudentsUrl: `https://luiskirsch.github.io/admin-estudantes.html`,
-    casesUrl: `https://luiskirsch.github.io/casos-publicos.html?id=${IDS.student}` }, null, 2));
+    studentPortalUrl: `${frontendBase}/aluno-painel.html`,
+    adminStudentsUrl: `${frontendBase}/admin-estudantes.html`,
+    casesUrl: `${frontendBase}/casos-publicos.html?id=${IDS.student}` }, null, 2));
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
