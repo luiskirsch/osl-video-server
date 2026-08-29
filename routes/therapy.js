@@ -16122,6 +16122,11 @@ router.post("/public/aluno-cadastro", publicStudentRegistrationLimiter, asyncHan
     || (program.maxAge !== null && program.maxAge !== undefined && idade > Number(program.maxAge))) {
     return sendError(res, 400, "IDADE_FORA_DO_ESCOPO_DO_PROGRAMA");
   }
+  const syntheticDemo = program.demoMode === true
+    && program.syntheticData === true
+    && program.clinicalUseAllowed === false
+    && school.syntheticData === true
+    && school.clinicalUseAllowed === false;
 
   // A marcação no cadastro é apenas um pedido de participação. Menores e
   // maiores concluem o consentimento e os dados de segurança em etapa própria.
@@ -16135,6 +16140,9 @@ router.post("/public/aluno-cadastro", publicStudentRegistrationLimiter, asyncHan
 
   const doc = {
     schemaVersion: 2,
+    syntheticData: syntheticDemo,
+    demoMode: syntheticDemo,
+    clinicalUseAllowed: !syntheticDemo,
     programId: programDoc.id,
     programName: program.name,
     programSlug: program.publicSlug,
@@ -16330,6 +16338,9 @@ router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, a
       }, { merge: true });
       tx.set(db.collection("therapy_student_cases").doc(doc.id), {
         schemaVersion: 1,
+        syntheticData: data.syntheticData === true,
+        demoMode: data.demoMode === true,
+        clinicalUseAllowed: data.clinicalUseAllowed !== false,
         studentId: doc.id,
         caseCode: data.caseCode || publicProgram.createCaseCode(),
         programId: data.programId || null,
@@ -16402,6 +16413,9 @@ router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, a
     }, { merge: true });
     tx.set(db.collection("therapy_student_cases").doc(doc.id), {
       schemaVersion: 1,
+      syntheticData: data.syntheticData === true,
+      demoMode: data.demoMode === true,
+      clinicalUseAllowed: data.clinicalUseAllowed !== false,
       studentId: doc.id,
       caseCode: data.caseCode || publicProgram.createCaseCode(),
       programId: data.programId || null,
