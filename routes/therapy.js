@@ -15695,6 +15695,13 @@ async function verifyPublicProgramActor(req, res, { allowAdmin = true } = {}) {
       therapist: therapistData
     };
   }
+  if (therapistData?.demoProgramOperator === true) {
+    return {
+      uid, email, role: "demo_operator", isAdmin: false,
+      isPsychologist: false,
+      therapist: therapistData
+    };
+  }
   if (!isVerifiedPsychologist) {
     sendError(res, 403, "PROFISSIONAL_NAO_HABILITADO");
     return null;
@@ -16916,6 +16923,7 @@ async function loadPublicStudentBundle(studentId) {
 
 function actorCanAccessPublicCase(actor, bundle) {
   if (actor?.isAdmin) return true;
+  if (actor?.role === "demo_operator") return actorCanOperateSyntheticDemo(actor, bundle);
   if (!actor?.isPsychologist || !bundle?.caseData) return false;
   return bundle.caseData.assignedTherapistUid === actor.uid
     && Array.isArray(bundle.program?.therapistUids)
@@ -16933,7 +16941,7 @@ function isSyntheticPublicProgramDemo(bundle) {
 }
 
 function actorCanOperateSyntheticDemo(actor, bundle) {
-  return actor?.isAdmin === true
+  return (actor?.isAdmin === true || actor?.role === "demo_operator")
     && actor?.therapist?.demoProgramOperator === true
     && isSyntheticPublicProgramDemo(bundle)
     && bundle?.caseData?.assignedTherapistUid === actor.uid
