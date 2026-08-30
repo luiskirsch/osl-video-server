@@ -16752,6 +16752,9 @@ router.post("/therapy/aluno/desenvolvimento/:studentId/concluir", asyncHandler(a
   const activityId = String(req.body?.activityId || "").trim();
   const activity = studentDevelopment.getItem(activityId);
   if (!activity) return sendError(res, 400, "ATIVIDADE_DESCONHECIDA");
+  const answer = Number.isInteger(req.body?.answer) ? req.body.answer : null;
+  const validationError = studentDevelopment.completionValidationError(activityId, answer);
+  if (validationError) return sendError(res, 422, validationError);
   const completionDate = publicProgram.dateInSaoPaulo();
   const entryId = studentDevelopment.entryIdFor(activityId, completionDate);
   const profileRef = getDb().collection("therapy_student_learning").doc(studentLearningProfileId(actor.uid, studentId));
@@ -16767,6 +16770,7 @@ router.post("/therapy/aluno/desenvolvimento/:studentId/concluir", asyncHandler(a
       activityId,
       kind: activity.kind,
       points: activity.points,
+      ...(activity.kind === "course" ? { verifiedAnswer: answer } : {}),
       completionDate,
       completedAt: admin.firestore.FieldValue.serverTimestamp()
     });

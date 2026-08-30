@@ -5,12 +5,12 @@ const ITEMS = Object.freeze({
   gratitude_3: Object.freeze({ kind: "practice", points: 10, repeatable: true }),
   active_pause: Object.freeze({ kind: "practice", points: 10, repeatable: true }),
   kindness_mission: Object.freeze({ kind: "mission", points: 20, repeatable: true }),
-  course_emotional_literacy: Object.freeze({ kind: "course", points: 80, repeatable: false }),
-  course_focus_learning: Object.freeze({ kind: "course", points: 80, repeatable: false }),
-  course_first_aid_awareness: Object.freeze({ kind: "course", points: 100, repeatable: false }),
-  course_peer_support: Object.freeze({ kind: "course", points: 90, repeatable: false }),
-  course_digital_balance: Object.freeze({ kind: "course", points: 70, repeatable: false }),
-  course_citizenship: Object.freeze({ kind: "course", points: 70, repeatable: false })
+  course_emotional_literacy: Object.freeze({ kind: "course", points: 80, repeatable: false, correctAnswer: 1 }),
+  course_focus_learning: Object.freeze({ kind: "course", points: 80, repeatable: false, correctAnswer: 1 }),
+  course_first_aid_awareness: Object.freeze({ kind: "course", points: 100, repeatable: false, correctAnswer: 1 }),
+  course_peer_support: Object.freeze({ kind: "course", points: 90, repeatable: false, correctAnswer: 2 }),
+  course_digital_balance: Object.freeze({ kind: "course", points: 70, repeatable: false, correctAnswer: 1 }),
+  course_citizenship: Object.freeze({ kind: "course", points: 70, repeatable: false, correctAnswer: 1 })
 });
 
 function getItem(id) {
@@ -21,6 +21,14 @@ function entryIdFor(itemId, completionDate) {
   const item = getItem(itemId);
   if (!item) return null;
   return item.repeatable ? `${itemId}_${completionDate}` : itemId;
+}
+
+function completionValidationError(itemId, answer) {
+  const item = getItem(itemId);
+  if (!item) return "ATIVIDADE_DESCONHECIDA";
+  if (item.kind !== "course") return null;
+  if (!Number.isInteger(answer)) return "RESPOSTA_OBRIGATORIA";
+  return answer === item.correctAnswer ? null : "RESPOSTA_INCORRETA";
 }
 
 function previousDate(dateKey, days = 1) {
@@ -54,4 +62,4 @@ function summarize(entries, today) {
   };
 }
 
-module.exports = { ITEMS, getItem, entryIdFor, summarize };
+module.exports = { ITEMS, getItem, entryIdFor, completionValidationError, summarize };
