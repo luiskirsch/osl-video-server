@@ -69,3 +69,16 @@ Este módulo trata o Espaço Prelúdio como prestador privado de atendimento psi
 - `therapy_sessions` com `publicProgramId`, `publicSchoolId` e `studentId`
 
 Tokens de convite, consentimento e gestão são persistidos apenas como hash. Eventos clínicos e administrativos são registrados separadamente para rastreabilidade.
+
+## Demonstração integral para apresentação
+
+O cenário sintético pode percorrer o mesmo fluxo operacional até uma sala técnica de vídeo:
+
+`aluno fictício -> triagem demonstrativa -> aprovação remota -> agendamento -> portal do aluno -> sala de vídeo -> painel profissional -> encerramento`
+
+- Todos os documentos permanecem com `syntheticData=true` e `clinicalUseAllowed=false`.
+- A sala usa a infraestrutura real de videoconferência e E2EE, mas é identificada como demonstração e não constitui atendimento clínico.
+- O agendamento não envia e-mail, WhatsApp, cobrança ou comunicação para terceiros.
+- O portal do aluno recebe somente o código opaco da sessão pertencente à sua própria conta.
+- O apresentador abre o painel profissional em um navegador e a entrada do aluno em outro navegador, perfil anônimo ou dispositivo.
+- O encerramento atualiza o histórico e os indicadores do cenário sintético, permitindo demonstrar o ciclo completo.

@@ -5,7 +5,9 @@
  * - nunca substitui documentos reais nos IDs reservados da demonstração;
  * - todos os registros carregam syntheticData=true e clinicalUseAllowed=false;
  * - e-mails fictícios usam o domínio reservado .invalid;
- * - a conta informada vira apenas operadora da demonstração, nunca psicóloga verificada.
+ * - a conta do aluno e a conta profissional permanecem separadas;
+ * - a conta profissional vira operadora da demonstração, sem alterar sua habilitação;
+ * - a sala de vídeo é técnica e sintética: funciona para apresentação, mas nunca representa atendimento clínico.
  */
 require("dotenv").config();
 const crypto = require("crypto");
@@ -13,7 +15,8 @@ const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 
-const operatorEmail = String(process.argv[2] || "luishenriquekirsch@hotmail.com").trim().toLowerCase();
+const studentPortalEmail = String(process.argv[2] || "luishenriquekirsch@hotmail.com").trim().toLowerCase();
+const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@preludiojogos.com.br").trim().toLowerCase();
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "null");
 if (!sa) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não configurado.");
 if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
@@ -45,8 +48,15 @@ async function refuseRealDocument(ref, label) {
 }
 
 async function main() {
-  const user = await auth.getUserByEmail(operatorEmail);
-  if (!user.emailVerified) throw new Error("A conta operadora precisa ter o e-mail verificado.");
+  const [studentPortalUser, presenterUser] = await Promise.all([
+    auth.getUserByEmail(studentPortalEmail),
+    auth.getUserByEmail(presenterEmail)
+  ]);
+  if (!studentPortalUser.emailVerified) throw new Error("A conta do portal do aluno precisa ter o e-mail verificado.");
+  const therapistRef = db.collection("therapists").doc(presenterUser.uid);
+  const therapistSnap = await therapistRef.get();
+  if (!therapistSnap.exists) throw new Error("A conta de apresentação precisa possuir cadastro profissional.");
+  const presenterName = String(therapistSnap.data()?.displayName || presenterUser.displayName || "Luis Henrique — apresentação").trim();
   const providerRef = db.collection("therapy_public_provider").doc("demo_config");
   const liveProviderRef = db.collection("therapy_public_provider").doc("config");
   const programRef = db.collection("therapy_public_programs").doc(IDS.program);
@@ -104,8 +114,9 @@ async function main() {
     healthNetworkReference: "UBS Central de Aurora do Vale — referência fictícia — (48) 3333-0101",
     emergencyNetworkReference: "SAMU 192, emergência 190 e rede local pactuada — cenário demonstrativo",
     privacyNoticeVersion: "DEMO-1.0", consentTermVersion: "DEMO-1.0", assentTermVersion: "DEMO-1.0", clinicalProtocolVersion: "DEMO-1.0",
-    emergencyProtocolVersion: "DEMO-1.0", ripdReference: "RIPD-DEMO-001/2026", therapistUids: [user.uid], publicSlug,
+    emergencyProtocolVersion: "DEMO-1.0", ripdReference: "RIPD-DEMO-001/2026", therapistUids: [presenterUser.uid], publicSlug,
     status: "active", registrationOpen: true, aiEnabledForMinors: false, totalStudents: 1, totalSchools: 1, totalSessions: 0, demoProviderId: "demo_config",
+    demoTechnicalRoomEnabled: true,
     syntheticData: true, demoMode: true, clinicalUseAllowed: false, schemaVersion: 1, activatedAt: now, updatedAt: now
   });
 
@@ -132,28 +143,29 @@ async function main() {
   batch.set(studentRef, {
     ...common, nome: "Luis Henrique", nomeSocial: null, dataNascimento: "2007-04-15", idade: 19, isMenor: false,
     escola: "Escola Municipal Caminhos do Sol — DEMONSTRAÇÃO", anoSerie: "3º ano do Ensino Médio — turma fictícia", turma: "3º A", turno: "Matutino",
-    cidade: "Aurora do Vale", municipio: "Aurora do Vale", estado: "SC", email: operatorEmail, telefone: "(48) 99999-0404",
-    studentEmail: operatorEmail, preferredContactChannel: "email", emergencyContact: { name: "Contato de emergência fictício", relationship: "Familiar", phone: "(48) 99999-0505" },
+    cidade: "Aurora do Vale", municipio: "Aurora do Vale", estado: "SC", email: studentPortalEmail, telefone: "(48) 99999-0404",
+    studentEmail: studentPortalEmail, preferredContactChannel: "email", emergencyContact: { name: "Contato de emergência fictício", relationship: "Familiar", phone: "(48) 99999-0505" },
     residenceAddress: { street: "Rua da Jornada", number: "42", complement: "Casa fictícia", neighborhood: "Centro", city: "Aurora do Vale", state: "SC", postalCode: "88000-000" },
     accessibilityNeeds: "Nenhuma informada no cenário fictício", communicationNeeds: "Nenhuma informada no cenário fictício",
     consentimentoParental: true, participationConsentStatus: "confirmed", consentimentoVersion: "DEMO-1.0", privacyNoticeVersion: "DEMO-1.0",
     assentTermVersion: "DEMO-1.0", emergencyProtocolVersion: "DEMO-1.0", consentimentoAt: now,
-    portalAccountUid: user.uid, portalAccountEmail: operatorEmail, portalLinkedAt: now,
-    profissionalUid: user.uid, profissionalNome: "Operador de demonstração", status: "pending_triage", updatedAt: now
+    portalAccountUid: studentPortalUser.uid, portalAccountEmail: studentPortalEmail, portalLinkedAt: now,
+    profissionalUid: presenterUser.uid, profissionalNome: presenterName, status: "pending_triage", updatedAt: now
   });
   batch.set(caseRef, {
-    ...common, studentId: IDS.student, status: "pending_triage", assignedTherapistUid: user.uid,
-    assignedTherapistName: "Operador de demonstração", assignedAt: now, assignedBy: "seed_demo",
+    ...common, studentId: IDS.student, status: "pending_triage", assignedTherapistUid: presenterUser.uid,
+    assignedTherapistName: presenterName, assignedAt: now, assignedBy: "seed_demo",
     completedSessions: 0, scheduledSessions: 0, remoteViability: null, urgencyLevel: null, updatedAt: now
   });
-  batch.set(db.collection("therapists").doc(user.uid), {
+  batch.set(therapistRef, {
+    ...(!therapistSnap.data()?.displayName ? { displayName: presenterName } : {}),
     demoProgramOperator: true, demoProgramOperatorScope: [IDS.program], demoProgramOperatorEnabledAt: now, updatedAt: now
   }, { merge: true });
   batch.set(db.collection("therapy_student_events").doc(`demo_reset_${IDS.student}`), {
     studentId: IDS.student, caseId: IDS.student, programId: IDS.program, schoolId: IDS.school, type: "demo_journey_reset",
-    actorUid: user.uid, actorEmail: operatorEmail, actorRole: "demo_operator", detail: { syntheticData: true, clinicalUseAllowed: false }, createdAt: now
+    actorUid: presenterUser.uid, actorEmail: presenterEmail, actorRole: "demo_operator", detail: { syntheticData: true, clinicalUseAllowed: false }, createdAt: now
   });
-  const learningRef = db.collection("therapy_student_learning").doc(`${user.uid}_${IDS.student}`);
+  const learningRef = db.collection("therapy_student_learning").doc(`${studentPortalUser.uid}_${IDS.student}`);
   const demoLearning = [
     ["course_emotional_literacy", "course", 80, 3], ["course_focus_learning", "course", 80, 2], ["course_digital_balance", "course", 70, 1],
     ["breathe_60", "practice", 10, 0], ["focus_5", "practice", 15, 0], ["gratitude_3", "practice", 10, 0],
@@ -161,7 +173,7 @@ async function main() {
     ["breathe_60", "practice", 10, 2], ["active_pause", "practice", 10, 2], ["kindness_mission", "mission", 20, 2],
     ["focus_5", "practice", 15, 3], ["gratitude_3", "practice", 10, 3]
   ];
-  batch.set(learningRef, { uid: user.uid, studentId: IDS.student, programId: IDS.program, schoolId: IDS.school, syntheticData: true, updatedAt: now });
+  batch.set(learningRef, { uid: studentPortalUser.uid, studentId: IDS.student, programId: IDS.program, schoolId: IDS.school, syntheticData: true, updatedAt: now });
   for (const [activityId, kind, points, daysAgo] of demoLearning) {
     const completionDate = demoDate(daysAgo);
     const completionId = kind === "course" ? activityId : `${activityId}_${completionDate}`;
@@ -170,7 +182,7 @@ async function main() {
   await batch.commit();
   const frontendBase = "https://espacopreludio.com.br";
   const registrationUrl = `${frontendBase}/aluno-cadastro.html?programa=${encodeURIComponent(publicSlug)}&escola=${encodeURIComponent(IDS.school)}&convite=${encodeURIComponent(registrationCode)}`;
-  console.log(JSON.stringify({ ok: true, operatorEmail, operatorUid: user.uid, ids: IDS, registrationCode, registrationUrl,
+  console.log(JSON.stringify({ ok: true, studentPortalEmail, studentPortalUid: studentPortalUser.uid, presenterEmail, presenterUid: presenterUser.uid, presenterName, ids: IDS, registrationCode, registrationUrl,
     studentPortalUrl: `${frontendBase}/aluno-painel.html`,
     adminStudentsUrl: `${frontendBase}/admin-estudantes.html`,
     casesUrl: `${frontendBase}/casos-publicos.html?id=${IDS.student}` }, null, 2));

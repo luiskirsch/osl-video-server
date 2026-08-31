@@ -2006,6 +2006,13 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
   let joinCode = null;
   try {
     joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp });
+    if (joinCode && sess.studentId && sess.publicProgramCaseId) {
+      await ref.set({
+        studentJoinCode: joinCode,
+        studentJoinCodeExpiresAt: joinPayload.exp,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
   } catch (e) {
     logWarn("therapy_join_code_create_failed", { sessionId, error: e.message });
   }
@@ -2059,6 +2066,9 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         recurrenceGroupId: data.recurrenceGroupId || null,
         recurrenceIndex: typeof data.recurrenceIndex === "number" ? data.recurrenceIndex : null,
         recurrenceCount: data.recurrenceCount || null,
+        syntheticData: data.syntheticData === true,
+        demoTechnicalRoom: data.syntheticData === true && data.demoTechnicalRoom === true,
+        fundingSource: data.fundingSource || null,
         hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
@@ -2161,7 +2171,8 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     role: "therapist",
     e2eeKey: session.e2eeKey || null,
     e2eeSalt: therapist?.e2eeSalt || null,
-    aiSummaryReady
+    aiSummaryReady,
+    demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
 }));
 
@@ -2191,21 +2202,22 @@ router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
   const sessionSnap = await db.collection("therapy_sessions").doc(payload.sessionId).get();
   if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   const session = sessionSnap.data();
+  const demoTechnicalRoom = session.syntheticData === true && session.demoTechnicalRoom === true;
 
   // Sem scheduling request vinculado → sem cobrança (sessão criada manualmente)
   if (!session.schedulingRequestId) {
-    return res.json({ ok: true, paymentRequired: false });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
   }
 
   const reqSnap = await db.collection("therapy_scheduling_requests").doc(session.schedulingRequestId).get();
   if (!reqSnap.exists) {
-    return res.json({ ok: true, paymentRequired: false });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
   }
   const reqData = reqSnap.data();
 
   // Sem paymentId → profissional não tem PIX configurado (fluxo legado)
   if (!reqData.paymentId && reqData.paymentStatus !== "pending") {
-    return res.json({ ok: true, paymentRequired: false });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
   }
 
   const paid = reqData.paymentStatus === "paid";
@@ -2221,7 +2233,8 @@ router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
     requestId:       session.schedulingRequestId,
     therapistSlug:   reqData.therapistSlug || "",
     valor:           reqData.valorConsulta || 6000,
-    pixConfigured:   !!(therapist?.pixKey)
+    pixConfigured:   !!(therapist?.pixKey),
+    demoTechnicalRoom
   });
 }));
 
@@ -2326,7 +2339,8 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     e2eeKey: session.e2eeKey || null,
     therapistDisplayName: session.therapistDisplayName || "",
     sessionId: payload.sessionId,
-    patientAccountUid: patientAccountUid || null
+    patientAccountUid: patientAccountUid || null,
+    demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
 }));
 
@@ -16583,6 +16597,12 @@ async function studentPortalPayload(studentDocs) {
     const caseData = caseSnap.exists ? caseSnap.data() : {};
     const sessions = sessionsSnap.docs.map(sessionDoc => {
       const session = sessionDoc.data();
+      const joinCode = String(session.studentJoinCode || "").trim();
+      const joinCodeExpiresAt = Number(session.studentJoinCodeExpiresAt || session.joinTokenExp || 0);
+      const joinAvailable = !!joinCode
+        && !session.joinTokenConsumedAt
+        && !["completed", "canceled"].includes(session.status)
+        && (!joinCodeExpiresAt || joinCodeExpiresAt > Date.now());
       return {
         id: sessionDoc.id,
         scheduledAt: publicProgramMillis(session.scheduledAt),
@@ -16590,7 +16610,9 @@ async function studentPortalPayload(studentDocs) {
         status: session.status || "scheduled",
         therapistName: session.therapistDisplayName || caseData.assignedTherapistName || null,
         demo: session.syntheticData === true,
-        clinicalUseAllowed: session.clinicalUseAllowed !== false
+        clinicalUseAllowed: session.clinicalUseAllowed !== false,
+        joinAvailable,
+        joinCode: joinAvailable ? joinCode : null
       };
     }).sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
     return {
@@ -17291,7 +17313,7 @@ router.post("/therapy/programa-publico/casos/:id/triagem", asyncHandler(async (r
     triageCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
     triageCompletedBy: actor.uid,
     triageProfessionalName: actorCanOperateSyntheticDemo(actor, bundle)
-      ? "Operador de demonstração"
+      ? (actor.therapist?.displayName || "Apresentador do ambiente demonstrativo")
       : (actor.therapist?.displayName || null),
     triageCrp: actorCanOperateSyntheticDemo(actor, bundle)
       ? null
@@ -17338,12 +17360,24 @@ router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (r
   const db = getDb();
   if (actorCanOperateSyntheticDemo(actor, bundle)) {
     const sessionId = newId("demo_sess");
+    const room = `therapy_${sessionId}`;
+    const e2eeKey = crypto.randomBytes(32).toString("base64");
+    const joinPayload = {
+      token_type: "therapy_join",
+      sessionId,
+      therapistUid: actor.uid,
+      livekitRoom: room,
+      patientNameHint: bundle.student.nomeSocial || bundle.student.nome,
+      iat: Date.now(),
+      exp: Math.max(Date.now() + JOIN_TOKEN_VALIDITY_MS, scheduledAt + JOIN_TOKEN_VALIDITY_MS)
+    };
+    const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
     const sessionRef = db.collection("therapy_sessions").doc(sessionId);
     const batch = db.batch();
     batch.set(sessionRef, {
       sessionId,
       therapistUid: actor.uid,
-      therapistDisplayName: "Operador de demonstração",
+      therapistDisplayName: actor.therapist?.displayName || "Apresentador do ambiente demonstrativo",
       therapistEmail: actor.email || null,
       patientName: bundle.student.nomeSocial || bundle.student.nome,
       patientId: null,
@@ -17355,14 +17389,20 @@ router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (r
       contractNumber: bundle.program.contractNumber,
       fundingSource: "synthetic_demo",
       paymentStatus: "not_applicable",
+      consentAiSummary: false,
+      aiDisabledReason: "synthetic_public_program_demo",
+      livekitRoom: room,
+      e2eeKey,
       scheduledAt,
       durationMinutes: bundle.program.sessionDurationMinutes || 50,
       status: "scheduled",
+      joinTokenExp: joinPayload.exp,
       syntheticData: true,
       clinicalUseAllowed: false,
       externalNotificationsSent: false,
-      videoRoomCreated: false,
-      demoNotice: "Sessão fictícia. Não gera atendimento, cobrança, mensagem ou sala de vídeo.",
+      videoRoomCreated: true,
+      demoTechnicalRoom: true,
+      demoNotice: "Sala técnica fictícia para apresentação. Não constitui atendimento clínico, não gera cobrança e não envia mensagens externas.",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -17376,12 +17416,25 @@ router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (r
     batch.set(bundle.studentRef, { status: "care_active", updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     batch.set(bundle.programSnap.ref, { totalSessions: admin.firestore.FieldValue.increment(1), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     await batch.commit();
+    let joinCode = null;
+    try {
+      joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp });
+      await sessionRef.set({
+        studentJoinCode: joinCode,
+        studentJoinCodeExpiresAt: joinPayload.exp,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (error) {
+      logWarn("public_demo_join_code_failed", { sessionId, error: error.message });
+    }
     await logStudentEvent({
       studentId, caseId: studentId, programId: bundle.student.programId, schoolId: bundle.student.schoolId,
-      type: "demo_session_scheduled", actor, detail: { sessionId, scheduledAt, externalNotificationsSent: false }
+      type: "demo_session_scheduled", actor,
+      detail: { sessionId, scheduledAt, externalNotificationsSent: false, videoRoomCreated: true, joinCodeCreated: !!joinCode }
     });
     await logAudit({ type: "public_demo_session_created", sessionId, estudanteId: studentId, actorUid: actor.uid });
-    return res.status(201).json({ ok: true, sessionId, scheduledAt, status: "scheduled", demo: true });
+    getIo()?.to(actor.uid).emit("sessoes:changed");
+    return res.status(201).json({ ok: true, sessionId, scheduledAt, status: "scheduled", demo: true, videoRoomCreated: true, joinCode });
   }
   const [studentSessions, programSessions, therapistSessions, blackouts, pendingRequests] = await Promise.all([
     db.collection("therapy_sessions").where("studentId", "==", studentId).limit(500).get(),
@@ -17532,7 +17585,14 @@ router.post("/therapy/programa-publico/casos/:id/agendar", asyncHandler(async (r
   }
 
   let joinCode = null;
-  try { joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp }); }
+  try {
+    joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: joinPayload.exp });
+    await sessionRef.set({
+      studentJoinCode: joinCode,
+      studentJoinCodeExpiresAt: joinPayload.exp,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  }
   catch (error) { logWarn("public_program_join_code_failed", { sessionId, error: error.message }); }
   if (patientEmail) {
     const cancelTokenInfo = buildCancelToken(sessionId);
