@@ -2020,6 +2020,17 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
   return res.json({ ok: true, joinToken, joinTokenExp: joinPayload.exp, joinCode });
 }));
 
+function therapySessionCareOrigin(data = {}) {
+  const hasPublicSchoolLink = Boolean(
+    data.publicProgramCaseId && data.publicProgramId && data.publicSchoolId
+  );
+  const isPublicContract = data.fundingSource === "public_contract";
+  const isPublicDemo = data.fundingSource === "synthetic_demo"
+    && data.syntheticData === true
+    && data.demoTechnicalRoom === true;
+  return (hasPublicSchoolLink || isPublicContract || isPublicDemo) ? "public_school" : "private";
+}
+
 // GET /therapy/sessoes — lista as sessões do profissional logado
 // Query: ?includeHidden=true para incluir sessões marcadas como
 // hiddenFromPainel. Usado pela agenda (que mantém histórico completo
@@ -2069,6 +2080,7 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         syntheticData: data.syntheticData === true,
         demoTechnicalRoom: data.syntheticData === true && data.demoTechnicalRoom === true,
         fundingSource: data.fundingSource || null,
+        careOrigin: therapySessionCareOrigin(data),
         hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
@@ -9962,7 +9974,10 @@ router.get("/therapy/painel/hoje", asyncHandler(async (req, res) => {
     patientId: nextCandidates[0].patientId || null,
     scheduledAt: nextCandidates[0].scheduledAt,
     status: nextCandidates[0].status,
-    confirmedAt: nextCandidates[0].confirmedAt?.toMillis ? nextCandidates[0].confirmedAt.toMillis() : null
+    confirmedAt: nextCandidates[0].confirmedAt?.toMillis ? nextCandidates[0].confirmedAt.toMillis() : null,
+    careOrigin: therapySessionCareOrigin(nextCandidates[0]),
+    fundingSource: nextCandidates[0].fundingSource || null,
+    demoTechnicalRoom: nextCandidates[0].syntheticData === true && nextCandidates[0].demoTechnicalRoom === true
   } : null;
 
   // Sessões agendadas no dia.
