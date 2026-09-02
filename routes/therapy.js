@@ -17026,28 +17026,33 @@ router.post("/therapy/aluno/:studentId/solicitar-consulta", studentSessionReques
     return sendError(res, 400, "STATUS_NAO_PERMITE_SOLICITACAO");
   }
 
-  const recentSnap = await db.collection("therapy_student_session_requests")
-    .where("studentId", "==", studentId)
-    .where("createdAtMs", ">", Date.now() - 48 * 60 * 60 * 1000)
-    .limit(1).get();
-  if (!recentSnap.empty) {
-    return sendError(res, 429, "SOLICITACAO_JA_ENVIADA");
+  const rateLimitRef = db.collection("therapy_student_session_rate").doc(studentId);
+  const rateLimitSnap = await rateLimitRef.get();
+  if (rateLimitSnap.exists) {
+    const lastMs = rateLimitSnap.data().lastRequestMs || 0;
+    if (Date.now() - lastMs < 48 * 60 * 60 * 1000) {
+      return sendError(res, 429, "SOLICITACAO_JA_ENVIADA");
+    }
   }
 
   const studentName = student.nomeSocial || student.nome || "Aluno(a)";
-  await db.collection("therapy_student_session_requests").add({
-    studentId,
-    studentName,
-    studentEmail: actor.email,
-    programId: student.programId || null,
-    programName: student.programName || null,
-    schoolId: student.schoolId || null,
-    schoolName: student.schoolName || student.escola || null,
-    assignedTherapistUid: caseData.assignedTherapistUid || null,
-    status: "pending",
-    createdAtMs: Date.now(),
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  const nowMs = Date.now();
+  await Promise.all([
+    db.collection("therapy_student_session_requests").add({
+      studentId,
+      studentName,
+      studentEmail: actor.email,
+      programId: student.programId || null,
+      programName: student.programName || null,
+      schoolId: student.schoolId || null,
+      schoolName: student.schoolName || student.escola || null,
+      assignedTherapistUid: caseData.assignedTherapistUid || null,
+      status: "pending",
+      createdAtMs: nowMs,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    }),
+    rateLimitRef.set({ lastRequestMs: nowMs, updatedAt: admin.firestore.FieldValue.serverTimestamp() })
+  ]);
 
   let therapistEmail = null;
   let therapistName = "Equipe de cuidado";
