@@ -9704,6 +9704,83 @@ router.post("/therapy/admin/repasses/:id/concluir", asyncHandler(async (req, res
   return res.json({ ok: true });
 }));
 
+// GET /therapy/agendamentos/solicitacoes-estudante — solicitações de nova
+// consulta enviadas por alunos do programa escolar atribuídos ao terapeuta.
+router.get("/therapy/agendamentos/solicitacoes-estudante", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const snap = await db.collection("therapy_student_session_requests")
+    .where("assignedTherapistUid", "==", uid)
+    .limit(100).get();
+  const items = [];
+  snap.forEach(d => {
+    const r = d.data();
+    if (r.status === "handled") return;
+    items.push({
+      id: d.id,
+      studentId: r.studentId || null,
+      studentName: r.studentName || "Aluno(a)",
+      studentEmail: r.studentEmail || null,
+      programName: r.programName || null,
+      schoolName: r.schoolName || null,
+      status: r.status || "pending",
+      createdAtMs: r.createdAtMs || (r.createdAt?.toMillis ? r.createdAt.toMillis() : null)
+    });
+  });
+  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  return res.json({ ok: true, requests: items });
+}));
+
+// POST /therapy/agendamentos/solicitacoes-estudante/:id/atender — marca a
+// solicitação como atendida (terapeuta ou admin).
+router.post("/therapy/agendamentos/solicitacoes-estudante/:id/atender", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const id = String(req.params.id || "").trim();
+  const docRef = db.collection("therapy_student_session_requests").doc(id);
+  const snap = await docRef.get();
+  if (!snap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
+  const r = snap.data();
+  const isAdmin = THERAPY_ADMIN_EMAILS.length
+    ? (await admin.auth().getUser(uid).then(u => THERAPY_ADMIN_EMAILS.includes((u.email || "").toLowerCase())).catch(() => false))
+    : false;
+  if (!isAdmin && r.assignedTherapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  await docRef.update({ status: "handled", handledAt: admin.firestore.FieldValue.serverTimestamp(), handledByUid: uid });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/admin/estudantes/solicitacoes-consulta — admin lista todas as
+// solicitações de nova consulta pendentes (todos os programas).
+router.get("/therapy/admin/estudantes/solicitacoes-consulta", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+  const db = getDb();
+  const snap = await db.collection("therapy_student_session_requests")
+    .where("status", "==", "pending")
+    .limit(200).get();
+  const items = [];
+  snap.forEach(d => {
+    const r = d.data();
+    items.push({
+      id: d.id,
+      studentId: r.studentId || null,
+      studentName: r.studentName || "Aluno(a)",
+      studentEmail: r.studentEmail || null,
+      programName: r.programName || null,
+      schoolName: r.schoolName || null,
+      assignedTherapistUid: r.assignedTherapistUid || null,
+      createdAtMs: r.createdAtMs || (r.createdAt?.toMillis ? r.createdAt.toMillis() : null)
+    });
+  });
+  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  return res.json({ ok: true, requests: items, total: items.length });
+}));
+
 // GET /therapy/agendamentos/solicitacoes — terapeuta lista solicitações
 // pendentes (e opcionalmente histórico recente).
 router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) => {
