@@ -142,6 +142,7 @@ const {
   templateDispensacaoNotice,
   templateStudentApproved, templateStudentRejected,
   templateClinicInvite,
+  templateStudentSessionRequest,
   templateStudentLeadReceived,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
@@ -16997,6 +16998,87 @@ router.post("/therapy/admin/estudantes/:id/reenviar-consentimento", asyncHandler
       <p>Segue um novo convite para revisar e decidir sobre o cadastro de <strong>${escapeStudentEmailHtml(data.nome)}</strong>. Abrir o link não confirma o consentimento.</p>
       <p><a href="${confirmUrl}" style="background:#2d6a3e;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;">Revisar e decidir →</a></p>
       <p style="font-size:12px;color:#666;">Este convite expira em 72 horas.</p>`
+  });
+
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/aluno/:studentId/solicitar-consulta — aluno sinaliza que quer nova sessão
+const studentSessionRequestLimiter = rateLimit({
+  windowMs: 48 * 60 * 60 * 1000,
+  max: 2,
+  keyGenerator: req => `aluno_req_${req.params.studentId || "unknown"}`,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+router.post("/therapy/aluno/:studentId/solicitar-consulta", studentSessionRequestLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const studentId = String(req.params.studentId || "").trim();
+  const actor = await loadOwnedStudentForDevelopment(req, res, studentId);
+  if (!actor) return;
+
+  const { student } = actor;
+  const db = getDb();
+
+  const caseSnap = await db.collection("therapy_student_cases").doc(studentId).get();
+  const caseData = caseSnap.exists ? caseSnap.data() : {};
+  if (!["care_active", "assigned"].includes(caseData.status)) {
+    return sendError(res, 400, "STATUS_NAO_PERMITE_SOLICITACAO");
+  }
+
+  const recentSnap = await db.collection("therapy_student_session_requests")
+    .where("studentId", "==", studentId)
+    .where("createdAtMs", ">", Date.now() - 48 * 60 * 60 * 1000)
+    .limit(1).get();
+  if (!recentSnap.empty) {
+    return sendError(res, 429, "SOLICITACAO_JA_ENVIADA");
+  }
+
+  const studentName = student.nomeSocial || student.nome || "Aluno(a)";
+  await db.collection("therapy_student_session_requests").add({
+    studentId,
+    studentName,
+    studentEmail: actor.email,
+    programId: student.programId || null,
+    programName: student.programName || null,
+    schoolId: student.schoolId || null,
+    schoolName: student.schoolName || student.escola || null,
+    assignedTherapistUid: caseData.assignedTherapistUid || null,
+    status: "pending",
+    createdAtMs: Date.now(),
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  let therapistEmail = null;
+  let therapistName = "Equipe de cuidado";
+  if (caseData.assignedTherapistUid) {
+    const therapistDoc = await db.collection("therapists").doc(caseData.assignedTherapistUid).get();
+    if (therapistDoc.exists) {
+      const t = therapistDoc.data();
+      therapistEmail = t.email || null;
+      therapistName = t.displayName || t.name || therapistName;
+    }
+  }
+
+  const tpl = templateStudentSessionRequest({
+    studentName,
+    studentEmail: actor.email,
+    programName: student.programName || null,
+    schoolName: student.schoolName || student.escola || null,
+    therapistName,
+    painelUrl: buildPainelUrl()
+  });
+
+  const recipients = therapistEmail ? [therapistEmail] : THERAPY_ADMIN_EMAILS;
+  if (recipients.length) {
+    sendEmail({ to: recipients, ...tpl }).catch(e =>
+      logError("student_session_request_email_failed", e, { studentId })
+    );
+  }
+
+  await logStudentEvent({
+    studentId, caseId: studentId, programId: student.programId || null, schoolId: student.schoolId || null,
+    type: "student_session_requested", actor: { role: "student" }, detail: {}
   });
 
   return res.json({ ok: true });

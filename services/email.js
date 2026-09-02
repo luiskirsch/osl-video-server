@@ -647,6 +647,28 @@ function templateClinicInvite({ ownerName, clinicName, invitedEmail, repasseRule
   return { subject, html, text };
 }
 
+function templateStudentSessionRequest({ studentName, studentEmail, programName, schoolName, therapistName, painelUrl }) {
+  const subject = `Aluno solicita nova consulta — ${studentName}`;
+  const html = renderShell({
+    heading: "Solicitação de consulta",
+    bodyHtml: `
+      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
+      <p style="margin:0 0 16px;"><strong>${escHtml(studentName)}</strong> solicitou um novo horário de consulta pelo portal do aluno.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Programa</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(programName || "—")}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Escola</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(schoolName || "—")}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">E-mail de contato</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(studentEmail)}</strong></td></tr>
+      </table>
+      <p style="margin:0 0 8px;">Acesse o painel para agendar a consulta:</p>
+      <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Abrir painel</a></p>
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O aluno receberá o link de acesso à sessão por e-mail assim que você agendar.</p>
+    `,
+    footer: "Você recebeu este e-mail porque um aluno do programa escolar solicitou uma consulta no Espaço Prelúdio."
+  });
+  const text = `Olá ${therapistName},\n\n${studentName} solicitou um novo horário de consulta pelo portal do aluno.\n\nPrograma: ${programName || "—"}\nEscola: ${schoolName || "—"}\nE-mail: ${studentEmail}\n\nAgendar no painel: ${painelUrl}\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 module.exports = {
   sendEmail,
   templateConfirmation,
@@ -669,6 +691,7 @@ module.exports = {
   templateStudentExpired,
   templateRecemFormadoEndingSoon,
   templateClinicInvite,
+  templateStudentSessionRequest,
   templateStudentLeadReceived,
   buildJoinUrl,
   buildCancelUrl,
