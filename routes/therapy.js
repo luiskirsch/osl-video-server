@@ -9704,20 +9704,19 @@ router.post("/therapy/admin/repasses/:id/concluir", asyncHandler(async (req, res
   return res.json({ ok: true });
 }));
 
-// GET /therapy/agendamentos/solicitacoes-estudante — solicitações de nova
-// consulta enviadas por alunos do programa escolar atribuídos ao terapeuta.
+// GET /therapy/agendamentos/solicitacoes-estudante — fila compartilhada:
+// todos os terapeutas veem pedidos pendentes de alunos (primeiro a pegar fica).
 router.get("/therapy/agendamentos/solicitacoes-estudante", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
   const db = getDb();
   const snap = await db.collection("therapy_student_session_requests")
-    .where("assignedTherapistUid", "==", uid)
+    .where("status", "==", "pending")
     .limit(100).get();
   const items = [];
   snap.forEach(d => {
     const r = d.data();
-    if (r.status === "handled") return;
     items.push({
       id: d.id,
       studentId: r.studentId || null,
@@ -9725,16 +9724,41 @@ router.get("/therapy/agendamentos/solicitacoes-estudante", asyncHandler(async (r
       studentEmail: r.studentEmail || null,
       programName: r.programName || null,
       schoolName: r.schoolName || null,
-      status: r.status || "pending",
       createdAtMs: r.createdAtMs || (r.createdAt?.toMillis ? r.createdAt.toMillis() : null)
     });
   });
-  items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  items.sort((a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0));
   return res.json({ ok: true, requests: items });
 }));
 
-// POST /therapy/agendamentos/solicitacoes-estudante/:id/atender — marca a
-// solicitação como atendida (terapeuta ou admin).
+// POST /therapy/agendamentos/solicitacoes-estudante/:id/pegar — transação
+// atômica: primeiro terapeuta que chamar fica com a solicitação.
+router.post("/therapy/agendamentos/solicitacoes-estudante/:id/pegar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const id = String(req.params.id || "").trim();
+  const docRef = db.collection("therapy_student_session_requests").doc(id);
+  try {
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(docRef);
+      if (!snap.exists) throw Object.assign(new Error("SOLICITACAO_NAO_ENCONTRADA"), { status: 404 });
+      if (snap.data().status !== "pending") throw Object.assign(new Error("JA_PEGO"), { status: 409 });
+      tx.update(docRef, {
+        status: "claimed",
+        claimedByUid: uid,
+        claimedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+  } catch (e) {
+    return sendError(res, e.status || 500, e.message || "ERRO_INTERNO");
+  }
+  return res.json({ ok: true });
+}));
+
+// POST /therapy/agendamentos/solicitacoes-estudante/:id/atender — marca como
+// atendida (terapeuta que pegou ou admin).
 router.post("/therapy/agendamentos/solicitacoes-estudante/:id/atender", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -9745,10 +9769,9 @@ router.post("/therapy/agendamentos/solicitacoes-estudante/:id/atender", asyncHan
   const snap = await docRef.get();
   if (!snap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
   const r = snap.data();
-  const isAdmin = THERAPY_ADMIN_EMAILS.length
-    ? (await admin.auth().getUser(uid).then(u => THERAPY_ADMIN_EMAILS.includes((u.email || "").toLowerCase())).catch(() => false))
-    : false;
-  if (!isAdmin && r.assignedTherapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const userEmail = await admin.auth().getUser(uid).then(u => (u.email || "").toLowerCase()).catch(() => "");
+  const isAdmin = THERAPY_ADMIN_EMAILS.includes(userEmail);
+  if (!isAdmin && r.claimedByUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   await docRef.update({ status: "handled", handledAt: admin.firestore.FieldValue.serverTimestamp(), handledByUid: uid });
   return res.json({ ok: true });
 }));
