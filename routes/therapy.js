@@ -57,6 +57,12 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
+const {
+  therapySessionDurationMinutes,
+  therapySessionOverdueAt,
+  isTherapySessionOverdue,
+  selectTherapyPanelSessions
+} = require("../services/therapy-session-state");
 const studentDevelopment = require("../services/student-development");
 const { withRetry } = require("../services/retry");
 const whisperSvc = require("../services/whisper");
@@ -1775,6 +1781,9 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
   const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
+  const durationMinutes = therapySessionDurationMinutes({
+    durationMinutes: therapist?.agendaConfig?.slotMinutes
+  });
 
   const recurrenceWeekly = Number(req.body?.recurrence?.weekly || 1);
   const isRecurring = recurrenceWeekly >= 2;
@@ -1847,6 +1856,7 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
       livekitRoom: room,
       e2eeKey,
       scheduledAt: at,
+      durationMinutes,
       status: "scheduled",
       joinTokenExp,
       recurrenceGroupId,
@@ -2031,6 +2041,25 @@ function therapySessionCareOrigin(data = {}) {
   return (hasPublicSchoolLink || isPublicContract || isPublicDemo) ? "public_school" : "private";
 }
 
+function therapyPanelSessionSummary(data, now = Date.now()) {
+  if (!data) return null;
+  const overdue = isTherapySessionOverdue(data, now);
+  return {
+    sessionId: data.sessionId,
+    patientName: data.patientName,
+    patientId: data.patientId || null,
+    scheduledAt: data.scheduledAt,
+    durationMinutes: therapySessionDurationMinutes(data),
+    overdueAt: therapySessionOverdueAt(data),
+    timingState: overdue ? "overdue" : null,
+    status: data.status,
+    confirmedAt: data.confirmedAt?.toMillis ? data.confirmedAt.toMillis() : null,
+    careOrigin: therapySessionCareOrigin(data),
+    fundingSource: data.fundingSource || null,
+    demoTechnicalRoom: data.syntheticData === true && data.demoTechnicalRoom === true
+  };
+}
+
 // GET /therapy/sessoes — lista as sessões do profissional logado
 // Query: ?includeHidden=true para incluir sessões marcadas como
 // hiddenFromPainel. Usado pela agenda (que mantém histórico completo
@@ -2065,12 +2094,16 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         patientAccountUid: data.patientAccountUid || null,
         status: data.status,
         scheduledAt: data.scheduledAt || null,
+        durationMinutes: therapySessionDurationMinutes(data),
+        overdueAt: therapySessionOverdueAt(data),
+        timingState: isTherapySessionOverdue(data) ? "overdue" : null,
         livekitRoom: data.livekitRoom,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
         canceledAt: data.canceledAt?.toMillis ? data.canceledAt.toMillis() : null,
         canceledBy: data.canceledBy || null,
         cancelReason: data.cancelReason || null,
+        cancellationKind: data.cancellationKind || null,
         confirmedAt: data.confirmedAt?.toMillis ? data.confirmedAt.toMillis() : null,
         confirmedBy: data.confirmedBy || null,
         joinTokenExp: data.joinTokenExp || null,
@@ -2087,7 +2120,7 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
     .filter(s => includeHidden || !s.hiddenFromPainel)
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-  return res.json({ ok: true, sessions });
+  return res.json({ ok: true, sessions, serverNow: Date.now() });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2441,38 +2474,79 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
   if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
 
   const db = getDb();
-  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
-  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
-  if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  const sessionRef = db.collection("therapy_sessions").doc(sessionId);
+  let completion = { error: null, sessData: null, alreadyCompleted: false };
+  await db.runTransaction(async tx => {
+    completion = { error: null, sessData: null, alreadyCompleted: false };
+    const freshSession = await tx.get(sessionRef);
+    if (!freshSession.exists) {
+      completion.error = "SESSAO_NAO_ENCONTRADA";
+      return;
+    }
+    const current = freshSession.data();
+    if (current.therapistUid !== uid) {
+      completion.error = "ACESSO_NEGADO";
+      return;
+    }
+    if (current.status === "completed") {
+      completion.alreadyCompleted = true;
+      return;
+    }
+    if (current.status === "canceled") {
+      completion.error = "SESSAO_CANCELADA";
+      return;
+    }
 
-  const sessData = sessSnap.data();
+    let publicCase = null;
+    if (current.publicProgramCaseId && current.studentId) {
+      const caseRef = db.collection("therapy_student_cases").doc(current.publicProgramCaseId);
+      const futureQuery = db.collection("therapy_sessions")
+        .where("studentId", "==", current.studentId)
+        .limit(500);
+      const [caseSnap, futureSessionsSnap] = await Promise.all([
+        tx.get(caseRef),
+        tx.get(futureQuery)
+      ]);
+      const caseData = caseSnap.exists ? caseSnap.data() : {};
+      const nextSessionAt = futureSessionsSnap.docs
+        .filter(doc => doc.id !== sessionId)
+        .map(doc => doc.data())
+        .filter(session => session.status === "scheduled" && Number(session.scheduledAt || 0) > Date.now())
+        .map(session => Number(session.scheduledAt))
+        .sort((a, b) => a - b)[0] || null;
+      publicCase = { caseRef, caseData, nextSessionAt };
+    }
 
-  await db.collection("therapy_sessions").doc(sessionId).set({
-    status: "completed",
-    completedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  if (sessData.publicProgramCaseId && sessData.studentId) {
-    const caseRef = db.collection("therapy_student_cases").doc(sessData.publicProgramCaseId);
-    const studentRef = db.collection("therapy_estudantes").doc(sessData.studentId);
-    const futureSessionsSnap = await db.collection("therapy_sessions").where("studentId", "==", sessData.studentId).limit(500).get();
-    const nextSessionAt = futureSessionsSnap.docs
-      .map(doc => doc.data())
-      .filter(session => session.status === "scheduled" && Number(session.scheduledAt || 0) > Date.now())
-      .map(session => Number(session.scheduledAt))
-      .sort((a, b) => a - b)[0] || null;
-    const batch = db.batch();
-    batch.set(caseRef, {
-      status: "care_active",
-      completedSessions: admin.firestore.FieldValue.increment(1),
-      scheduledSessions: admin.firestore.FieldValue.increment(-1),
-      lastSessionAt: admin.firestore.FieldValue.serverTimestamp(),
-      nextSessionAt,
+    tx.set(sessionRef, {
+      status: "completed",
+      completedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
-    batch.set(studentRef, { status: "care_active", lastSessionAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-    await batch.commit();
+    if (publicCase) {
+      tx.set(publicCase.caseRef, {
+        status: "care_active",
+        completedSessions: Number(publicCase.caseData.completedSessions || 0) + 1,
+        scheduledSessions: Math.max(0, Number(publicCase.caseData.scheduledSessions || 0) - 1),
+        lastSessionAt: admin.firestore.FieldValue.serverTimestamp(),
+        nextSessionAt: publicCase.nextSessionAt,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(db.collection("therapy_estudantes").doc(current.studentId), {
+        status: "care_active",
+        lastSessionAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+    completion.sessData = current;
+  });
+
+  if (completion.error === "SESSAO_NAO_ENCONTRADA") return sendError(res, 404, completion.error);
+  if (completion.error === "ACESSO_NEGADO") return sendError(res, 403, completion.error);
+  if (completion.error) return sendError(res, 409, completion.error);
+  if (completion.alreadyCompleted) return res.json({ ok: true, alreadyCompleted: true });
+  const sessData = completion.sessData;
+
+  if (sessData.publicProgramCaseId && sessData.studentId) {
     await logStudentEvent({
       studentId: sessData.studentId,
       caseId: sessData.publicProgramCaseId,
@@ -2836,7 +2910,7 @@ router.get("/therapy/nfse/consultar/:nfseId", asyncHandler(async (req, res) => {
 // de consultas), mas mantém o registro no Firestore. Continua visível no
 // prontuário do paciente (/therapy/pacientes/:patientId/sessoes), no
 // histórico de auditoria e nos exports. Só permite ocultar sessões já
-// encerradas — sessão em andamento precisa ser encerrada antes.
+// concluídas ou canceladas — sessão ativa precisa receber um desfecho antes.
 // ─────────────────────────────────────────────────────────────────────────
 router.post("/therapy/sessao/:sessionId/ocultar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -2851,7 +2925,9 @@ router.post("/therapy/sessao/:sessionId/ocultar", asyncHandler(async (req, res) 
   if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   const sessData = sessSnap.data();
   if (sessData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
-  if (sessData.status !== "completed") return sendError(res, 400, "SESSAO_NAO_ENCERRADA");
+  if (!["completed", "canceled"].includes(sessData.status)) {
+    return sendError(res, 400, "SESSAO_NAO_ENCERRADA");
+  }
 
   await db.collection("therapy_sessions").doc(sessionId).set({
     hiddenFromPainel: true,
@@ -2903,12 +2979,13 @@ function buildConfirmToken(sessionId) {
   return { token, exp };
 }
 
-async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }) {
+async function applyCancellation(db, sessionId, sessData, { canceledBy, reason, cancellationKind = null }) {
   const update = {
     status: "canceled",
     canceledAt: admin.firestore.FieldValue.serverTimestamp(),
     canceledBy,
     cancelReason: reason || null,
+    cancellationKind: cancellationKind || null,
     // Revoga joinToken — paciente com link em maos nao consegue mais entrar
     // depois do cancelamento. Endpoint /sessao/join checa status=canceled
     // separadamente; aqui zeramos joinTokenExp defensivamente pra qualquer
@@ -2916,61 +2993,107 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
     joinTokenExp: 0,
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
-  const cancellationBatch = db.batch();
-  cancellationBatch.set(db.collection("therapy_sessions").doc(sessionId), update, { merge: true });
-  if (sessData.publicProgramCaseId && sessData.studentId) {
-    cancellationBatch.set(db.collection("therapy_student_cases").doc(sessData.publicProgramCaseId), {
-      scheduledSessions: admin.firestore.FieldValue.increment(-1),
-      lastCancellationAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    if (sessData.publicProgramId && sessData.publicProgramUsageMonth) {
-      cancellationBatch.set(db.collection("therapy_public_program_usage")
-        .doc(`${sessData.publicProgramId}_${sessData.publicProgramUsageMonth}`), {
-          activeSessions: admin.firestore.FieldValue.increment(-1),
-          canceledSessions: admin.firestore.FieldValue.increment(1),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
+  const sessionRef = db.collection("therapy_sessions").doc(sessionId);
+  let outcome = { transitioned: false, error: null, sessData };
+  await db.runTransaction(async tx => {
+    outcome = { transitioned: false, error: null, sessData };
+    const freshSession = await tx.get(sessionRef);
+    if (!freshSession.exists) {
+      outcome.error = "SESSAO_NAO_ENCONTRADA";
+      return;
     }
-    if (Array.isArray(sessData.scheduleLockIds) && sessData.scheduleLockIds.length) {
-      sessData.scheduleLockIds.slice(0, 50).forEach(lockId =>
-        cancellationBatch.delete(db.collection("therapy_schedule_locks").doc(String(lockId)))
-      );
+    const current = freshSession.data();
+    outcome.sessData = current;
+    if (current.status === "completed") {
+      outcome.error = "SESSAO_JA_ENCERRADA";
+      return;
     }
-  }
-  await cancellationBatch.commit();
-  if (sessData.publicProgramCaseId && sessData.studentId) {
+    if (current.status === "canceled") return;
+    if (cancellationKind === "not_held" && !isTherapySessionOverdue(current, Date.now())) {
+      outcome.error = "SESSAO_AINDA_NO_HORARIO";
+      return;
+    }
+
+    let publicCase = null;
+    if (current.publicProgramCaseId && current.studentId) {
+      const caseRef = db.collection("therapy_student_cases").doc(current.publicProgramCaseId);
+      const futureQuery = db.collection("therapy_sessions")
+        .where("studentId", "==", current.studentId)
+        .limit(500);
+      const [caseSnap, futureSessionsSnap] = await Promise.all([
+        tx.get(caseRef),
+        tx.get(futureQuery)
+      ]);
+      const caseData = caseSnap.exists ? caseSnap.data() : {};
+      const nextSessionAt = futureSessionsSnap.docs
+        .filter(doc => doc.id !== sessionId)
+        .map(doc => doc.data())
+        .filter(session => session.status === "scheduled" && Number(session.scheduledAt || 0) > Date.now())
+        .map(session => Number(session.scheduledAt))
+        .sort((a, b) => a - b)[0] || null;
+      publicCase = { caseRef, caseData, nextSessionAt };
+    }
+
+    tx.set(sessionRef, update, { merge: true });
+    if (publicCase) {
+      tx.set(publicCase.caseRef, {
+        scheduledSessions: Math.max(0, Number(publicCase.caseData.scheduledSessions || 0) - 1),
+        nextSessionAt: publicCase.nextSessionAt,
+        lastCancellationAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      if (current.publicProgramId && current.publicProgramUsageMonth) {
+        tx.set(db.collection("therapy_public_program_usage")
+          .doc(`${current.publicProgramId}_${current.publicProgramUsageMonth}`), {
+            activeSessions: admin.firestore.FieldValue.increment(-1),
+            canceledSessions: admin.firestore.FieldValue.increment(1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+      }
+      if (Array.isArray(current.scheduleLockIds) && current.scheduleLockIds.length) {
+        current.scheduleLockIds.slice(0, 50).forEach(lockId =>
+          tx.delete(db.collection("therapy_schedule_locks").doc(String(lockId)))
+        );
+      }
+    }
+    outcome.transitioned = true;
+  });
+
+  if (outcome.error || !outcome.transitioned) return outcome;
+  const effectiveSession = outcome.sessData;
+  if (effectiveSession.publicProgramCaseId && effectiveSession.studentId) {
     await logStudentEvent({
-      studentId: sessData.studentId,
-      caseId: sessData.publicProgramCaseId,
-      programId: sessData.publicProgramId || null,
-      schoolId: sessData.publicSchoolId || null,
+      studentId: effectiveSession.studentId,
+      caseId: effectiveSession.publicProgramCaseId,
+      programId: effectiveSession.publicProgramId || null,
+      schoolId: effectiveSession.publicSchoolId || null,
       type: "public_session_canceled",
       actor: { role: canceledBy || "unknown" },
-      detail: { sessionId, hasReason: Boolean(reason) }
+      detail: { sessionId, hasReason: Boolean(reason), cancellationKind }
     });
   }
   await logAudit({
     type: "session_canceled",
     sessionId,
-    therapistUid: sessData.therapistUid,
+    therapistUid: effectiveSession.therapistUid,
     canceledBy,
-    hasReason: Boolean(reason)
+    hasReason: Boolean(reason),
+    cancellationKind
   });
 
   // WhatsApp de cancelamento (fire-and-forget). Só dispara se patientPhone
   // está setado E therapist.whatsappConfig.enabled. Carrega therapist do
   // doc pra acessar a config — sessão tem só therapistUid.
-  if (sessData.patientPhone && canceledBy !== "patient_public") {
+  if (effectiveSession.patientPhone && canceledBy !== "patient_public" && cancellationKind !== "not_held") {
     try {
-      const tsnap = await db.collection("therapists").doc(sessData.therapistUid).get();
+      const tsnap = await db.collection("therapists").doc(effectiveSession.therapistUid).get();
       const therapist = tsnap.exists ? tsnap.data() : null;
       if (therapist?.whatsappConfig?.enabled) {
         sendWaCancellation({
           session: {
-            patientName: sessData.patientName,
-            patientPhone: sessData.patientPhone,
-            scheduledAt: sessData.scheduledAt
+            patientName: effectiveSession.patientName,
+            patientPhone: effectiveSession.patientPhone,
+            scheduledAt: effectiveSession.scheduledAt
           },
           therapist
         }).then(r => {
@@ -2985,6 +3108,7 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason }
       logError("therapy_cancellation_wa_load_therapist_failed", e, { sessionId });
     }
   }
+  return outcome;
 }
 
 // (a) Terapeuta autenticado cancela. scope="forward" cancela esta + todas
@@ -2999,7 +3123,10 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
 
   const reason = String(req.body?.reason || "").trim().slice(0, CANCEL_REASON_MAX);
-  const scope  = req.body?.scope === "forward" ? "forward" : "this";
+  const cancellationKind = req.body?.cancellationKind === "not_held" ? "not_held" : null;
+  const scope = cancellationKind === "not_held"
+    ? "this"
+    : (req.body?.scope === "forward" ? "forward" : "this");
 
   const db = getDb();
   const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
@@ -3007,11 +3134,17 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   const sessData = sessSnap.data();
   if (sessData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (sessData.status === "completed") return sendError(res, 409, "SESSAO_JA_ENCERRADA");
+  if (cancellationKind === "not_held" && !isTherapySessionOverdue(sessData, Date.now())) {
+    return sendError(res, 409, "SESSAO_AINDA_NO_HORARIO");
+  }
 
   // "this": só esta. Idempotente se já cancelada.
   if (scope === "this") {
     if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
-    await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    const outcome = await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason, cancellationKind });
+    if (outcome.error === "SESSAO_NAO_ENCONTRADA") return sendError(res, 404, outcome.error);
+    if (outcome.error) return sendError(res, 409, outcome.error);
+    if (!outcome.transitioned) return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
     getIo()?.to(uid).emit("sessoes:changed");
     return res.json({ ok: true, canceledCount: 1 });
   }
@@ -3020,7 +3153,10 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
   // cai pro comportamento "this" silenciosamente.
   if (!sessData.recurrenceGroupId) {
     if (sessData.status === "canceled") return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
-    await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason });
+    const outcome = await applyCancellation(db, sessionId, sessData, { canceledBy: "therapist", reason, cancellationKind });
+    if (outcome.error === "SESSAO_NAO_ENCONTRADA") return sendError(res, 404, outcome.error);
+    if (outcome.error) return sendError(res, 409, outcome.error);
+    if (!outcome.transitioned) return res.json({ ok: true, alreadyCanceled: true, canceledCount: 0 });
     getIo()?.to(uid).emit("sessoes:changed");
     return res.json({ ok: true, canceledCount: 1 });
   }
@@ -3037,8 +3173,8 @@ router.post("/therapy/sessao/:sessionId/cancelar", asyncHandler(async (req, res)
     if (d.status === "completed" || d.status === "canceled") continue;
     const at = Number(d.scheduledAt || 0);
     if (baseAt && at && at < baseAt) continue; // só futuras (ou a própria)
-    await applyCancellation(db, doc.id, d, { canceledBy: "therapist", reason });
-    canceledCount++;
+    const outcome = await applyCancellation(db, doc.id, d, { canceledBy: "therapist", reason });
+    if (outcome.transitioned) canceledCount++;
   }
 
   getIo()?.to(uid).emit("sessoes:changed");
@@ -3082,7 +3218,10 @@ router.post("/therapy/sessao/cancelar-publico", asyncHandler(async (req, res) =>
     });
   }
 
-  await applyCancellation(db, payload.sessionId, sessData, { canceledBy: "patient", reason });
+  const outcome = await applyCancellation(db, payload.sessionId, sessData, { canceledBy: "patient", reason });
+  if (outcome.error === "SESSAO_NAO_ENCONTRADA") return sendError(res, 404, outcome.error);
+  if (outcome.error) return sendError(res, 409, outcome.error);
+  if (!outcome.transitioned) return res.json({ ok: true, alreadyCanceled: true });
   return res.json({ ok: true });
 }));
 
@@ -4258,13 +4397,16 @@ router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res
         patientName: data.patientName,
         status: data.status,
         scheduledAt: data.scheduledAt || null,
+        durationMinutes: therapySessionDurationMinutes(data),
+        overdueAt: therapySessionOverdueAt(data),
+        timingState: isTherapySessionOverdue(data) ? "overdue" : null,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
       };
     })
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-  return res.json({ ok: true, sessions });
+  return res.json({ ok: true, sessions, serverNow: Date.now() });
 }));
 
 // GET /therapy/pacientes/:patientId/sinais — sinais clínicos (humor, ansiedade,
@@ -9620,6 +9762,14 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   const room = `therapy_${sId}`;
   const e2eeKey = crypto.randomBytes(32).toString("base64");
   const therapistEmail = await resolveTherapistEmail(uid, therapist);
+  const requestedDurationMinutes = (
+    Number(reqData.requestedSlotEnd) - Number(reqData.requestedSlot)
+  ) / (60 * 1000);
+  const durationMinutes = therapySessionDurationMinutes({
+    durationMinutes: Number.isFinite(requestedDurationMinutes) && requestedDurationMinutes > 0
+      ? requestedDurationMinutes
+      : therapist?.agendaConfig?.slotMinutes
+  });
 
   const joinPayload = {
     token_type: "therapy_join",
@@ -9645,6 +9795,7 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     livekitRoom: room,
     e2eeKey,
     scheduledAt: reqData.requestedSlot,
+    durationMinutes,
     status: "scheduled",
     joinTokenExp: joinPayload.exp,
     recurrenceGroupId: null,
@@ -9924,7 +10075,8 @@ router.get("/therapy/financeiro/transacoes", asyncHandler(async (req, res) => {
 }));
 
 // GET /therapy/painel/hoje — agregação leve pra hero do painel:
-//   - nextSession: próxima sessão (scheduledAt > now, não cancelada/encerrada)
+//   - nextSession: próxima sessão ainda dentro da janela de atendimento
+//   - overdueSession: pendência mais recente cujo horário já encerrou
 //   - todayCount: nº de sessões agendadas hoje (BRT)
 //   - thisMonth: { sessoesRealizadas, sessoesAgendadas, faturamentoPagoCents, faturamentoPendenteCents, taxaConfirmacao }
 //
@@ -9952,33 +10104,12 @@ router.get("/therapy/painel/hoje", asyncHandler(async (req, res) => {
 
   const sessions = sessionsSnap.docs.map(d => d.data());
 
-  // Próxima sessão: scheduled OR in_progress + scheduledAt no futuro próximo
-  // (ou já em andamento). Tolerâncias diferentes por status:
-  //   - in_progress: sem limite (sessão pode durar 50min+; ignorar tolerância
-  //     evitaria sumir do hero enquanto o profissional está atendendo).
-  //   - scheduled:   2h atrás (cobre atraso típico + sessão padrão de 50min;
-  //     se esqueceu de encerrar, ainda aparece como "próxima" pra ação).
-  // Ordena por scheduledAt asc.
-  const nextCandidates = sessions
-    .filter(s => {
-      if (!s.scheduledAt) return false;
-      if (s.status === "in_progress") return true;
-      if (s.status === "scheduled")   return s.scheduledAt >= now - 2 * 60 * 60 * 1000;
-      return false;
-    })
-    .sort((a, b) => (a.scheduledAt || 0) - (b.scheduledAt || 0));
-
-  const nextSession = nextCandidates[0] ? {
-    sessionId: nextCandidates[0].sessionId,
-    patientName: nextCandidates[0].patientName,
-    patientId: nextCandidates[0].patientId || null,
-    scheduledAt: nextCandidates[0].scheduledAt,
-    status: nextCandidates[0].status,
-    confirmedAt: nextCandidates[0].confirmedAt?.toMillis ? nextCandidates[0].confirmedAt.toMillis() : null,
-    careOrigin: therapySessionCareOrigin(nextCandidates[0]),
-    fundingSource: nextCandidates[0].fundingSource || null,
-    demoTechnicalRoom: nextCandidates[0].syntheticData === true && nextCandidates[0].demoTechnicalRoom === true
-  } : null;
+  // Uma sessão permanece corrente pela duração contratada + 30 minutos de
+  // tolerância. Depois disso ela não é mais "próxima" nem "em sessão": vira
+  // uma pendência que exige decisão explícita do profissional.
+  const panelSessions = selectTherapyPanelSessions(sessions, now);
+  const nextSession = therapyPanelSessionSummary(panelSessions.nextSession, now);
+  const overdueSession = therapyPanelSessionSummary(panelSessions.overdueSession, now);
 
   // Sessões agendadas no dia.
   const todaySessions = sessions
@@ -10017,7 +10148,9 @@ router.get("/therapy/painel/hoje", asyncHandler(async (req, res) => {
 
   return res.json({
     ok: true,
+    serverNow: now,
     nextSession,
+    overdueSession,
     todayCount,
     todayConfirmedCount,
     thisMonth: {
@@ -16614,14 +16747,18 @@ async function studentPortalPayload(studentDocs) {
       const session = sessionDoc.data();
       const joinCode = String(session.studentJoinCode || "").trim();
       const joinCodeExpiresAt = Number(session.studentJoinCodeExpiresAt || session.joinTokenExp || 0);
+      const overdue = isTherapySessionOverdue(session);
       const joinAvailable = !!joinCode
         && !session.joinTokenConsumedAt
         && !["completed", "canceled"].includes(session.status)
+        && !overdue
         && (!joinCodeExpiresAt || joinCodeExpiresAt > Date.now());
       return {
         id: sessionDoc.id,
         scheduledAt: publicProgramMillis(session.scheduledAt),
-        durationMinutes: Number(session.durationMinutes || 50),
+        durationMinutes: therapySessionDurationMinutes(session),
+        overdueAt: therapySessionOverdueAt(session),
+        timingState: overdue ? "overdue" : null,
         status: session.status || "scheduled",
         therapistName: session.therapistDisplayName || caseData.assignedTherapistName || null,
         demo: session.syntheticData === true,
@@ -16646,7 +16783,7 @@ async function studentPortalPayload(studentDocs) {
       sessions
     };
   }));
-  return { ok: true, items };
+  return { ok: true, items, serverNow: Date.now() };
 }
 
 router.post("/therapy/aluno/vincular", studentPortalLinkLimiter, asyncHandler(async (req, res) => {
