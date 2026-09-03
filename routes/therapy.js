@@ -5817,65 +5817,6 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
   });
 }));
 
-// ─────────────────────────────────────────────────────────────────────────
-// GET /public/profissionais?q=&especialidade=
-// Lista profissionais verificados com agendamento público habilitado.
-// Sem auth — endpoint público para o app mobile.
-// ─────────────────────────────────────────────────────────────────────────
-router.get("/public/profissionais", asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-
-  const q            = String(req.query?.q || "").trim().toLowerCase();
-  const especialidade = String(req.query?.especialidade || "").trim().toLowerCase();
-
-  const snap = await db.collection("therapists")
-    .where("verificationStatus", "==", "verified")
-    .limit(200)
-    .get();
-
-  let lista = snap.docs
-    .filter(doc => doc.data().publicSchedulingEnabled === true)
-    .map(doc => {
-      const d = doc.data();
-      const c = d.consultorio || {};
-      return {
-        uid:           doc.id,
-        displayName:   d.displayName || "",
-        especialidade: d.especialidade || "",
-        bio:           d.bio || "",
-        tipoConselho:  d.tipoConselho || d.crp ? "CRP" : d.crm ? "CRM" : "",
-        numeroConselho: d.numeroConselho || d.crp || d.crm || "",
-        cidade:        c.cidade || "",
-        uf:            c.uf || "",
-        photoBase64:   d.photoBase64 || null,
-        photoMime:     d.photoMime  || null,
-        valorConsulta: d.valorConsulta || null,
-      };
-    });
-
-  if (especialidade && especialidade !== "todos") {
-    // Chip envia slug (ex: "psicologia-clinica"). Quebra em palavras e faz partial match.
-    const keywords = especialidade.split("-").filter(w => w.length > 3);
-    lista = lista.filter(p => {
-      const esp = (p.especialidade || "").toLowerCase();
-      return keywords.some(kw => esp.includes(kw));
-    });
-  }
-
-  if (q) {
-    lista = lista.filter(p =>
-      p.displayName.toLowerCase().includes(q) ||
-      (p.especialidade || "").toLowerCase().includes(q) ||
-      (p.cidade || "").toLowerCase().includes(q) ||
-      (p.bio || "").toLowerCase().includes(q)
-    );
-  }
-
-  // Remove flag interna antes de retornar
-  lista.forEach(p => delete p.publicSchedulingEnabled);
-
-  return res.json({ ok: true, items: lista });
-}));
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/receita/dispensar — endpoint público (sem Firebase auth).
@@ -9016,25 +8957,22 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     return UF_BY_NAME[s] || raw.toUpperCase();     // nome → sigla; fallback mantém
   };
 
-  const filterEspecialidade = normSearch(req.query?.especialidade);
+  const filterEspecialidade = normSearch((req.query?.especialidade || "").replace(/-/g, " "));
   const filterCidade        = normSearch(req.query?.cidade);
   const filterUf            = toSigla(req.query?.uf);
+  const filterQ             = String(req.query?.q || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
   const limit               = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
   const db = getDb();
-  // Query Firestore com flags. Filtros por cidade/especialidade aplicados client-side
-  // pra evitar exigência de composite index.
   const snap = await db.collection("therapists")
-    .where("verificationStatus", "==", "verified")
-    .where("listPublicly", "==", true)
+    .where("publicSchedulingEnabled", "==", true)
     .limit(500)
     .get();
 
   const items = [];
   snap.forEach(d => {
     const t = d.data();
-    if (!t.publicSchedulingSlug || !t.publicSchedulingEnabled) return;
-    if (!evaluatePlanAccess(t).ok) return;
+    if (t.verificationStatus !== "verified") return;
 
     const c = t.consultorio || {};
     const esp = normSearch(t.especialidade);
@@ -9044,12 +8982,18 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     if (filterEspecialidade && !esp.includes(filterEspecialidade)) return;
     if (filterCidade && !cidadeNorm.includes(filterCidade)) return;
     if (filterUf && ufSigla !== filterUf) return;
+    if (filterQ) {
+      const haystack = [t.displayName, t.especialidade, c.cidade, t.bio].join(" ")
+        .normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+      if (!haystack.includes(filterQ)) return;
+    }
 
     const conselhoSigla = resolveSiglaFromTherapist(t);
     const conselhoMeta  = getConselho(conselhoSigla);
 
     items.push({
-      slug:           t.publicSchedulingSlug,
+      uid:            d.id,
+      slug:           t.publicSchedulingSlug || d.id,
       displayName:    t.displayName || "",
       especialidade:  t.especialidade || "",
       photoBase64:    t.photoBase64 || "",
@@ -9061,7 +9005,8 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
       orgaoRegistro:  t.orgaoRegistro || "",
       cidade:         c.cidade || "",
       uf:             c.uf || "",
-      bio:            (t.bio || "").slice(0, 180) // resumo
+      valorConsulta:  t.valorConsulta || null,
+      bio:            (t.bio || "").slice(0, 180)
     });
   });
 
