@@ -5818,6 +5818,65 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
+// GET /public/profissionais?q=&especialidade=
+// Lista profissionais verificados com agendamento público habilitado.
+// Sem auth — endpoint público para o app mobile.
+// ─────────────────────────────────────────────────────────────────────────
+router.get("/public/profissionais", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const q            = String(req.query?.q || "").trim().toLowerCase();
+  const especialidade = String(req.query?.especialidade || "").trim().toLowerCase();
+
+  const snap = await db.collection("therapists")
+    .where("verificationStatus", "==", "verified")
+    .limit(200)
+    .get();
+
+  let lista = snap.docs
+    .map(doc => {
+      const d = doc.data();
+      const c = d.consultorio || {};
+      const conselhoSigla = resolveSiglaFromTherapist(d);
+      return {
+        uid:           doc.id,
+        displayName:   d.displayName || "",
+        especialidade: d.especialidade || "",
+        bio:           d.bio || "",
+        tipoConselho:  conselhoSigla || "",
+        numeroConselho: d.numeroConselho || d.crp || d.crm || "",
+        cidade:        c.cidade || "",
+        uf:            c.uf || "",
+        photoBase64:   d.photoBase64 || null,
+        photoMime:     d.photoMime  || null,
+        valorConsulta: d.valorConsulta || null,
+        publicSchedulingEnabled: d.publicSchedulingEnabled === true,
+      };
+    })
+    .filter(p => p.publicSchedulingEnabled);
+
+  if (especialidade && especialidade !== "todos") {
+    lista = lista.filter(p =>
+      (p.especialidade || "").toLowerCase().includes(especialidade)
+    );
+  }
+
+  if (q) {
+    lista = lista.filter(p =>
+      p.displayName.toLowerCase().includes(q) ||
+      (p.especialidade || "").toLowerCase().includes(q) ||
+      (p.cidade || "").toLowerCase().includes(q) ||
+      (p.bio || "").toLowerCase().includes(q)
+    );
+  }
+
+  // Remove flag interna antes de retornar
+  lista.forEach(p => delete p.publicSchedulingEnabled);
+
+  return res.json({ ok: true, profissionais: lista });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
 // POST /therapy/receita/dispensar — endpoint público (sem Firebase auth).
 // Farmacêutico autentica-se informando CRF + nome + CNPJ + nome farmácia.
 // É low-trust por design (MVP) — fonte de verdade é a auditoria + responsabilidade
