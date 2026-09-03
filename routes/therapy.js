@@ -5834,26 +5834,24 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     .get();
 
   let lista = snap.docs
+    .filter(doc => doc.data().publicSchedulingEnabled === true)
     .map(doc => {
       const d = doc.data();
       const c = d.consultorio || {};
-      const conselhoSigla = resolveSiglaFromTherapist(d);
       return {
         uid:           doc.id,
         displayName:   d.displayName || "",
         especialidade: d.especialidade || "",
         bio:           d.bio || "",
-        tipoConselho:  conselhoSigla || "",
+        tipoConselho:  d.tipoConselho || d.crp ? "CRP" : d.crm ? "CRM" : "",
         numeroConselho: d.numeroConselho || d.crp || d.crm || "",
         cidade:        c.cidade || "",
         uf:            c.uf || "",
         photoBase64:   d.photoBase64 || null,
         photoMime:     d.photoMime  || null,
         valorConsulta: d.valorConsulta || null,
-        publicSchedulingEnabled: d.publicSchedulingEnabled === true,
       };
-    })
-    .filter(p => p.publicSchedulingEnabled);
+    });
 
   if (especialidade && especialidade !== "todos") {
     // Chip envia slug (ex: "psicologia-clinica"). Quebra em palavras e faz partial match.
