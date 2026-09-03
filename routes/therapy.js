@@ -8964,15 +8964,13 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   const limit               = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
   const db = getDb();
-  const snap = await db.collection("therapists")
-    .where("publicSchedulingEnabled", "==", true)
-    .limit(500)
-    .get();
+  const snap = await db.collection("therapists").limit(500).get();
 
   const items = [];
   snap.forEach(d => {
     const t = d.data();
     if (t.verificationStatus !== "verified") return;
+    if (!t.publicSchedulingEnabled && !t.listPublicly) return;
 
     const c = t.consultorio || {};
     const esp = normSearch(t.especialidade);
