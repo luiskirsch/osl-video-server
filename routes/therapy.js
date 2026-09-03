@@ -5856,9 +5856,12 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     .filter(p => p.publicSchedulingEnabled);
 
   if (especialidade && especialidade !== "todos") {
-    lista = lista.filter(p =>
-      (p.especialidade || "").toLowerCase().includes(especialidade)
-    );
+    // Chip envia slug (ex: "psicologia-clinica"). Quebra em palavras e faz partial match.
+    const keywords = especialidade.split("-").filter(w => w.length > 3);
+    lista = lista.filter(p => {
+      const esp = (p.especialidade || "").toLowerCase();
+      return keywords.some(kw => esp.includes(kw));
+    });
   }
 
   if (q) {
@@ -5873,7 +5876,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   // Remove flag interna antes de retornar
   lista.forEach(p => delete p.publicSchedulingEnabled);
 
-  return res.json({ ok: true, profissionais: lista });
+  return res.json({ ok: true, items: lista });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
