@@ -8934,6 +8934,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   const normSearch = (s) => String(s || "")
     .normalize("NFD").replace(/[̀-ͯ]/g, "")
     .toLowerCase()
+    .replace(/[-_]+/g, " ")
     .replace(/\s+/g, " ").trim()
     .replace(/(\w{3,})s\b/g, "$1");
 
@@ -14264,7 +14265,7 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
   const field = me.role === "therapist" ? "therapistUid" : "patientAccountUid";
   const snap = await db.collection("therapy_threads")
     .where(field, "==", uid)
-    .limit(200).get();
+    .get();
 
   const threads = snap.docs.map(d => {
     const t = d.data();
@@ -14540,7 +14541,6 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
   // outras queries do arquivo (ver linha ~1842 de /sessoes).
   const msgSnap = await db.collection("therapy_messages")
     .where("threadId", "==", threadId)
-    .limit(500)
     .get();
 
   const messages = msgSnap.docs
@@ -16844,7 +16844,7 @@ async function studentPortalPayload(studentDocs) {
     const student = studentDoc.data();
     const [caseSnap, sessionsSnap] = await Promise.all([
       db.collection("therapy_student_cases").doc(studentDoc.id).get(),
-      db.collection("therapy_sessions").where("studentId", "==", studentDoc.id).limit(100).get()
+      db.collection("therapy_sessions").where("studentId", "==", studentDoc.id).get()
     ]);
     const caseData = caseSnap.exists ? caseSnap.data() : {};
     const sessions = sessionsSnap.docs.map(sessionDoc => {
@@ -16998,7 +16998,7 @@ function studentLearningProfileId(uid, studentId) {
 
 async function studentDevelopmentPayload(uid, studentId) {
   const profileRef = getDb().collection("therapy_student_learning").doc(studentLearningProfileId(uid, studentId));
-  const completions = await profileRef.collection("completions").limit(500).get();
+  const completions = await profileRef.collection("completions").get();
   const entries = completions.docs.map(doc => {
     const item = doc.data();
     return {
@@ -18462,32 +18462,54 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
 
   // Busca sessões onde patientEmail === email do paciente
   // Sem orderBy — evita índice composto; ordena em JS
-  const [byEmail, byUid] = await Promise.all([
+  const linkedStudentsSnap = await db.collection("therapy_estudantes")
+    .where("portalAccountUid", "==", uid)
+    .limit(20)
+    .get().catch(() => null);
+  const linkedStudentIds = (linkedStudentsSnap?.docs || []).map(doc => doc.id);
+
+  const [byEmail, byUid, byAccountUid, ...byStudent] = await Promise.all([
     db.collection("therapy_sessions")
       .where("patientEmail", "==", email)
-      .limit(200)
       .get().catch(() => null),
     db.collection("therapy_sessions")
       .where("patientUid", "==", uid)
-      .limit(200)
-      .get().catch(() => null)
+      .get().catch(() => null),
+    db.collection("therapy_sessions")
+      .where("patientAccountUid", "==", uid)
+      .get().catch(() => null),
+    ...linkedStudentIds.map(studentId => db.collection("therapy_sessions")
+      .where("studentId", "==", studentId)
+      .get().catch(() => null))
   ]);
 
   const seen = new Set();
   const sessions = [];
-  for (const snap of [byEmail, byUid]) {
+  for (const snap of [byEmail, byUid, byAccountUid, ...byStudent]) {
     (snap?.docs || []).forEach(d => {
       if (seen.has(d.id)) return;
       seen.add(d.id);
       const s = d.data();
+      const scheduledAt = s.scheduledAt?.toMillis?.() || Number(s.scheduledAt) || null;
+      const normalizedSession = { ...s, scheduledAt };
+      const overdueAt = therapySessionOverdueAt(normalizedSession);
+      const joinOpensAt = scheduledAt ? scheduledAt - 15 * 60 * 1000 : null;
+      const activeStatus = ["scheduled", "in_progress"].includes(s.status || "scheduled");
       sessions.push({
         sessionId:     d.id,
-        scheduledAt:   s.scheduledAt?.toMillis?.() || Number(s.scheduledAt) || null,
+        scheduledAt,
+        durationMinutes: therapySessionDurationMinutes(s),
+        overdueAt,
+        joinOpensAt,
+        joinAvailable: Boolean(
+          activeStatus && joinOpensAt && now >= joinOpensAt && overdueAt && now < overdueAt
+        ),
         status:        s.status || "scheduled",
-        therapistName: s.therapistName || s.displayName || null,
+        therapistName: s.therapistDisplayName || s.therapistName || s.displayName || null,
         especialidade: s.especialidade || null,
         therapistSlug: s.therapistSlug || s.publicSchedulingSlug || null,
         therapistUid:  s.therapistUid || null,
+        demoTechnicalRoom: s.syntheticData === true && s.demoTechnicalRoom === true,
       });
     });
   }
@@ -18513,8 +18535,6 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   // viraram sessão. Só status "pending" — aprovadas já geram therapy_sessions.
   const reqSnap = await db.collection("therapy_scheduling_requests")
     .where("patientEmail", "==", email)
-    .where("status", "==", "pending")
-    .limit(20)
     .get().catch(() => null);
 
   const pendingRequests = reqSnap?.docs || [];
@@ -18532,23 +18552,137 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
       });
     }
     pendingRequests.forEach(d => {
+      const r = d.data();
+      if (r.sessionId && seen.has(r.sessionId)) return;
       if (seen.has(d.id)) return;
       seen.add(d.id);
-      const r = d.data();
       const tinfo = therapistMap[r.therapistUid] || {};
       sessions.push({
         sessionId:     d.id,
+        requestId:     d.id,
         scheduledAt:   r.requestedSlot || null,
-        status:        "pending",
+        status:        r.status === "approved" ? "scheduled" : (r.status || "pending"),
         therapistName: tinfo.name || null,
         especialidade: tinfo.especialidade || null,
         therapistSlug: r.therapistSlug || null,
+        respondedAt:   r.respondedAt?.toMillis?.() || Number(r.respondedAt) || null,
+        rejectReason:  r.rejectReason || null,
       });
     });
   }
 
   sessions.sort((a, b) => (b.scheduledAt || 0) - (a.scheduledAt || 0));
-  return res.json({ ok: true, sessions });
+  return res.json({ ok: true, sessions, serverNow: now });
+}));
+
+// Emite um token LiveKit para o paciente autenticado no app nativo.
+// Diferente do link público de convite, este fluxo pode ser refeito em caso de
+// queda de conexão: a própria conta Firebase é a credencial de acesso.
+router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  if (!ensureLivekit(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+  if (!req.body?.consentLgpd) {
+    return sendError(res, 400, "CONSENTIMENTO_LGPD_OBRIGATORIO");
+  }
+
+  const [userRecord, sessionSnap] = await Promise.all([
+    admin.auth().getUser(uid),
+    getDb().collection("therapy_sessions").doc(sessionId).get()
+  ]);
+  if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+
+  const session = sessionSnap.data();
+  const email = String(userRecord.email || "").trim().toLowerCase();
+  const sessionEmail = String(session.patientEmail || "").trim().toLowerCase();
+  let ownsSession = session.patientAccountUid === uid
+    || session.patientUid === uid
+    || Boolean(email && sessionEmail && email === sessionEmail);
+  if (!ownsSession && session.studentId) {
+    const studentSnap = await getDb().collection("therapy_estudantes").doc(String(session.studentId)).get();
+    if (studentSnap.exists) {
+      const student = studentSnap.data();
+      ownsSession = student.portalAccountUid === uid
+        && String(student.portalAccountEmail || "").trim().toLowerCase() === email
+        && publicProgram.studentPortalAccessEmail(student) === email
+        && publicProgram.studentPortalParticipationIsActive(student);
+    }
+  }
+  if (!ownsSession) return sendError(res, 403, "ACESSO_NEGADO");
+  if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
+  if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
+  if (!["scheduled", "in_progress"].includes(session.status || "scheduled")) {
+    return sendError(res, 409, "SESSAO_INDISPONIVEL");
+  }
+  if (!session.livekitRoom) return sendError(res, 409, "SALA_NAO_CONFIGURADA");
+
+  // Mantém a mesma regra do pré-join web: uma sessão particular vinculada a
+  // cobrança só libera a sala após confirmação do pagamento.
+  if (session.schedulingRequestId) {
+    const requestSnap = await getDb().collection("therapy_scheduling_requests")
+      .doc(String(session.schedulingRequestId)).get();
+    if (requestSnap.exists) {
+      const request = requestSnap.data();
+      const hasPaymentFlow = Boolean(request.paymentId) || request.paymentStatus === "pending";
+      if (hasPaymentFlow && request.paymentStatus !== "paid") {
+        return sendError(res, 402, "PAGAMENTO_PENDENTE");
+      }
+    }
+  }
+
+  const scheduledAt = session.scheduledAt?.toMillis?.() || Number(session.scheduledAt) || null;
+  const normalizedSession = { ...session, scheduledAt };
+  const now = Date.now();
+  const joinOpensAt = scheduledAt ? scheduledAt - 15 * 60 * 1000 : null;
+  const overdueAt = therapySessionOverdueAt(normalizedSession);
+  if (joinOpensAt && now < joinOpensAt && session.status !== "in_progress") {
+    return sendError(res, 409, "SALA_AINDA_NAO_DISPONIVEL", { joinOpensAt });
+  }
+  if (overdueAt && now >= overdueAt) return sendError(res, 410, "SESSAO_EXPIRADA");
+
+  const patientAccount = await loadPatientAccount(uid).catch(() => null);
+  const patientName = String(
+    patientAccount?.displayName || userRecord.displayName || session.patientName || "Paciente"
+  ).trim().slice(0, PATIENT_NAME_MAX) || "Paciente";
+  const livekitToken = await issueLivekitToken({
+    room: session.livekitRoom,
+    identity: `pat_${uid}`,
+    name: patientName,
+    ttlMs: SESSION_TOKEN_VALIDITY_MS
+  });
+
+  await sessionSnap.ref.set({
+    patientAccountUid: uid,
+    patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
+    patientNameFinal: patientName,
+    patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
+    patientJoinSource: "native_app",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  await logAudit({
+    type: "patient_joined_native",
+    sessionId,
+    patientAccountUid: uid,
+    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+  });
+
+  return res.json({
+    ok: true,
+    livekitUrl: LIVEKIT_URL,
+    livekitToken,
+    livekitRoom: session.livekitRoom,
+    role: "patient",
+    e2eeKey: session.e2eeKey || null,
+    therapistDisplayName: session.therapistDisplayName || session.therapistName || "Profissional",
+    sessionId,
+    patientAccountUid: uid,
+    demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
+  });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -18571,10 +18705,10 @@ router.get("/therapy/paciente/documentos", asyncHandler(async (req, res) => {
   const snaps = await Promise.all([
     db.collection("therapy_recibos")
       .where("patientEmail", "==", email)
-      .limit(100).get().catch(() => null),
+      .get().catch(() => null),
     db.collection("therapy_documentos")
       .where("patientEmail", "==", email)
-      .limit(100).get().catch(() => null),
+      .get().catch(() => null),
   ]);
 
   const items = [];
@@ -18640,8 +18774,9 @@ router.get("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
   if (!uid) return;
   const db = getDb();
   const snap = await db.collection("therapy_dependentes")
-    .where("uid", "==", uid).limit(20).get();
+    .where("uid", "==", uid).get();
   const dependentes = snap.docs
+    .filter(d => !d.data().deletedAt)
     .map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt?.toMillis?.() || null }))
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   return res.json({ ok: true, dependentes });
@@ -18660,6 +18795,11 @@ router.post("/therapy/paciente/dependentes", asyncHandler(async (req, res) => {
     email: email ? String(email).trim().toLowerCase() : null,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
+  await ref.collection("history").add({
+    type: "created",
+    snapshot: { nome: String(nome).trim(), parentesco: String(parentesco).trim(), dataNascimento: String(dataNascimento).trim(), email: email ? String(email).trim().toLowerCase() : null },
+    at: admin.firestore.FieldValue.serverTimestamp()
+  });
   return res.json({ ok: true, id: ref.id });
 }));
 
@@ -18673,11 +18813,20 @@ router.put("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res) =>
   const ref = db.collection("therapy_dependentes").doc(req.params.id);
   const doc = await ref.get();
   if (!doc.exists || doc.data().uid !== uid) return sendError(res, 404, "NAO_ENCONTRADO");
-  await ref.update({
+  const next = {
     nome: String(nome).trim(), parentesco: String(parentesco).trim(),
     dataNascimento: String(dataNascimento).trim(),
     email: email ? String(email).trim().toLowerCase() : null,
+  };
+  const batch = db.batch();
+  batch.update(ref, { ...next, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+  batch.set(ref.collection("history").doc(), {
+    type: "updated",
+    previous: doc.data(),
+    snapshot: next,
+    at: admin.firestore.FieldValue.serverTimestamp()
   });
+  await batch.commit();
   return res.json({ ok: true });
 }));
 
@@ -18689,7 +18838,17 @@ router.delete("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res)
   const ref = db.collection("therapy_dependentes").doc(req.params.id);
   const doc = await ref.get();
   if (!doc.exists || doc.data().uid !== uid) return sendError(res, 404, "NAO_ENCONTRADO");
-  await ref.delete();
+  const batch = db.batch();
+  batch.update(ref, {
+    deletedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  batch.set(ref.collection("history").doc(), {
+    type: "removed",
+    snapshot: doc.data(),
+    at: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await batch.commit();
   return res.json({ ok: true });
 }));
 
@@ -18707,15 +18866,25 @@ router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   const mood = Number(req.body?.mood);
   if (!Number.isInteger(mood) || mood < 1 || mood > 5) return sendError(res, 400, "MOOD_INVALIDO");
 
-  const date = String(req.body?.date || new Date().toISOString().slice(0, 10));
+  const date = String(req.body?.date || publicProgram.dateInSaoPaulo());
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return sendError(res, 400, "DATE_INVALIDA");
 
   const db  = getDb();
   const docId = `${uid}_${date}`;
-  await db.collection("therapy_humor").doc(docId).set({
+  const currentRef = db.collection("therapy_humor").doc(docId);
+  const historyRef = db.collection("therapy_humor_history").doc();
+  const batch = db.batch();
+  batch.set(currentRef, {
     uid, date, mood,
-    at: admin.firestore.FieldValue.serverTimestamp()
+    at: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
+  batch.set(historyRef, {
+    uid, date, mood,
+    type: "mood_recorded",
+    at: admin.firestore.FieldValue.serverTimestamp()
+  });
+  await batch.commit();
 
   return res.json({ ok: true, date, mood });
 }));
@@ -18726,7 +18895,8 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const days = Math.min(Number(req.query?.days || 30), 365);
+  const includeAll = req.query?.all === "1" || req.query?.all === "true";
+  const days = Math.min(Math.max(Number(req.query?.days || 30), 1), 3650);
   const db   = getDb();
 
   // Datas dos últimos N dias
@@ -18737,14 +18907,21 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   // Sem orderBy para evitar índice composto — ordena em JS
   const snap = await db.collection("therapy_humor")
     .where("uid", "==", uid)
-    .limit(400)
     .get();
 
-  const items = snap.docs
-    .map(d => { const x = d.data(); return { date: x.date, mood: x.mood, at: x.at?.toMillis?.() || null }; })
-    .filter(i => i.date >= cutoffStr)
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, days);
+  const today = publicProgram.dateInSaoPaulo();
+  const normalizedItems = snap.docs
+    .map(d => {
+      const x = d.data();
+      const at = x.at?.toMillis?.() || Number(x.at) || null;
+      const recordedLocalDate = at ? publicProgram.dateInSaoPaulo(at) : x.date;
+      const date = x.date > today && recordedLocalDate <= today ? recordedLocalDate : x.date;
+      return { date, mood: x.mood, at };
+    })
+    .filter(i => includeAll || i.date >= cutoffStr)
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.at || 0) - (a.at || 0));
+  const allItems = [...new Map(normalizedItems.map(item => [item.date, item])).values()];
+  const items = includeAll ? allItems : allItems.slice(0, days);
 
   return res.json({ ok: true, items });
 }));
