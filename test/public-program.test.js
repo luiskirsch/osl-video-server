@@ -14,6 +14,7 @@ const {
   canTransitionCase,
   programIsOperational,
   dateInSaoPaulo,
+  normalizeMoodRecordDate,
   studentPortalAccessEmail,
   studentPortalParticipationIsActive
 } = require('../services/public-program');
@@ -79,6 +80,12 @@ test('vigência e competência usam a data de São Paulo, não a virada UTC', ()
   const lateEvening = new Date('2026-09-01T01:30:00Z');
   assert.equal(dateInSaoPaulo(lateEvening), '2026-08-31');
   assert.equal(programIsOperational({ status: 'active', registrationOpen: true, startDate: '2026-08-01', endDate: '2026-08-31' }, lateEvening), true);
+});
+
+test('humor salvo em UTC depois das 21h volta para o dia local correto', () => {
+  const recordedAt = new Date('2026-09-04T01:30:00Z'); // 03/09 às 22h30 em São Paulo
+  assert.equal(normalizeMoodRecordDate('2026-09-04', recordedAt, '2026-09-04'), '2026-09-03');
+  assert.equal(normalizeMoodRecordDate('2026-09-03', recordedAt, '2026-09-04'), '2026-09-03');
 });
 
 test('campos numéricos vazios não viram cota zero', () => {

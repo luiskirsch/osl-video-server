@@ -19072,8 +19072,10 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
     .map(d => {
       const x = d.data();
       const at = x.at?.toMillis?.() || Number(x.at) || null;
-      const recordedLocalDate = at ? publicProgram.dateInSaoPaulo(at) : x.date;
-      const date = x.date > today && recordedLocalDate <= today ? recordedLocalDate : x.date;
+      // Clientes antigos enviavam a data UTC e podiam registrar o dia seguinte
+      // após 21h em São Paulo. O timestamp do servidor é a fonte confiável para
+      // migrar esses registros, inclusive quando o dia seguinte já começou.
+      const date = publicProgram.normalizeMoodRecordDate(x.date, at, today);
       return { date, mood: x.mood, at };
     })
     .filter(i => includeAll || i.date >= cutoffStr)

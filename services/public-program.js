@@ -107,6 +107,15 @@ function dateInSaoPaulo(value = new Date()) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function normalizeMoodRecordDate(date, recordedAt, today = dateInSaoPaulo()) {
+  const storedDate = String(date || '');
+  if (!recordedAt) return storedDate;
+  const recordedLocalDate = dateInSaoPaulo(recordedAt);
+  return storedDate > recordedLocalDate && recordedLocalDate <= today
+    ? recordedLocalDate
+    : storedDate;
+}
+
 function optionalInteger(value, fallback = null) {
   if (value === null || value === undefined || String(value).trim() === '') return fallback;
   const number = Number(value);
@@ -405,6 +414,7 @@ module.exports = {
   normalizeCnpj,
   normalizeDate,
   dateInSaoPaulo,
+  normalizeMoodRecordDate,
   slugifyPublicProgram,
   createOpaqueCode,
   hashOpaqueCode,
