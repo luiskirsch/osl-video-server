@@ -2084,9 +2084,15 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
     .limit(200)
     .get();
 
-  const sessions = snap.docs
-    .map(d => {
-      const data = d.data();
+  // Pedidos feitos pelo app antes de a origem escolar passar a ser gravada
+  // podem já ter virado sessão. Corrige esses registros de forma idempotente
+  // na primeira abertura do painel, sem cancelar ou recriar a consulta.
+  const normalizedSessionDocs = await Promise.all(
+    snap.docs.map(enrichLegacyAppScheduledSession)
+  );
+
+  const sessions = normalizedSessionDocs
+    .map(({ data }) => {
       return {
         sessionId: data.sessionId,
         patientName: data.patientName,
@@ -9174,13 +9180,16 @@ router.get("/public/agendar/:slug/disponibilidade", asyncHandler(async (req, res
 function isPublicSchoolSchedulingRequest(data = {}) {
   return data.careOrigin === "public_school"
     || data.isPublicSchoolSession === true
-    || data.fundingSource === "public_contract";
+    || data.fundingSource === "public_contract"
+    || data.fundingSource === "synthetic_demo";
 }
 
 function publicSchoolSchedulingContext(studentDoc, patientAccountUid = null) {
   if (!studentDoc?.exists) return null;
   const student = studentDoc.data();
   if (!publicProgram.studentPortalParticipationIsActive(student)) return null;
+  const syntheticDemo = student.syntheticData === true
+    || (student.demoMode === true && student.clinicalUseAllowed === false);
   return {
     requestSource: "student_app",
     patientAccountUid: patientAccountUid || student.portalAccountUid || null,
@@ -9194,8 +9203,42 @@ function publicSchoolSchedulingContext(studentDoc, patientAccountUid = null) {
     contractingAuthorityName: student.contractingAuthorityName || null,
     schoolName: student.schoolName || student.escola || null,
     careOrigin: "public_school",
-    fundingSource: "public_contract",
-    isPublicSchoolSession: true
+    fundingSource: syntheticDemo ? "synthetic_demo" : "public_contract",
+    isPublicSchoolSession: true,
+    ...(syntheticDemo ? {
+      syntheticData: true,
+      demoTechnicalRoom: true,
+      clinicalUseAllowed: false,
+      aiDisabledReason: "synthetic_public_program_demo"
+    } : {})
+  };
+}
+
+function persistedPublicSchoolSchedulingContext(data = {}) {
+  const syntheticDemo = data.fundingSource === "synthetic_demo"
+    || data.syntheticData === true
+    || data.demoTechnicalRoom === true;
+  return {
+    requestSource: data.requestSource || "student_app",
+    patientAccountUid: data.patientAccountUid || null,
+    studentId: data.studentId || null,
+    studentName: data.studentName || null,
+    caseCode: data.caseCode || null,
+    publicProgramCaseId: data.publicProgramCaseId || null,
+    publicProgramId: data.publicProgramId || null,
+    publicSchoolId: data.publicSchoolId || null,
+    programName: data.programName || null,
+    contractingAuthorityName: data.contractingAuthorityName || null,
+    schoolName: data.schoolName || null,
+    careOrigin: "public_school",
+    fundingSource: syntheticDemo ? "synthetic_demo" : "public_contract",
+    isPublicSchoolSession: true,
+    ...(syntheticDemo ? {
+      syntheticData: true,
+      demoTechnicalRoom: true,
+      clinicalUseAllowed: false,
+      aiDisabledReason: "synthetic_public_program_demo"
+    } : {})
   };
 }
 
@@ -9230,6 +9273,52 @@ async function resolvePublicSchoolSchedulingContext({ patientAccountUid = null, 
     return true;
   });
   return publicSchoolSchedulingContext(studentDoc, patientAccountUid);
+}
+
+async function enrichLegacyAppScheduledSession(doc) {
+  const session = doc.data();
+  if (therapySessionCareOrigin(session) === "public_school" || !session.schedulingRequestId) {
+    return { doc, data: session };
+  }
+  const scheduledAt = session.scheduledAt?.toMillis?.() || Number(session.scheduledAt) || 0;
+  if (!["scheduled", "confirmed", "in_progress"].includes(session.status || "scheduled")
+      || scheduledAt < Date.now() - 24 * 60 * 60 * 1000) {
+    return { doc, data: session };
+  }
+
+  const db = getDb();
+  const requestRef = db.collection("therapy_scheduling_requests")
+    .doc(String(session.schedulingRequestId));
+  const requestSnap = await requestRef.get();
+  if (!requestSnap.exists) return { doc, data: session };
+
+  const request = requestSnap.data();
+  // Um link público explicitamente particular não muda de modalidade só
+  // porque o e-mail também pertence a um aluno cadastrado.
+  if (request.requestSource === "public_link") return { doc, data: session };
+
+  const schoolContext = isPublicSchoolSchedulingRequest(request)
+    ? persistedPublicSchoolSchedulingContext(request)
+    : await resolvePublicSchoolSchedulingContext({
+      patientAccountUid: session.patientAccountUid || request.patientAccountUid || null,
+      patientEmail: session.patientEmail || request.patientEmail || null,
+      studentId: session.studentId || request.studentId || null
+    });
+  if (!schoolContext) return { doc, data: session };
+
+  const sessionContext = {
+    ...schoolContext,
+    paymentStatus: "not_applicable",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  const batch = db.batch();
+  batch.set(doc.ref, sessionContext, { merge: true });
+  batch.set(requestRef, {
+    ...schoolContext,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await batch.commit();
+  return { doc, data: { ...session, ...sessionContext } };
 }
 
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
@@ -9977,22 +10066,7 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   if (reqData.status !== "pending")  return sendError(res, 409, "SOLICITACAO_JA_RESPONDIDA");
 
   const schoolContext = isPublicSchoolSchedulingRequest(reqData)
-    ? {
-      requestSource: reqData.requestSource || "student_app",
-      patientAccountUid: reqData.patientAccountUid || null,
-      studentId: reqData.studentId || null,
-      studentName: reqData.studentName || null,
-      caseCode: reqData.caseCode || null,
-      publicProgramCaseId: reqData.publicProgramCaseId || null,
-      publicProgramId: reqData.publicProgramId || null,
-      publicSchoolId: reqData.publicSchoolId || null,
-      programName: reqData.programName || null,
-      contractingAuthorityName: reqData.contractingAuthorityName || null,
-      schoolName: reqData.schoolName || null,
-      careOrigin: "public_school",
-      fundingSource: "public_contract",
-      isPublicSchoolSession: true
-    }
+    ? persistedPublicSchoolSchedulingContext(reqData)
     : await resolvePublicSchoolSchedulingContext({
       patientAccountUid: reqData.patientAccountUid || null,
       patientEmail: reqData.patientEmail || null,
@@ -10052,10 +10126,16 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
       publicProgramCaseId: schoolContext.publicProgramCaseId,
       publicProgramId: schoolContext.publicProgramId,
       publicSchoolId: schoolContext.publicSchoolId,
-      fundingSource: "public_contract",
+      fundingSource: schoolContext.fundingSource,
       paymentStatus: "not_applicable",
       careOrigin: "public_school",
-      isPublicSchoolSession: true
+      isPublicSchoolSession: true,
+      ...(schoolContext.syntheticData === true ? {
+        syntheticData: true,
+        demoTechnicalRoom: true,
+        clinicalUseAllowed: false,
+        aiDisabledReason: schoolContext.aiDisabledReason || "synthetic_public_program_demo"
+      } : {})
     } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
