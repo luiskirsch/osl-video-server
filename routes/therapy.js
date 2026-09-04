@@ -9171,6 +9171,67 @@ router.get("/public/agendar/:slug/disponibilidade", asyncHandler(async (req, res
   return res.json({ ok: true, slots, configured: true });
 }));
 
+function isPublicSchoolSchedulingRequest(data = {}) {
+  return data.careOrigin === "public_school"
+    || data.isPublicSchoolSession === true
+    || data.fundingSource === "public_contract";
+}
+
+function publicSchoolSchedulingContext(studentDoc, patientAccountUid = null) {
+  if (!studentDoc?.exists) return null;
+  const student = studentDoc.data();
+  if (!publicProgram.studentPortalParticipationIsActive(student)) return null;
+  return {
+    requestSource: "student_app",
+    patientAccountUid: patientAccountUid || student.portalAccountUid || null,
+    studentId: studentDoc.id,
+    studentName: student.nomeSocial || student.nome || "Aluno(a)",
+    caseCode: student.caseCode || null,
+    publicProgramCaseId: student.caseId || studentDoc.id,
+    publicProgramId: student.programId || null,
+    publicSchoolId: student.schoolId || null,
+    programName: student.programName || null,
+    contractingAuthorityName: student.contractingAuthorityName || null,
+    schoolName: student.schoolName || student.escola || null,
+    careOrigin: "public_school",
+    fundingSource: "public_contract",
+    isPublicSchoolSession: true
+  };
+}
+
+// Resolve tanto pedidos novos autenticados quanto pedidos antigos do app que
+// ainda não tinham a origem persistida. O fallback por e-mail só considera um
+// cadastro escolar ativo e já vinculado ao portal do aluno.
+async function resolvePublicSchoolSchedulingContext({ patientAccountUid = null, patientEmail = null, studentId = null } = {}) {
+  const db = getDb();
+  const normalizedEmail = String(patientEmail || "").trim().toLowerCase();
+  const candidates = [];
+
+  if (studentId) {
+    const studentSnap = await db.collection("therapy_estudantes").doc(String(studentId)).get();
+    if (studentSnap.exists) candidates.push(studentSnap);
+  }
+  if (patientAccountUid) {
+    const linkedSnap = await db.collection("therapy_estudantes")
+      .where("portalAccountUid", "==", patientAccountUid).limit(20).get();
+    candidates.push(...linkedSnap.docs);
+  } else if (normalizedEmail) {
+    const linkedSnap = await db.collection("therapy_estudantes")
+      .where("portalAccountEmail", "==", normalizedEmail).limit(20).get();
+    candidates.push(...linkedSnap.docs);
+  }
+
+  const uniqueCandidates = [...new Map(candidates.map(doc => [doc.id, doc])).values()];
+  const studentDoc = uniqueCandidates.find(doc => {
+    const student = doc.data();
+    if (!publicProgram.studentPortalParticipationIsActive(student)) return false;
+    if (patientAccountUid && student.portalAccountUid !== patientAccountUid) return false;
+    if (normalizedEmail && publicProgram.studentPortalAccessEmail(student) !== normalizedEmail) return false;
+    return true;
+  });
+  return publicSchoolSchedulingContext(studentDoc, patientAccountUid);
+}
+
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
 router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -9185,6 +9246,23 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     return sendError(res, 400, "EMAIL_INVALIDO");
   }
   const patientEmail = patientEmailRaw;
+
+  // O endpoint continua público para o link particular. Quando o app envia o
+  // token Firebase, a origem é determinada no servidor pelo vínculo escolar;
+  // o cliente não consegue se autodeclarar como atendimento da rede pública.
+  let patientAuth = null;
+  const bearer = getBearerToken(req);
+  if (bearer) {
+    try {
+      const decoded = await admin.auth().verifyIdToken(bearer);
+      patientAuth = {
+        uid: decoded.uid,
+        email: String(decoded.email || "").trim().toLowerCase()
+      };
+    } catch (_) {
+      return sendError(res, 401, "TOKEN_INVALIDO");
+    }
+  }
 
   const patientPhoneRaw = String(req.body?.patientPhone || "").trim();
   const patientPhoneNorm = patientPhoneRaw ? normalizeWaPhone(patientPhoneRaw) : "";
@@ -9240,6 +9318,13 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
   const expiresAt = Date.now() + SCHEDULING_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000;
+  const schoolContext = patientAuth
+    ? await resolvePublicSchoolSchedulingContext({
+      patientAccountUid: patientAuth.uid,
+      patientEmail: patientAuth.email || patientEmail,
+      studentId: String(req.body?.studentId || "").trim() || null
+    })
+    : null;
 
   await getDb().collection("therapy_scheduling_requests").doc(requestId).set({
     requestId,
@@ -9256,6 +9341,9 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     expiresAt,
     tcleSigned: true,
     tcleSignedAt,
+    requestSource: patientAuth ? (schoolContext ? "student_app" : "patient_app") : "public_link",
+    ...(patientAuth ? { patientAccountUid: patientAuth.uid } : {}),
+    ...(schoolContext || {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
@@ -9820,24 +9908,50 @@ router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) =
   const snap = await db.collection("therapy_scheduling_requests")
     .where("therapistUid", "==", uid)
     .get();
-  const items = [];
-  snap.forEach(d => {
+  const requestDocs = snap.docs.filter(d => includeAll || d.data().status === "pending");
+  const items = await Promise.all(requestDocs.map(async d => {
     const r = d.data();
-    if (!includeAll && r.status !== "pending") return;
-    items.push({
-      requestId: r.requestId,
-      patientName: r.patientName,
-      patientEmail: r.patientEmail,
-      patientPhone: r.patientPhone || null,
-      notes: r.notes || "",
-      requestedSlot: r.requestedSlot,
-      requestedSlotEnd: r.requestedSlotEnd,
-      status: r.status,
-      sessionId: r.sessionId || null,
-      respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null,
-      createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null
+    // Compatibilidade com solicitações já feitas por versões antigas do app:
+    // reconhece o vínculo escolar e persiste a origem antes da aprovação.
+    let schoolContext = isPublicSchoolSchedulingRequest(r) ? null : await resolvePublicSchoolSchedulingContext({
+      patientAccountUid: r.patientAccountUid || null,
+      patientEmail: r.patientEmail || null,
+      studentId: r.studentId || null
     });
-  });
+    if (schoolContext) {
+      await d.ref.set(schoolContext, { merge: true });
+    } else {
+      schoolContext = {};
+    }
+    const data = { ...r, ...schoolContext };
+    return {
+      requestId: data.requestId,
+      patientName: data.patientName,
+      patientEmail: data.patientEmail,
+      patientPhone: data.patientPhone || null,
+      notes: data.notes || "",
+      requestedSlot: data.requestedSlot,
+      requestedSlotEnd: data.requestedSlotEnd,
+      status: data.status,
+      sessionId: data.sessionId || null,
+      requestSource: data.requestSource || "public_link",
+      patientAccountUid: data.patientAccountUid || null,
+      studentId: data.studentId || null,
+      studentName: data.studentName || null,
+      caseCode: data.caseCode || null,
+      publicProgramCaseId: data.publicProgramCaseId || null,
+      publicProgramId: data.publicProgramId || null,
+      publicSchoolId: data.publicSchoolId || null,
+      programName: data.programName || null,
+      contractingAuthorityName: data.contractingAuthorityName || null,
+      schoolName: data.schoolName || null,
+      careOrigin: data.careOrigin || null,
+      fundingSource: data.fundingSource || null,
+      isPublicSchoolSession: data.isPublicSchoolSession === true,
+      respondedAt: data.respondedAt?.toMillis ? data.respondedAt.toMillis() : null,
+      createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null
+    };
+  }));
   items.sort((a, b) => (a.requestedSlot || 0) - (b.requestedSlot || 0));
   return res.json({ ok: true, requests: items });
 }));
@@ -9862,6 +9976,29 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   if (reqData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (reqData.status !== "pending")  return sendError(res, 409, "SOLICITACAO_JA_RESPONDIDA");
 
+  const schoolContext = isPublicSchoolSchedulingRequest(reqData)
+    ? {
+      requestSource: reqData.requestSource || "student_app",
+      patientAccountUid: reqData.patientAccountUid || null,
+      studentId: reqData.studentId || null,
+      studentName: reqData.studentName || null,
+      caseCode: reqData.caseCode || null,
+      publicProgramCaseId: reqData.publicProgramCaseId || null,
+      publicProgramId: reqData.publicProgramId || null,
+      publicSchoolId: reqData.publicSchoolId || null,
+      programName: reqData.programName || null,
+      contractingAuthorityName: reqData.contractingAuthorityName || null,
+      schoolName: reqData.schoolName || null,
+      careOrigin: "public_school",
+      fundingSource: "public_contract",
+      isPublicSchoolSession: true
+    }
+    : await resolvePublicSchoolSchedulingContext({
+      patientAccountUid: reqData.patientAccountUid || null,
+      patientEmail: reqData.patientEmail || null,
+      studentId: reqData.studentId || null
+    });
+
   // Cria sessão real (mesmo padrão de /sessao/criar mas sem recorrência).
   const sId = newId("sess");
   const room = `therapy_${sId}`;
@@ -9883,7 +10020,9 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     livekitRoom: room,
     patientNameHint: reqData.patientName,
     iat: Date.now(),
-    exp: Date.now() + JOIN_TOKEN_VALIDITY_MS
+    // O pedido pode ser aprovado dias antes. O acesso precisa continuar
+    // válido até depois do horário marcado, especialmente no app do aluno.
+    exp: Math.max(Date.now() + JOIN_TOKEN_VALIDITY_MS, Number(reqData.requestedSlot) + JOIN_TOKEN_VALIDITY_MS)
   };
   const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
 
@@ -9907,12 +10046,24 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     recurrenceIndex: null,
     recurrenceCount: null,
     schedulingRequestId: requestId,
+    ...(schoolContext ? {
+      patientAccountUid: schoolContext.patientAccountUid,
+      studentId: schoolContext.studentId,
+      publicProgramCaseId: schoolContext.publicProgramCaseId,
+      publicProgramId: schoolContext.publicProgramId,
+      publicSchoolId: schoolContext.publicSchoolId,
+      fundingSource: "public_contract",
+      paymentStatus: "not_applicable",
+      careOrigin: "public_school",
+      isPublicSchoolSession: true
+    } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
   batch.update(reqDocRef, {
     status: "approved",
     sessionId: sId,
+    ...(schoolContext || {}),
     respondedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
@@ -9922,6 +10073,13 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   let joinCode = null;
   try {
     joinCode = await createJoinCode({ joinToken, sessionId: sId, expiresAt: joinPayload.exp });
+    if (joinCode && schoolContext?.studentId) {
+      await db.collection("therapy_sessions").doc(sId).set({
+        studentJoinCode: joinCode,
+        studentJoinCodeExpiresAt: joinPayload.exp,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
   } catch (e) {
     logWarn("therapy_join_code_create_failed", { sessionId: sId, error: e.message });
   }
