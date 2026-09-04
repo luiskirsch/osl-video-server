@@ -19068,6 +19068,7 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
     .get();
 
   const today = publicProgram.dateInSaoPaulo();
+  const legacyMigrations = [];
   const normalizedItems = snap.docs
     .map(d => {
       const x = d.data();
@@ -19076,12 +19077,47 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
       // após 21h em São Paulo. O timestamp do servidor é a fonte confiável para
       // migrar esses registros, inclusive quando o dia seguinte já começou.
       const date = publicProgram.normalizeMoodRecordDate(x.date, at, today);
+      if (date !== x.date) {
+        legacyMigrations.push({
+          date,
+          mood: x.mood,
+          at: x.at || null,
+          sourceDate: x.date
+        });
+      }
       return { date, mood: x.mood, at };
     })
     .filter(i => includeAll || i.date >= cutoffStr)
     .sort((a, b) => b.date.localeCompare(a.date) || (b.at || 0) - (a.at || 0));
   const allItems = [...new Map(normalizedItems.map(item => [item.date, item])).values()];
   const items = includeAll ? allItems : allItems.slice(0, days);
+
+  // Cria a entrada canônica do dia correto antes que um novo humor do dia
+  // seguinte reutilize a chave errada. create() preserva qualquer registro
+  // legítimo que já exista e mantém o documento legado como trilha de auditoria.
+  await Promise.all(legacyMigrations.map(async migration => {
+    const canonicalRef = db.collection("therapy_humor").doc(`${uid}_${migration.date}`);
+    try {
+      await canonicalRef.create({
+        uid,
+        date: migration.date,
+        mood: migration.mood,
+        at: migration.at || admin.firestore.FieldValue.serverTimestamp(),
+        migratedFromDate: migration.sourceDate,
+        migratedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (error) {
+      if (![6, "6", "already-exists"].includes(error?.code)) {
+        logWarn("therapy_mood_legacy_date_migration_failed", {
+          uid,
+          from: migration.sourceDate,
+          to: migration.date,
+          error: error?.message
+        });
+      }
+    }
+  }));
 
   return res.json({ ok: true, items });
 }));
