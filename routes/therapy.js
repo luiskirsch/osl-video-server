@@ -59,12 +59,14 @@ const {
 const publicProgram = require("../services/public-program");
 const {
   therapySessionDurationMinutes,
+  therapySessionStartedAt,
   therapySessionOverdueAt,
   isTherapySessionOverdue,
   selectTherapyPanelSessions
 } = require("../services/therapy-session-state");
 const studentDevelopment = require("../services/student-development");
 const { withRetry } = require("../services/retry");
+const { endTherapyRoom } = require("../services/therapy-room");
 const whisperSvc = require("../services/whisper");
 const sessionSummarySvc = require("../services/session-summary");
 const clinicalTwinSvc = require("../services/clinical-twin");
@@ -475,6 +477,26 @@ async function issueLivekitToken({ room, identity, name, ttlMs }) {
     canPublishData: true
   });
   return at.toJwt();
+}
+
+async function ensureTherapySessionStarted(sessionRef) {
+  let startedAt = null;
+  await getDb().runTransaction(async tx => {
+    const snap = await tx.get(sessionRef);
+    if (!snap.exists) throw new Error("SESSAO_NAO_ENCONTRADA");
+    const session = snap.data();
+    if (session.status === "completed") throw new Error("SESSAO_ENCERRADA");
+    if (session.status === "canceled") throw new Error("SESSAO_CANCELADA");
+
+    startedAt = therapySessionStartedAt(session, Date.now());
+    if (!therapySessionStartedAt(session)) {
+      tx.set(sessionRef, {
+        sessionStartedAt: startedAt,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
+  });
+  return startedAt;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2207,6 +2229,10 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     aiSummaryReady = patientConsent;
   }
 
+  const sessionStartedAt = await ensureTherapySessionStarted(
+    db.collection("therapy_sessions").doc(sessionId)
+  );
+
   await db.collection("therapy_sessions").doc(sessionId).set({
     status: "in_progress",
     therapistJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -2224,6 +2250,8 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     e2eeKey: session.e2eeKey || null,
     e2eeSalt: therapist?.e2eeSalt || null,
     aiSummaryReady,
+    sessionStartedAt,
+    serverNow: Date.now(),
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
 }));
@@ -2372,6 +2400,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   };
   if (patientAccountUid) sessionUpdate.patientAccountUid = patientAccountUid;
 
+  const sessionStartedAt = await ensureTherapySessionStarted(sessionRef);
   await sessionRef.set(sessionUpdate, { merge: true });
 
   await logAudit({
@@ -2391,6 +2420,8 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     e2eeKey: session.e2eeKey || null,
     therapistDisplayName: session.therapistDisplayName || "",
     sessionId: payload.sessionId,
+    sessionStartedAt,
+    serverNow: Date.now(),
     patientAccountUid: patientAccountUid || null,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
@@ -2491,6 +2522,7 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
       return;
     }
     const current = freshSession.data();
+    completion.sessData = current;
     if (current.therapistUid !== uid) {
       completion.error = "ACESSO_NEGADO";
       return;
@@ -2544,14 +2576,35 @@ router.post("/therapy/sessao/:sessionId/encerrar", asyncHandler(async (req, res)
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
     }
-    completion.sessData = current;
   });
 
   if (completion.error === "SESSAO_NAO_ENCONTRADA") return sendError(res, 404, completion.error);
   if (completion.error === "ACESSO_NEGADO") return sendError(res, 403, completion.error);
   if (completion.error) return sendError(res, 409, completion.error);
-  if (completion.alreadyCompleted) return res.json({ ok: true, alreadyCompleted: true });
   const sessData = completion.sessData;
+
+  // Encerrar o documento não encerra uma chamada LiveKit já aberta. Remove a
+  // sala inteira para desconectar profissional e paciente. Também executa em
+  // retries de uma sessão já marcada como completed, permitindo recuperar uma
+  // falha transitória ocorrida depois do commit no Firestore.
+  try {
+    await endTherapyRoom({
+      roomName: sessData.livekitRoom || `therapy_${sessionId}`,
+      sessionId
+    });
+  } catch (error) {
+    logError("therapy_room_end_failed", error, { sessionId, room: sessData.livekitRoom });
+    getIo()?.to(uid).emit("sessoes:changed");
+    return sendError(res, 502, "FALHA_AO_ENCERRAR_SALA", {
+      sessionCompleted: true,
+      retryable: true
+    });
+  }
+
+  if (completion.alreadyCompleted) {
+    getIo()?.to(uid).emit("sessoes:changed");
+    return res.json({ ok: true, alreadyCompleted: true });
+  }
 
   if (sessData.publicProgramCaseId && sessData.studentId) {
     await logStudentEvent({
@@ -18893,6 +18946,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
     ttlMs: SESSION_TOKEN_VALIDITY_MS
   });
 
+  const sessionStartedAt = await ensureTherapySessionStarted(sessionSnap.ref);
   await sessionSnap.ref.set({
     patientAccountUid: uid,
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -18918,6 +18972,8 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
     e2eeKey: session.e2eeKey || null,
     therapistDisplayName: session.therapistDisplayName || session.therapistName || "Profissional",
     sessionId,
+    sessionStartedAt,
+    serverNow: Date.now(),
     patientAccountUid: uid,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });

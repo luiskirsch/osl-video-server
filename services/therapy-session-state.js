@@ -13,6 +13,34 @@ function therapySessionDurationMinutes(session = {}) {
   return Math.min(MAX_SESSION_DURATION_MINUTES, Math.max(MIN_SESSION_DURATION_MINUTES, duration));
 }
 
+function therapyTimestampMillis(value) {
+  if (value == null || value === '') return null;
+  if (typeof value?.toMillis === 'function') {
+    const millis = value.toMillis();
+    return Number.isFinite(millis) && millis > 0 ? millis : null;
+  }
+  if (value instanceof Date) {
+    const millis = value.getTime();
+    return Number.isFinite(millis) && millis > 0 ? millis : null;
+  }
+  const millis = Number(value);
+  return Number.isFinite(millis) && millis > 0 ? millis : null;
+}
+
+function therapySessionStartedAt(session = {}, fallback = null) {
+  const persisted = therapyTimestampMillis(session.sessionStartedAt);
+  if (persisted) return persisted;
+
+  // Compatibilidade com consultas que já estavam em andamento antes da
+  // introdução do relógio compartilhado. Usa a primeira entrada conhecida.
+  const legacyJoins = [session.therapistJoinedAt, session.patientJoinedAt]
+    .map(therapyTimestampMillis)
+    .filter(Boolean)
+    .sort((a, b) => a - b);
+  if (legacyJoins.length) return legacyJoins[0];
+  return therapyTimestampMillis(fallback);
+}
+
 function therapySessionOverdueAt(session = {}) {
   const scheduledAt = Number(session.scheduledAt);
   if (!Number.isFinite(scheduledAt) || scheduledAt <= 0) return null;
@@ -47,6 +75,8 @@ module.exports = {
   DEFAULT_SESSION_DURATION_MINUTES,
   SESSION_OVERDUE_GRACE_MINUTES,
   therapySessionDurationMinutes,
+  therapyTimestampMillis,
+  therapySessionStartedAt,
   therapySessionOverdueAt,
   isTherapySessionOverdue,
   selectTherapyPanelSessions

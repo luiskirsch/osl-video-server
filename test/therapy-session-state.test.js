@@ -4,12 +4,34 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   therapySessionDurationMinutes,
+  therapyTimestampMillis,
+  therapySessionStartedAt,
   therapySessionOverdueAt,
   isTherapySessionOverdue,
   selectTherapyPanelSessions
 } = require('../services/therapy-session-state');
 
 const START = Date.UTC(2026, 8, 1, 20, 0, 0);
+
+test('início compartilhado sobrevive a reconexões e normaliza timestamps', () => {
+  const persisted = START - 30_000;
+  const session = {
+    sessionStartedAt: persisted,
+    therapistJoinedAt: { toMillis: () => START + 10_000 },
+    patientJoinedAt: new Date(START + 20_000)
+  };
+  assert.equal(therapySessionStartedAt(session, START + 30_000), persisted);
+  assert.equal(therapyTimestampMillis({ toMillis: () => START }), START);
+});
+
+test('sessão legada usa a primeira entrada conhecida sem reiniciar', () => {
+  const session = {
+    therapistJoinedAt: { toMillis: () => START + 5_000 },
+    patientJoinedAt: START
+  };
+  assert.equal(therapySessionStartedAt(session, START + 30_000), START);
+  assert.equal(therapySessionStartedAt({}, START + 30_000), START + 30_000);
+});
 
 test('consulta permanece ativa durante a duração e a tolerância', () => {
   const session = { status: 'in_progress', scheduledAt: START, durationMinutes: 50 };
