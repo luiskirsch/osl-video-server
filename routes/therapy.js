@@ -146,6 +146,7 @@ const {
   templateClinicInvite,
   templateStudentSessionRequest,
   templateStudentLeadReceived,
+  templateInstitutionLeadReceived,
   templateRecemFormadoApproved, templateRecemFormadoRejected,
   templateFormacaoApproved, templateFormacaoRejected,
   buildJoinUrl: buildPatientJoinUrl, buildCancelUrl: buildPatientCancelUrl, buildConfirmUrl: buildPatientConfirmUrl,
@@ -7124,7 +7125,9 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
     // [9] therapy_student_leads — interessados no plano Estudante (landing) ainda não contatados
     db.collection("therapy_student_leads").where("status", "==", "new").get(),
     // [10] empresa-pending-review — profissionais do plano empresa aguardando aprovação manual
-    db.collection("therapists").where("plano", "==", "empresa-pending-review").get()
+    db.collection("therapists").where("plano", "==", "empresa-pending-review").get(),
+    // [11] instituições que solicitaram apresentação e aguardam primeiro contato
+    db.collection("therapy_institution_leads").where("status", "==", "new").get()
   ]);
 
   // ─── Helpers ─────────────────────────────────────────────────────────
@@ -7287,6 +7290,7 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
   const pendSemConselho = queries[6].status === "fulfilled" ? queries[6].value.size : 0;
   const pendLeadsEstudante = queries[9].status === "fulfilled" ? queries[9].value.size : 0;
   const pendEmpresa = queries[10].status === "fulfilled" ? queries[10].value.size : 0;
+  const pendLeadsInstituicoes = queries[11].status === "fulfilled" ? queries[11].value.size : 0;
 
   // ─── Integrações (configurado vs não) ───────────────────────────────
   // Só listamos integrações CRÍTICAS pro produto funcionar. Removidos:
@@ -7371,8 +7375,9 @@ router.get("/therapy/admin/dashboard", asyncHandler(async (req, res) => {
       recemFormado: pendRecemFormado,
       semConselho: pendSemConselho,
       leadsEstudante: pendLeadsEstudante,
+      leadsInstituicoes: pendLeadsInstituicoes,
       empresa: pendEmpresa,
-      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho + pendLeadsEstudante + pendEmpresa
+      total: pendCrpCrm + pendEstudante + pendRecemFormado + pendSemConselho + pendLeadsEstudante + pendLeadsInstituicoes + pendEmpresa
     },
     eventos,
     sistema
@@ -8849,6 +8854,26 @@ const publicStudentLeadLimiter = rateLimit({
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
 });
 
+const INSTITUTION_LEAD_NAME_MAX        = 80;
+const INSTITUTION_LEAD_ROLE_MAX        = 80;
+const INSTITUTION_LEAD_ORG_MAX         = 140;
+const INSTITUTION_LEAD_EMAIL_MAX       = 120;
+const INSTITUTION_LEAD_PHONE_MAX       = 30;
+const INSTITUTION_LEAD_CITY_MAX        = 80;
+const INSTITUTION_LEAD_MESSAGE_MAX     = 1000;
+const INSTITUTION_LEAD_SOURCE_MAX      = 80;
+const INSTITUTION_LEAD_TYPES = new Set([
+  "private_school", "private_network", "municipality", "state_network", "other"
+]);
+
+const publicInstitutionLeadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
+});
+
 function summarizeTherapistForPublicScheduling(therapist) {
   const c = therapist.consultorio || {};
   const conselhoSigla = resolveSiglaFromTherapist(therapist);
@@ -9788,6 +9813,88 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
 // ADMIN — Leads de interesse no plano Estudante (modal da landing page)
 // ─────────────────────────────────────────────────────────────────────────
 
+// POST /public/leads/instituicao — contato comercial de escolas, redes de
+// ensino e entes públicos. Não exige conta; armazena o lead e avisa a equipe.
+router.post("/public/leads/instituicao", publicInstitutionLeadLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  // Campo-armadilha para robôs. A resposta deliberadamente não revela o filtro.
+  if (String(req.body?.website || "").trim()) return res.json({ ok: true });
+
+  const name = String(req.body?.name || "").trim().slice(0, INSTITUTION_LEAD_NAME_MAX);
+  if (!name) return sendError(res, 400, "NOME_OBRIGATORIO");
+
+  const institution = String(req.body?.institution || "").trim().slice(0, INSTITUTION_LEAD_ORG_MAX);
+  if (!institution) return sendError(res, 400, "INSTITUICAO_OBRIGATORIA");
+
+  const institutionType = String(req.body?.institutionType || "").trim().toLowerCase();
+  if (!INSTITUTION_LEAD_TYPES.has(institutionType)) {
+    return sendError(res, 400, "TIPO_INSTITUICAO_INVALIDO");
+  }
+
+  const email = String(req.body?.email || "").trim().toLowerCase().slice(0, INSTITUTION_LEAD_EMAIL_MAX);
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return sendError(res, 400, "EMAIL_INVALIDO");
+  }
+
+  const phone = String(req.body?.phone || "").trim().slice(0, INSTITUTION_LEAD_PHONE_MAX);
+  if (!phone) return sendError(res, 400, "TELEFONE_OBRIGATORIO");
+
+  const city = String(req.body?.city || "").trim().slice(0, INSTITUTION_LEAD_CITY_MAX);
+  if (!city) return sendError(res, 400, "CIDADE_OBRIGATORIA");
+
+  const state = String(req.body?.state || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(state)) return sendError(res, 400, "UF_INVALIDA");
+
+  if (req.body?.privacyConsent !== true) return sendError(res, 400, "CONSENTIMENTO_OBRIGATORIO");
+
+  const role = String(req.body?.role || "").trim().slice(0, INSTITUTION_LEAD_ROLE_MAX);
+  const message = String(req.body?.message || "").trim().slice(0, INSTITUTION_LEAD_MESSAGE_MAX);
+  const source = String(req.body?.source || "site-institucional").trim().slice(0, INSTITUTION_LEAD_SOURCE_MAX);
+  const studentsNumber = Number(req.body?.students);
+  const students = req.body?.students === null || req.body?.students === "" || req.body?.students === undefined
+    ? null
+    : (Number.isInteger(studentsNumber) && studentsNumber >= 1 && studentsNumber <= 10000000
+      ? studentsNumber
+      : NaN);
+  if (Number.isNaN(students)) return sendError(res, 400, "QUANTIDADE_ALUNOS_INVALIDA");
+
+  const leadId = newId("inlead");
+  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
+
+  await getDb().collection("therapy_institution_leads").doc(leadId).set({
+    leadId,
+    name,
+    role,
+    institution,
+    institutionType,
+    students,
+    email,
+    phone,
+    city,
+    state,
+    message,
+    source,
+    privacyConsent: true,
+    ipHash,
+    status: "new",
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  if (THERAPY_ADMIN_EMAILS.length) {
+    const tpl = templateInstitutionLeadReceived({
+      name, role, institution, institutionType, students, email, phone, city, state, message
+    });
+    sendEmail({ to: THERAPY_ADMIN_EMAILS, ...tpl, replyTo: email }).catch(e =>
+      logError("institution_lead_email_failed", e, { leadId })
+    );
+  }
+
+  logInfo("institution_lead_received", { leadId, institutionType, state, students });
+  return res.json({ ok: true });
+}));
+
 // GET /therapy/admin/leads-estudante?status=new|contacted|all (default: new)
 router.get("/therapy/admin/leads-estudante", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -9846,8 +9953,74 @@ router.patch("/therapy/admin/leads-estudante/:id", asyncHandler(async (req, res)
   return res.json({ ok: true });
 }));
 
-// ─── REPASSES PIX ─────────────────────────────────────────────────────────
+// ─── LEADS INSTITUCIONAIS ─────────────────────────────────────────────────
 
+// ADMIN — Leads institucionais recebidos pelo site
+// Podem ser consultados e qualificados pelo painel admin.
+router.get("/therapy/admin/leads-instituicoes", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const wantStatus = String(req.query?.status || "new").trim().toLowerCase();
+  if (!["new", "contacted", "qualified", "archived", "all"].includes(wantStatus)) {
+    return sendError(res, 400, "STATUS_INVALIDO");
+  }
+
+  let q = getDb().collection("therapy_institution_leads");
+  if (wantStatus !== "all") q = q.where("status", "==", wantStatus);
+  const snap = await q.limit(200).get();
+  const items = snap.docs.map(d => {
+    const lead = d.data();
+    return {
+      leadId: lead.leadId,
+      name: lead.name,
+      role: lead.role || null,
+      institution: lead.institution,
+      institutionType: lead.institutionType,
+      students: Number.isFinite(lead.students) ? lead.students : null,
+      email: lead.email,
+      phone: lead.phone,
+      city: lead.city,
+      state: lead.state,
+      message: lead.message || null,
+      source: lead.source || null,
+      status: lead.status || "new",
+      contactedBy: lead.contactedBy || null,
+      createdAt: lead.createdAt?.toMillis ? lead.createdAt.toMillis() : null
+    };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  return res.json({ ok: true, items, count: items.length });
+}));
+
+router.patch("/therapy/admin/leads-instituicoes/:id", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+
+  const leadId = String(req.params.id || "").trim();
+  if (!leadId) return sendError(res, 400, "LEAD_ID_OBRIGATORIO");
+  const newStatus = String(req.body?.status || "").trim().toLowerCase();
+  if (!["new", "contacted", "qualified", "archived"].includes(newStatus)) {
+    return sendError(res, 400, "STATUS_INVALIDO");
+  }
+
+  const ref = getDb().collection("therapy_institution_leads").doc(leadId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "LEAD_NAO_ENCONTRADO");
+
+  await ref.set({
+    status: newStatus,
+    contactedBy: newStatus === "new" ? null : adminAuth.email,
+    contactedAt: newStatus === "new" ? null : admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return res.json({ ok: true });
+}));
+
+// ─── REPASSES PIX ─────────────────────────────────────────────────────────
 // GET /therapy/admin/repasses?status=pending|completed|all&limit=100
 // Lista repasses de consultas para o painel admin. Enriquece com dados do
 // profissional (nome, pixKey, pixKeyType).

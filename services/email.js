@@ -441,6 +441,42 @@ function templateStudentLeadReceived({ name, email, phone, institution, course, 
   return { subject, html, text };
 }
 
+// Notifica a equipe comercial sobre uma instituição interessada no programa
+// escolar. O reply-to aponta para o contato que enviou o formulário.
+function templateInstitutionLeadReceived({
+  name, role, institution, institutionType, students, email, phone, city, state, message
+}) {
+  const typeLabels = {
+    private_school: "Escola particular",
+    private_network: "Rede privada",
+    municipality: "Prefeitura / rede municipal",
+    state_network: "Rede estadual",
+    other: "Outra instituição"
+  };
+  const typeLabel = typeLabels[institutionType] || institutionType || "—";
+  const location = [city, state].filter(Boolean).join("/") || "—";
+  const subject = `Nova instituição interessada: ${institution}`;
+  const html = renderShell({
+    heading: "Nova oportunidade institucional",
+    bodyHtml: `
+      <p style="margin:0 0 16px;">Uma instituição solicitou uma apresentação do programa escolar pelo site.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%; margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-size:14px;">
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Instituição</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(institution)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Tipo</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(typeLabel)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Alunos</td><td style="padding:3px 0; text-align:right;"><strong>${students ? escHtml(students) : "Não informado"}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Localidade</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(location)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Contato</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(name)}</strong>${role ? `<br><span style="font-size:12px; color:rgba(28,31,29,0.55);">${escHtml(role)}</span>` : ""}</td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">E-mail</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(email)}</strong></td></tr>
+        <tr><td style="padding:3px 0; color:rgba(28,31,29,0.55);">Telefone</td><td style="padding:3px 0; text-align:right;"><strong>${escHtml(phone)}</strong></td></tr>
+      </table>
+      ${message ? `<p style="margin:0 0 8px; font-size:13px; color:rgba(28,31,29,0.65);">Contexto informado:</p><blockquote style="margin:0; padding:10px 14px; background:#f7f4ef; border-left:3px solid #c89b4a; border-radius:4px; font-size:14px; color:rgba(28,31,29,0.85);">${escHtml(message)}</blockquote>` : ""}
+    `,
+    footer: "Solicitação comercial recebida pelo site do Espaço Prelúdio."
+  });
+  const text = `Nova oportunidade institucional:\n\nInstituição: ${institution}\nTipo: ${typeLabel}\nAlunos: ${students || "Não informado"}\nLocalidade: ${location}\nContato: ${name}${role ? ` (${role})` : ""}\nE-mail: ${email}\nTelefone: ${phone}${message ? `\n\nContexto: ${message}` : ""}`;
+  return { subject, html, text };
+}
+
 // ─── Helpers de URL ─────────────────────────────────────────────────────
 
 // Aceita short code (~8 chars) OU joinToken legado (JWT ~500 chars).
@@ -693,6 +729,7 @@ module.exports = {
   templateClinicInvite,
   templateStudentSessionRequest,
   templateStudentLeadReceived,
+  templateInstitutionLeadReceived,
   buildJoinUrl,
   buildCancelUrl,
   buildConfirmUrl,
