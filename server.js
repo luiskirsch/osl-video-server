@@ -96,7 +96,10 @@ const { scheduleAuditLogCleanup } = require("./jobs/auditLogCleanup");
 
 // Valida secrets críticos no startup — exit em prod se ausentes, warn em dev
 const { checkSecrets } = require("./scripts/validate-env");
-checkSecrets({ exitOnError: IS_PRODUCTION });
+// Integrações sensíveis falham fechadas em suas próprias rotas. Mantemos a
+// API e /health disponíveis para diagnóstico mesmo quando um secret modular
+// ainda não foi provisionado.
+checkSecrets({ exitOnError: false });
 
 // --- App ---
 const app = express();

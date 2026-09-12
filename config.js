@@ -3,7 +3,19 @@ const PORT = Number(process.env.PORT || 3000);
 // Logical environment (independent of NODE_ENV which is mostly about
 // optimization). Set APP_ENV=staging on the Railway staging service so
 // /health reports it and downstream code can branch when needed.
-const APP_ENV = (process.env.APP_ENV || "production").toLowerCase();
+function normalizeAppEnv(value) {
+  const normalized = String(value || "production")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (["prod", "producao", "production"].includes(normalized)) return "production";
+  if (["stage", "staging", "homolog", "homologacao"].includes(normalized)) return "staging";
+  if (["dev", "development", "desenvolvimento", "local"].includes(normalized)) return "local";
+  return normalized;
+}
+
+const APP_ENV = normalizeAppEnv(process.env.APP_ENV);
 const IS_STAGING    = APP_ENV === "staging";
 const IS_PRODUCTION = APP_ENV === "production";
 
@@ -308,7 +320,7 @@ const EMPRESA_JWT_SECRET = process.env.EMPRESA_JWT_SECRET || "";
 
 module.exports = {
   PORT,
-  APP_ENV, IS_STAGING, IS_PRODUCTION,
+  APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv,
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL,
