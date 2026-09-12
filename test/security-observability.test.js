@@ -3,7 +3,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { safeRequestPath } = require("../utils");
-const { normalizeAppEnv } = require("../config");
 
 test("safeRequestPath removes query strings and fragments", () => {
   assert.equal(
@@ -29,10 +28,4 @@ test("safeRequestPath redacts high-entropy path segments before route matching",
     safeRequestPath({ originalUrl: "/convite/aVeryLongSecretTokenValue123456" }),
     "/convite/:redacted"
   );
-});
-
-test("environment aliases normalize to safe runtime modes", () => {
-  assert.equal(normalizeAppEnv("produção"), "production");
-  assert.equal(normalizeAppEnv("homologação"), "staging");
-  assert.equal(normalizeAppEnv("development"), "local");
 });

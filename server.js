@@ -3,13 +3,6 @@
 // qualquer require que use process.env.
 try { require("dotenv").config(); } catch (_) { /* dotenv opcional em prod */ }
 
-const runtimeConfig = require("./config");
-// Railway nem sempre define NODE_ENV. O runtime deve assumir as otimizações
-// e defaults seguros de produção quando APP_ENV identifica esse ambiente.
-if (!process.env.NODE_ENV && runtimeConfig.IS_PRODUCTION) {
-  process.env.NODE_ENV = "production";
-}
-
 // Sentry + error handlers precisam ser os primeiros (Sentry captura
 // uncaughtException internamente, e o logger é dependência circular se
 // carregado antes).
@@ -53,7 +46,7 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT, APP_ENV, IS_PRODUCTION } = runtimeConfig;
+const { PORT, APP_ENV, IS_PRODUCTION } = require("./config");
 const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
@@ -133,7 +126,7 @@ app.use((req, res, next) => {
 morgan.token("request-id", (req) => req.requestId || "-");
 morgan.token("safe-url", (req) => safeRequestPath(req));
 app.use(morgan(":method :safe-url :status :response-time ms reqId=:request-id", {
-  skip: () => IS_PRODUCTION
+  skip: () => process.env.NODE_ENV === "production"
 }));
 
 app.use(helmet({
