@@ -3,6 +3,12 @@
 // qualquer require que use process.env.
 try { require("dotenv").config(); } catch (_) { /* dotenv opcional em prod */ }
 
+// Railway não define NODE_ENV automaticamente em todos os serviços. Ativa
+// os defaults otimizados do Node/Express sem depender do APP_ENV localizado.
+if (!process.env.NODE_ENV && process.env.RAILWAY_DEPLOYMENT_ID) {
+  process.env.NODE_ENV = "production";
+}
+
 // Sentry + error handlers precisam ser os primeiros (Sentry captura
 // uncaughtException internamente, e o logger é dependência circular se
 // carregado antes).
