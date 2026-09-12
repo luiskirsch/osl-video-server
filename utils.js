@@ -9,7 +9,7 @@ function asyncHandler(fn) {
       logError("route_error", error, {
         requestId: req.requestId,
         method: req.method,
-        path: req.originalUrl
+        path: safeRequestPath(req)
       });
       next(error);
     }
@@ -60,6 +60,24 @@ function createRequestId() {
   return crypto.randomBytes(8).toString("hex");
 }
 
+// Identificador seguro para logs: remove query strings e prefere o molde da
+// rota, evitando expor tokens, códigos e identificadores presentes na URL.
+function safeRequestPath(req) {
+  const routePath = req?.route?.path;
+  if (typeof routePath === "string") {
+    return `${req.baseUrl || ""}${routePath}` || "/";
+  }
+
+  const raw = String(req?.originalUrl || req?.url || "/");
+  const queryIndex = raw.search(/[?#]/);
+  const pathname = (queryIndex === -1 ? raw : raw.slice(0, queryIndex)) || "/";
+  return pathname.split("/").map((segment) => {
+    const looksSensitive = segment.length >= 20
+      || /@|%40|^[A-Za-z0-9_-]{16,}$|^[A-Fa-f0-9-]{32,}$/.test(segment);
+    return looksSensitive ? ":redacted" : segment;
+  }).join("/");
+}
+
 async function httpFetch(...args) {
   if (typeof fetch === "function") return fetch(...args);
   const mod = await import("node-fetch");
@@ -81,6 +99,6 @@ module.exports = {
   asyncHandler, sendError,
   normalizeUid, normalizeEmail, normalizePathEmail, sanitizeNextPath,
   sleep, formatFirestoreDate,
-  createRequestId, httpFetch,
+  createRequestId, safeRequestPath, httpFetch,
   nowIso, buildDiscordAvatarUrl
 };

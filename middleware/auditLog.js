@@ -4,6 +4,7 @@
 // (configurar TTL policy no Firestore Console → audit_logs → campo expireAt).
 
 const { logInfo } = require("../logger");
+const { safeRequestPath } = require("../utils");
 
 let _db = null;
 function getDb() {
@@ -16,8 +17,8 @@ function getDb() {
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function extractUid(req) {
-  // Tenta extrair UID de diferentes fontes: body, header, token decodificado
-  return req.uid || req.body?.uid || req.body?.participantId || null;
+  // Somente identidade comprovada pelo middleware de autenticação.
+  return req.firebaseUid || null;
 }
 
 async function writeAuditDoc(entry) {
@@ -45,7 +46,7 @@ function auditLog(category) {
         time: new Date().toISOString(),
         category,
         method: req.method,
-        path: req.route?.path || req.originalUrl,
+        path: safeRequestPath(req),
         statusCode: res.statusCode,
         durationMs: Date.now() - started,
         uid: extractUid(req),

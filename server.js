@@ -47,7 +47,7 @@ const cors    = require("cors");
 const morgan  = require("morgan");
 
 const { PORT, APP_ENV, IS_PRODUCTION } = require("./config");
-const { createRequestId } = require("./utils");
+const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
 const healthRouter    = require("./routes/health");
@@ -101,6 +101,33 @@ app.disable("x-powered-by");
 // o que permite bypassar rate limiting via X-Forwarded-For spoofing.
 // Com 1, Express usa o penúltimo valor que Railway inseriu = IP real do cliente.
 app.set("trust proxy", 1);
+
+// Identidade e telemetria entram antes dos middlewares que podem encerrar a
+// requisição, cobrindo também bloqueios de CORS, WAF e rate limit.
+app.use((req, res, next) => {
+  req.requestId = createRequestId();
+  res.setHeader("X-Request-Id", req.requestId);
+
+  const start = Date.now();
+  res.on("finish", () => {
+    logInfo("http_request", {
+      requestId: req.requestId,
+      method: req.method,
+      path: safeRequestPath(req),
+      statusCode: res.statusCode,
+      durationMs: Date.now() - start,
+      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    });
+  });
+
+  next();
+});
+
+morgan.token("request-id", (req) => req.requestId || "-");
+morgan.token("safe-url", (req) => safeRequestPath(req));
+app.use(morgan(":method :safe-url :status :response-time ms reqId=:request-id", {
+  skip: () => process.env.NODE_ENV === "production"
+}));
 
 app.use(helmet({
   crossOriginResourcePolicy: false,
@@ -165,6 +192,9 @@ app.use(cors({
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
 app.use(waf);
 
+// Bloqueia floods antes de alocar/parsing de corpos potencialmente grandes.
+app.use(globalLimiter);
+
 // Stripe webhook ANTES do express.json() — precisa de raw body para validar HMAC.
 // express.raw() aplicado só na rota /stripe/webhook dentro do router.
 app.use(stripeWebhookRouter);
@@ -175,36 +205,8 @@ app.use(stripeWebhookRouter);
 app.use(express.json({ limit: "6mb" }));
 app.use(express.urlencoded({ extended: true, limit: "6mb" }));
 
-// Rate limit global: 300 req/min por IP em qualquer rota
-app.use(globalLimiter);
-
 // Demais rotas Stripe (create-checkout, portal) — precisam do body JSON parseado.
 app.use(stripeRouter);
-
-// Request ID + log estruturado por requisição
-app.use((req, res, next) => {
-  req.requestId = createRequestId();
-  res.setHeader("X-Request-Id", req.requestId);
-
-  const start = Date.now();
-  res.on("finish", () => {
-    logInfo("http_request", {
-      requestId: req.requestId,
-      method: req.method,
-      path: req.originalUrl,
-      statusCode: res.statusCode,
-      durationMs: Date.now() - start,
-      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
-    });
-  });
-
-  next();
-});
-
-morgan.token("request-id", (req) => req.requestId || "-");
-app.use(morgan(":method :url :status :response-time ms reqId=:request-id", {
-  skip: () => process.env.NODE_ENV === "production"
-}));
 
 // --- Disclosure responsável ---
 app.get("/.well-known/security.txt", (req, res) => {
@@ -263,7 +265,7 @@ app.use((err, req, res, next) => {
   logError("express_error_middleware", err, {
     requestId: req.requestId,
     method: req.method,
-    path: req.originalUrl
+    path: safeRequestPath(req)
   });
 
   // Reporta pro Sentry junto com contexto da request (sem body — pode ter PII)
@@ -271,7 +273,7 @@ app.use((err, req, res, next) => {
     try {
       Sentry.withScope(scope => {
         scope.setTag("requestId", req.requestId || "");
-        scope.setTag("path", req.originalUrl || "");
+        scope.setTag("path", safeRequestPath(req));
         scope.setTag("method", req.method || "");
         Sentry.captureException(err);
       });

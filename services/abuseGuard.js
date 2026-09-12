@@ -9,6 +9,7 @@
 
 const { getDb } = require("./firestore");
 const { logInfo, logWarn, logError } = require("../logger");
+const { safeRequestPath } = require("../utils");
 
 const BAN_CACHE_TTL_MS    = 5 * 60_000; // 5 min
 const AUTO_BAN_THRESHOLD  = 3;           // denúncias únicas para auto-suspensão
@@ -179,7 +180,7 @@ async function requireNotBanned(req, res, next) {
   if (!uid) return next();
   const banned = await isUserBanned(uid);
   if (banned) {
-    logWarn("banned_user_blocked", { uid, path: req.originalUrl });
+    logWarn("banned_user_blocked", { uid, path: safeRequestPath(req) });
     return res.status(403).json({ ok: false, error: "USUARIO_SUSPENSO" });
   }
   return next();

@@ -164,6 +164,7 @@ async function verifyFirebaseToken(req, res) {
   if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
   try {
     const decoded = await admin.auth().verifyIdToken(bearer);
+    req.firebaseUid = decoded.uid;
     return decoded.uid;
   } catch {
     sendError(res, 401, "TOKEN_INVALIDO");

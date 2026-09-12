@@ -1,4 +1,5 @@
 const { logWarn } = require("../logger");
+const { safeRequestPath } = require("../utils");
 
 // Padrões compilados uma vez no boot — zero custo por requisição.
 const SCANNER_UA = /\b(sqlmap|nikto|nmap|masscan|nessus|burpsuite|openvas|acunetix|appscan|dirbuster|gobuster|wfuzz|feroxbuster|hydra|medusa|metasploit|zgrab|havij|commix|nuclei|jaeles|curl\/7\.[0-2])\b/i;
@@ -27,12 +28,12 @@ module.exports = function waf(req, res, next) {
   }
 
   if (PATH_TRAVERSAL.test(url)) {
-    logWarn("waf_path_traversal", { ip, url: url.slice(0, 200) });
+    logWarn("waf_path_traversal", { ip, path: safeRequestPath(req).slice(0, 200) });
     return res.status(400).json({ ok: false, error: "BAD_REQUEST" });
   }
 
   if (SSRF_URL.test(url)) {
-    logWarn("waf_ssrf_attempt", { ip, url: url.slice(0, 200) });
+    logWarn("waf_ssrf_attempt", { ip, path: safeRequestPath(req).slice(0, 200) });
     return res.status(400).json({ ok: false, error: "BAD_REQUEST" });
   }
 

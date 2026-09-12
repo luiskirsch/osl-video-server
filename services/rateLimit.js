@@ -4,6 +4,7 @@
 
 const rateLimit = require("express-rate-limit");
 const { logWarn } = require("../logger");
+const { safeRequestPath } = require("../utils");
 
 // Railway appende o IP real do cliente como o último valor no XFF.
 // O cliente só pode injetar valores à ESQUERDA (início), nunca à direita.
@@ -18,7 +19,7 @@ function makeHandler(errorCode) {
   return (req, res) => {
     logWarn("rate_limit_hit", {
       ip: req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null,
-      path: req.originalUrl,
+      path: safeRequestPath(req),
       uid: req.firebaseUid || null,
       errorCode,
     });
