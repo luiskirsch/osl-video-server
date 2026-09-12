@@ -59,7 +59,7 @@ const {
 const publicProgram = require("../services/public-program");
 const {
   therapySessionDurationMinutes,
-  therapySessionStartedAt,
+  therapyTimestampMillis,
   therapySessionOverdueAt,
   isTherapySessionOverdue,
   selectTherapyPanelSessions
@@ -67,8 +67,8 @@ const {
 const studentDevelopment = require("../services/student-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
-const whisperSvc = require("../services/whisper");
-const sessionSummarySvc = require("../services/session-summary");
+const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
+const { processAiSummary } = require("../services/therapy-ai-summary");
 const clinicalTwinSvc = require("../services/clinical-twin");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -318,8 +318,8 @@ async function requirePaidPlan(req, res, uid) {
 //
 // Capabilities:
 //   "receita"             — CRM (Portaria 344/98 — todos os tipos) +
-//                           CREFITO (Ac. COFFITO 735/2024 — fisio: MIP+injetável,
-//                           TO: MIP). Detalhes em prescriptionTypes por subtipo.
+//                           CREFITO/TO: somente MIP. Fisioterapia não emite.
+//                           Detalhes em prescriptionTypes por subtipo.
 //   "documentos-clinicos" — CRM, CRP, CREFITO, CRN e CRO. Atestado,
 //                           encaminhamento e relatório dentro do escopo de
 //                           cada conselho:
@@ -480,24 +480,15 @@ async function issueLivekitToken({ room, identity, name, ttlMs }) {
   return at.toJwt();
 }
 
-async function ensureTherapySessionStarted(sessionRef) {
-  let startedAt = null;
-  await getDb().runTransaction(async tx => {
-    const snap = await tx.get(sessionRef);
-    if (!snap.exists) throw new Error("SESSAO_NAO_ENCONTRADA");
-    const session = snap.data();
-    if (session.status === "completed") throw new Error("SESSAO_ENCERRADA");
-    if (session.status === "canceled") throw new Error("SESSAO_CANCELADA");
-
-    startedAt = therapySessionStartedAt(session, Date.now());
-    if (!therapySessionStartedAt(session)) {
-      tx.set(sessionRef, {
-        sessionStartedAt: startedAt,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-    }
-  });
-  return startedAt;
+function issueTherapyPresenceToken(sessionId, role) {
+  const now = Date.now();
+  return signPayload({
+    token_type: "therapy_presence",
+    sessionId: String(sessionId),
+    role: String(role),
+    iat: now,
+    exp: now + SESSION_TOKEN_VALIDITY_MS
+  }, ACCESS_TOKEN_SECRET);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2230,9 +2221,7 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     aiSummaryReady = patientConsent;
   }
 
-  const sessionStartedAt = await ensureTherapySessionStarted(
-    db.collection("therapy_sessions").doc(sessionId)
-  );
+  const sessionStartedAt = therapyTimestampMillis(session.sessionStartedAt);
 
   await db.collection("therapy_sessions").doc(sessionId).set({
     status: "in_progress",
@@ -2253,6 +2242,7 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     aiSummaryReady,
     sessionStartedAt,
     serverNow: Date.now(),
+    presenceToken: issueTherapyPresenceToken(sessionId, "therapist"),
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
 }));
@@ -2401,7 +2391,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   };
   if (patientAccountUid) sessionUpdate.patientAccountUid = patientAccountUid;
 
-  const sessionStartedAt = await ensureTherapySessionStarted(sessionRef);
+  const sessionStartedAt = therapyTimestampMillis(session.sessionStartedAt);
   await sessionRef.set(sessionUpdate, { merge: true });
 
   await logAudit({
@@ -2423,6 +2413,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     sessionId: payload.sessionId,
     sessionStartedAt,
     serverNow: Date.now(),
+    presenceToken: issueTherapyPresenceToken(payload.sessionId, "patient"),
     patientAccountUid: patientAccountUid || null,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
@@ -2433,6 +2424,76 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
 // Salva uma nota cifrada. Body: { ciphertext, iv, kind? }
 // ciphertext + iv são base64; servidor NÃO consegue decifrar.
 // ─────────────────────────────────────────────────────────────────────────
+router.post("/therapy/sessao/:sessionId/iniciar-contador", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+
+  const sessionId = String(req.params.sessionId || "").trim();
+  const presenceToken = String(req.body?.presenceToken || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const verification = verifySignedToken(presenceToken, ACCESS_TOKEN_SECRET);
+  const presence = verification.payload;
+  const validRole = presence?.role === "therapist" || presence?.role === "patient";
+  if (
+    !verification.valid
+    || presence?.token_type !== "therapy_presence"
+    || presence?.sessionId !== sessionId
+    || !validRole
+  ) {
+    return sendError(res, 401, "PRESENCA_INVALIDA");
+  }
+
+  const db = getDb();
+  const sessionRef = db.collection("therapy_sessions").doc(sessionId);
+  const result = { error: null, startedAt: null, startedNow: false };
+
+  await db.runTransaction(async (transaction) => {
+    const sessionSnap = await transaction.get(sessionRef);
+    if (!sessionSnap.exists) {
+      result.error = "not_found";
+      return;
+    }
+
+    const session = sessionSnap.data() || {};
+    if (session.status === "completed" || session.status === "canceled") {
+      result.error = "finished";
+      return;
+    }
+
+    const existingStartedAt = therapyTimestampMillis(session.sessionStartedAt);
+    if (existingStartedAt) {
+      result.startedAt = existingStartedAt;
+      return;
+    }
+
+    const now = Date.now();
+    result.startedAt = now;
+    result.startedNow = true;
+    transaction.set(sessionRef, {
+      sessionStartedAt: admin.firestore.Timestamp.fromMillis(now),
+      sessionStartedByRole: presence.role,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+
+  if (result.error === "not_found") return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (result.error === "finished") return sendError(res, 410, "SESSAO_ENCERRADA");
+
+  if (result.startedNow) {
+    await logAudit({
+      type: "session_clock_started",
+      sessionId,
+      role: presence.role
+    });
+  }
+
+  return res.json({
+    ok: true,
+    sessionStartedAt: result.startedAt,
+    serverNow: Date.now()
+  });
+}));
+
 router.post("/therapy/sessao/:sessionId/notas", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -6874,14 +6935,14 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
 //      Firestore salva em therapy_session_summaries/{sessionId}.
 //   5. Frontend GET /therapy/session/:id/ai-summary pra buscar quando pronto.
 //
-// Privacidade: áudio nunca persiste em disco; processado em-memory,
-// transcript fica no Firestore (cifrado? não — texto direto. TODO: E2EE
-// no flow patient-DEK quando profissional acessa via prontuário).
+// Privacidade: áudio e plaintext existem somente durante o processamento.
+// O resultado é persistido com AES-256-GCM usando chave efêmera criada no
+// navegador e embrulhada pela DEK do profissional.
 // ─────────────────────────────────────────────────────────────────────────
 
 const express_raw_audio = express.raw({
   type: ["audio/*", "application/octet-stream"],
-  limit: "100mb"
+  limit: "32mb"
 });
 
 router.post("/therapy/session/:sessionId/ai-summarize",
@@ -6926,6 +6987,13 @@ router.post("/therapy/session/:sessionId/ai-summarize",
       return sendError(res, 400, "AUDIO_OBRIGATORIO");
     }
 
+    let clientEncryption;
+    try {
+      clientEncryption = readClientEncryption(req);
+    } catch (error) {
+      return sendError(res, 428, "CRIPTOGRAFIA_CLIENTE_OBRIGATORIA", { detail: error.message });
+    }
+
     // Marca como processing no Firestore
     const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
     await summaryRef.set({
@@ -6933,6 +7001,16 @@ router.post("/therapy/session/:sessionId/ai-summarize",
       therapistUid: uid,
       status: "processing",
       audioBytes: audioBuffer.length,
+      encryptionVersion: 1,
+      encryptionAlgorithm: "AES-256-GCM",
+      wrappedKey: clientEncryption.wrappedKey,
+      wrappedKeyIv: clientEncryption.wrappedKeyIv,
+      transcript: admin.firestore.FieldValue.delete(),
+      transcriptChunks: admin.firestore.FieldValue.delete(),
+      summary: admin.firestore.FieldValue.delete(),
+      signals: admin.firestore.FieldValue.delete(),
+      payloadCiphertext: admin.firestore.FieldValue.delete(),
+      payloadIv: admin.firestore.FieldValue.delete(),
       startedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
 
@@ -6949,95 +7027,65 @@ router.post("/therapy/session/:sessionId/ai-summarize",
       audioBuffer,
       sessionId,
       therapist,
-      session: sess
+      session: sess,
+      clientEncryption,
+      db,
+      admin
     }).catch(err => {
       logError("ai_summary_unhandled", err, { sessionId });
     });
   })
 );
 
-async function processAiSummary({ audioBuffer, sessionId, therapist, session }) {
+// Converte um resumo legado em claro no primeiro acesso autenticado. A chave
+// efêmera vem do cliente e não é persistida; somente seu wrapper pela DEK.
+router.post("/therapy/session/:sessionId/ai-summary/encrypt-legacy", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
   const db = getDb();
-  const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (sessSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  let clientEncryption;
+  try {
+    clientEncryption = readClientEncryption(req);
+  } catch (error) {
+    return sendError(res, 428, "CRIPTOGRAFIA_CLIENTE_OBRIGATORIA", { detail: error.message });
+  }
 
   try {
-    logInfo("ai_summary_started", { sessionId, audioBytes: audioBuffer.length });
+    const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+    const summarySnap = await summaryRef.get();
+    if (!summarySnap.exists) return sendError(res, 404, "RESUMO_NAO_ENCONTRADO");
+    const data = summarySnap.data();
+    if (encryptedPayloadResponse(data)) return res.json({ ok: true, migrated: false, alreadyEncrypted: true });
 
-    // 1. Transcribe via Whisper local (Xenova/whisper-base)
-    const t0 = Date.now();
-    const transcriptResult = await whisperSvc.transcribe(audioBuffer, {
-      language: "portuguese"
-    });
-    const transcribeMs = Date.now() - t0;
-    logInfo("ai_summary_transcribed", {
-      sessionId,
-      durationSec: transcriptResult.durationSec,
-      transcribeMs,
-      textChars: transcriptResult.text.length,
-      hallucinated: transcriptResult.hallucinated || false
-    });
-
-    // Alucinação detectada: Whisper gerou texto repetitivo (ruído/áudio curto).
-    // Salva como failed com mensagem amigável em vez de mandar lixo pro Claude.
-    if (transcriptResult.hallucinated) {
-      await summaryRef.set({
-        status: "failed",
-        error: "TRANSCRIPT_ALUCINADO",
-        transcript: "",
-        durationSec: transcriptResult.durationSec,
-        transcribeMs,
-        completedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-      logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
-      return;
-    }
-
-    // 2. Summarize via Claude Haiku 4.5
-    const t1 = Date.now();
-    const summaryResult = await sessionSummarySvc.summarizeSession({
-      transcript: transcriptResult.text,
-      professionalName: therapist.displayName || "",
-      patientName: session.patientName || "",
-      durationSec: transcriptResult.durationSec
-    });
-    const summarizeMs = Date.now() - t1;
-
-    if (!summaryResult.ok) {
-      throw new Error(`Summary failed: ${summaryResult.error}${summaryResult.detail ? " — " + summaryResult.detail : ""}`);
-    }
-
-    // 3. Salva resultado
-    const { signals, ...summaryRest } = summaryResult.summary || {};
+    const encryptedPayload = encryptJson({
+      summary: data.summary || null,
+      signals: data.signals || null,
+      transcript: data.transcript || null,
+    }, clientEncryption.key);
     await summaryRef.set({
-      status: "completed",
-      patientId: session.patientId || null,
-      transcript: transcriptResult.text,
-      transcriptChunks: transcriptResult.chunks?.slice(0, 200) || [], // limit pra evitar doc gigante
-      summary: summaryRest,
-      signals: signals || null,
-      durationSec: transcriptResult.durationSec,
-      transcribeMs,
-      summarizeMs,
-      tokenUsage: summaryResult.usage || null,
-      completedAt: admin.firestore.FieldValue.serverTimestamp()
+      encryptionVersion: encryptedPayload.version,
+      encryptionAlgorithm: encryptedPayload.algorithm,
+      wrappedKey: clientEncryption.wrappedKey,
+      wrappedKeyIv: clientEncryption.wrappedKeyIv,
+      payloadCiphertext: encryptedPayload.ciphertext,
+      payloadIv: encryptedPayload.iv,
+      transcript: admin.firestore.FieldValue.delete(),
+      transcriptChunks: admin.firestore.FieldValue.delete(),
+      summary: admin.firestore.FieldValue.delete(),
+      signals: admin.firestore.FieldValue.delete(),
+      encryptedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
-
-    logInfo("ai_summary_completed", {
-      sessionId,
-      totalMs: transcribeMs + summarizeMs,
-      inputTokens: summaryResult.usage?.input,
-      outputTokens: summaryResult.usage?.output
-    });
-  } catch (err) {
-    await summaryRef.set({
-      status: "failed",
-      error: err.message.slice(0, 500),
-      failedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    logError("ai_summary_failed", err, { sessionId });
+    return res.json({ ok: true, migrated: true });
+  } finally {
+    clientEncryption.key.fill(0);
   }
-}
+}));
 
 // GET — frontend busca o resumo gerado
 router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, res) => {
@@ -7059,13 +7107,15 @@ router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, re
     return res.json({ ok: true, exists: false, status: "none" });
   }
   const data = summarySnap.data();
+  const encryptedPayload = encryptedPayloadResponse(data);
   return res.json({
     ok: true,
     exists: true,
     status: data.status,
-    summary: data.summary || null,
-    signals: data.signals || null,
-    transcript: data.transcript || null,
+    summary: encryptedPayload ? null : (data.summary || null),
+    signals: encryptedPayload ? null : (data.signals || null),
+    transcript: encryptedPayload ? null : (data.transcript || null),
+    encryptedPayload,
     durationSec: data.durationSec || null,
     completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
     error: data.error || null
@@ -15668,6 +15718,65 @@ router.post("/therapy/pro-chat/threads/:id/messages", asyncHandler(async (req, r
 }));
 
 // POST /therapy/pro-chat/threads/:id/marcar-lido — atualiza lastReadByMe
+// Anexos do chat entre profissionais. O arquivo chega cifrado pelo cliente;
+// o servidor armazena somente os bytes AES-GCM.
+router.post("/therapy/pro-chat/threads/:id/files", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const fileBase64 = String(req.body?.fileBase64 || "").trim();
+  const fileIv = String(req.body?.fileIv || "").trim();
+  if (!threadId || !fileBase64 || !fileIv) return sendError(res, 400, "ARQUIVO_INVALIDO");
+  if (fileBase64.length > 5_700_000) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+  let encrypted;
+  try { encrypted = Buffer.from(fileBase64, "base64"); }
+  catch { return sendError(res, 400, "ARQUIVO_INVALIDO"); }
+  if (!encrypted.length || encrypted.length > 4_200_000) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+
+  const db = getDb();
+  const threadSnap = await db.collection("therapy_pro_threads").doc(threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const thread = threadSnap.data();
+  if (thread.participantA !== uid && thread.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const fileId = newId("prochatfile");
+  const storagePath = `therapy-pro-chat/${threadId}/${fileId}.bin`;
+  await getStorageBucket().file(storagePath).save(encrypted, {
+    resumable: false,
+    contentType: "application/octet-stream",
+    metadata: { cacheControl: "private, no-store, max-age=0" }
+  });
+  await db.collection("therapy_pro_chat_files").doc(fileId).set({
+    fileId, threadId, senderUid: uid, storagePath, fileIv,
+    encryptedSize: encrypted.length,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  return res.json({ ok: true, fileId });
+}));
+
+router.get("/therapy/pro-chat/threads/:id/files/:fileId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  const fileId = String(req.params.fileId || "").trim();
+  const db = getDb();
+  const [threadSnap, fileSnap] = await Promise.all([
+    db.collection("therapy_pro_threads").doc(threadId).get(),
+    db.collection("therapy_pro_chat_files").doc(fileId).get()
+  ]);
+  if (!threadSnap.exists || !fileSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
+  const thread = threadSnap.data();
+  const file = fileSnap.data();
+  if (thread.participantA !== uid && thread.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (file.threadId !== threadId) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const [encrypted] = await getStorageBucket().file(file.storagePath).download();
+  res.setHeader("Cache-Control", "private, no-store");
+  return res.json({ ok: true, fileBase64: encrypted.toString("base64"), fileIv: file.fileIv });
+}));
+
 router.post("/therapy/pro-chat/threads/:id/marcar-lido", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -19039,6 +19148,70 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, sessions, serverNow: now });
 }));
 
+// POST /therapy/chat/threads/:id/files — armazena um anexo já cifrado no cliente.
+// O servidor nunca recebe o arquivo original nem seu nome; apenas bytes AES-GCM.
+router.post("/therapy/chat/threads/:id/files", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const threadId = String(req.params.id || "").trim();
+  const fileBase64 = String(req.body?.fileBase64 || "").trim();
+  const fileIv = String(req.body?.fileIv || "").trim();
+  if (!threadId || !fileBase64 || !fileIv) return sendError(res, 400, "ARQUIVO_INVALIDO");
+  // 4 MiB cifrados viram aproximadamente 5,6 MiB em base64.
+  if (fileBase64.length > 5_700_000) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+
+  let encrypted;
+  try { encrypted = Buffer.from(fileBase64, "base64"); }
+  catch { return sendError(res, 400, "ARQUIVO_INVALIDO"); }
+  if (!encrypted.length || encrypted.length > 4_200_000) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
+
+  const db = getDb();
+  const threadSnap = await db.collection("therapy_threads").doc(threadId).get();
+  if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const thread = threadSnap.data();
+  if (thread.therapistUid !== uid && thread.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const fileId = newId("chatfile");
+  const storagePath = `therapy-chat/${threadId}/${fileId}.bin`;
+  await getStorageBucket().file(storagePath).save(encrypted, {
+    resumable: false,
+    contentType: "application/octet-stream",
+    metadata: { cacheControl: "private, no-store, max-age=0" }
+  });
+  await db.collection("therapy_chat_files").doc(fileId).set({
+    fileId, threadId, senderUid: uid, storagePath, fileIv,
+    encryptedSize: encrypted.length,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  return res.json({ ok: true, fileId });
+}));
+
+// GET /therapy/chat/threads/:id/files/:fileId — entrega os bytes ainda cifrados.
+router.get("/therapy/chat/threads/:id/files/:fileId", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const threadId = String(req.params.id || "").trim();
+  const fileId = String(req.params.fileId || "").trim();
+  const db = getDb();
+  const [threadSnap, fileSnap] = await Promise.all([
+    db.collection("therapy_threads").doc(threadId).get(),
+    db.collection("therapy_chat_files").doc(fileId).get()
+  ]);
+  if (!threadSnap.exists || !fileSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
+  const thread = threadSnap.data();
+  const file = fileSnap.data();
+  if (thread.therapistUid !== uid && thread.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (file.threadId !== threadId) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const [encrypted] = await getStorageBucket().file(file.storagePath).download();
+  res.setHeader("Cache-Control", "private, no-store");
+  return res.json({ ok: true, fileBase64: encrypted.toString("base64"), fileIv: file.fileIv });
+}));
+
 // Emite um token LiveKit para o paciente autenticado no app nativo.
 // Diferente do link público de convite, este fluxo pode ser refeito em caso de
 // queda de conexão: a própria conta Firebase é a credencial de acesso.
@@ -19119,7 +19292,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
     ttlMs: SESSION_TOKEN_VALIDITY_MS
   });
 
-  const sessionStartedAt = await ensureTherapySessionStarted(sessionSnap.ref);
+  const sessionStartedAt = therapyTimestampMillis(session.sessionStartedAt);
   await sessionSnap.ref.set({
     patientAccountUid: uid,
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -19147,6 +19320,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
     sessionId,
     sessionStartedAt,
     serverNow: Date.now(),
+    presenceToken: issueTherapyPresenceToken(sessionId, "patient"),
     patientAccountUid: uid,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });

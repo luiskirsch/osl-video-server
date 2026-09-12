@@ -13,7 +13,7 @@
 //
 // Quando "receita" está habilitada, prescriptionTypes define QUAIS tipos:
 //   "mip"               — medicamentos isentos de prescrição (livre prescrição)
-//   "insumo-injetavel"  — insumos/injetáveis estéticos (Ac. COFFITO 735/2024 p/ fisio)
+//   "insumo-injetavel"  — insumos/injetáveis (mantido no modelo; liberado somente quando configurado)
 //   "controlado"        — Portaria SVS/MS 344/1998 (psicotrópicos, antibióticos etc) — só CRM
 //
 // eligibleTiers controla quais tiers de plano cada conselho pode escolher
@@ -57,8 +57,9 @@ const CONSELHOS = {
     label: "CREFITO — Conselho Regional de Fisioterapia e Terapia Ocupacional",
     profissional: "Terapeuta ocupacional / Fisioterapeuta",
     numberFormat: "Ex.: 12345-F (fisio) / 12345-TO (terapeuta ocupacional)",
-    // Capabilities base do conselho. "receita" só fica disponível pra fisio/TO
-    // que tenham subtipo definido (ver subtipos abaixo). Sem subtipo, sem receita.
+    // A emissão de receita fica disponível somente para o subtipo TO.
+    // Sem subtipo ou para fisioterapia, prescriptionTypes fica vazio e o
+    // backend recusa a criação de qualquer receita.
     // "documentos-clinicos": fisio/TO emitem atestado, encaminhamento e relatório
     // dentro do escopo da profissão (DL 938/1969, Res. COFFITO 415/2012 e 414/2012).
     // Não é "atestado médico" — o título do PDF é específico por conselho (ver
@@ -67,14 +68,12 @@ const CONSELHOS = {
     prescriptionTypes: [], // delegado pro subtipo — fisio vs TO têm escopos diferentes
     requiresSubtipo: true,
     subtipos: {
-      // Fisioterapeuta: MIPs (livre) + insumos/injetáveis (Acórdão COFFITO 735/2024).
-      // Não controlado (Portaria 344 — privativo CRM).
+      // Regra de produto do Espaço Prelúdio: fisioterapia não emite receitas.
       fisio: {
         label: "Fisioterapeuta",
-        prescriptionTypes: ["mip", "insumo-injetavel"]
+        prescriptionTypes: []
       },
-      // Terapeuta ocupacional: só MIPs (livre prescrição).
-      // Acórdão 735 não menciona TO; sem base legal pra injetáveis/controlados.
+      // Terapeuta ocupacional: somente medicamentos não controlados (MIP).
       to: {
         label: "Terapeuta ocupacional",
         prescriptionTypes: ["mip"]
