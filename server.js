@@ -81,6 +81,7 @@ const recurringGroupsRouter = require("./routes/recurringGroups");
 const hubRouter             = require("./routes/hub");
 const quickRitualRouter     = require("./routes/quickRitual");
 const discoveriesRouter     = require("./routes/discoveries");
+const institutionRouter     = require("./routes/institution");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -245,6 +246,7 @@ app.use(recurringGroupsRouter);
 app.use(hubRouter);
 app.use(quickRitualRouter);
 app.use(discoveriesRouter);
+app.use(auditLog("institution"), institutionRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---
