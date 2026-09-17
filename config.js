@@ -238,6 +238,15 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
   .map(s => s.trim())
   .filter(Boolean);
 
+// Allowlist inicial de Responsaveis Tecnicos. O acesso tambem pode ser
+// concedido por um documento ativo em therapy_rt_assignments, permitindo
+// trocar o RT sem novo deploy.
+const THERAPY_RT_EMAILS = String(process.env.THERAPY_RT_EMAILS || "")
+  .toLowerCase()
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Tiers ativos:
 //   - "profissional"  (R$ 99,00)  — profissional habilitado com mensalidade
@@ -340,7 +349,7 @@ module.exports = {
   FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM, MAX_COMPLETED_RECORDINGS_IN_MEMORY,
   REFERRAL_REWARD_COINS, REFERRAL_MIN_WITHDRAW_COINS, REFERRAL_WITHDRAW_PIX_VALUE, REFERRAL_COMMISSION_PERCENT,
   ADMIN_SECRET, PANEL_TOTP_SECRET,
-  THERAPY_ADMIN_EMAILS,
+  THERAPY_ADMIN_EMAILS, THERAPY_RT_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
   THERAPY_PLAN_ANNUAL_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT,
   THERAPY_PLAN_NAME,

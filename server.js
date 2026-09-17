@@ -88,6 +88,7 @@ const hubRouter             = require("./routes/hub");
 const quickRitualRouter     = require("./routes/quickRitual");
 const discoveriesRouter     = require("./routes/discoveries");
 const institutionRouter     = require("./routes/institution");
+const rtRouter              = require("./routes/rt");
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -258,6 +259,7 @@ app.use(hubRouter);
 app.use(quickRitualRouter);
 app.use(discoveriesRouter);
 app.use(auditLog("institution"), institutionRouter);
+app.use(auditLog("responsavel-tecnico"), rtRouter);
 app.use(auditLog("ops"), opsRouter);
 
 // --- 404 ---
