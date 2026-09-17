@@ -241,11 +241,16 @@ const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
 // Allowlist inicial de Responsaveis Tecnicos. O acesso tambem pode ser
 // concedido por um documento ativo em therapy_rt_assignments, permitindo
 // trocar o RT sem novo deploy.
-const THERAPY_RT_EMAILS = String(process.env.THERAPY_RT_EMAILS || "")
-  .toLowerCase()
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+const THERAPY_RT_EMAILS = [...new Set([
+  // Proprietario da plataforma: acesso administrativo ao portal para
+  // configuracao e validacao, sem representar designacao formal como RT.
+  "luishenriquekirsch@hotmail.com",
+  ...String(process.env.THERAPY_RT_EMAILS || "")
+    .toLowerCase()
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+])];
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Tiers ativos:
