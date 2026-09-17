@@ -16,6 +16,11 @@ const { ensureDb, getDb } = require('../services/firestore');
 const { resolveSiglaFromTherapist } = require('../services/professional-councils');
 const { asyncHandler, sendError, normalizeEmail } = require('../utils');
 const { logInfo } = require('../logger');
+const {
+  COMPLETED_STATUSES,
+  buildProfessionalAggregation,
+  publicProfessional: publicAggregatedProfessional
+} = require('../services/rt-professional-aggregation');
 
 const router = express.Router();
 
@@ -67,34 +72,6 @@ function serializeDoc(doc) {
     if (result[key]) result[key] = toMillis(result[key]);
   }
   return result;
-}
-
-function professionalIsVerified(data) {
-  const status = String(data.verificationStatus || '').toLowerCase();
-  return ['verified', 'approved', 'aprovado'].includes(status);
-}
-
-function councilNumber(data) {
-  return cleanText(data.numeroConselho || data.crp || data.crm || '', 40);
-}
-
-function publicProfessional(doc, sessionStats = null) {
-  const data = doc.data();
-  const council = resolveSiglaFromTherapist(data);
-  return {
-    uid: doc.id,
-    name: cleanText(data.displayName || data.nome || 'Profissional', 100),
-    email: normalizeEmail(data.email || ''),
-    council,
-    councilNumber: councilNumber(data),
-    verificationStatus: cleanText(data.verificationStatus || 'pending', 30),
-    verified: professionalIsVerified(data),
-    active: data.disabled !== true && data.status !== 'inactive',
-    createdAt: toMillis(data.createdAt),
-    sessions30d: sessionStats?.count || 0,
-    completedSessions30d: sessionStats?.completed || 0,
-    lastSessionAt: sessionStats?.lastAt || null
-  };
 }
 
 async function authenticateRt(req, res) {
@@ -159,43 +136,64 @@ async function writeRtAudit(actor, type, details = {}) {
   } catch (_) { /* auditoria nao derruba a operacao principal */ }
 }
 
-async function loadOperationalData() {
-  // therapy_sessions.scheduledAt e gravado como epoch em milissegundos.
-  // Consultar com Timestamp excluiria silenciosamente todas as sessoes.
-  const since = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  const db = getDb();
-  const [professionalsSnap, sessionsSnap, incidentsSnap, supervisionsSnap] = await Promise.all([
-    db.collection('therapists').limit(1000).get(),
-    db.collection('therapy_sessions').where('scheduledAt', '>=', since).limit(5000).get(),
-    db.collection('therapy_rt_incidents').limit(500).get(),
-    db.collection('therapy_rt_supervisions').limit(500).get()
-  ]);
+let operationalCache = null;
+let operationalCacheAt = 0;
+let operationalLoadPromise = null;
+const OPERATIONAL_CACHE_MS = 2 * 60 * 1000;
 
-  const psychologyDocs = professionalsSnap.docs.filter(doc => resolveSiglaFromTherapist(doc.data()) === 'CRP');
-  const psychologyUids = new Set(psychologyDocs.map(doc => doc.id));
-  const stats = new Map();
-  const sessionStatuses = {};
+function invalidateOperationalCache() {
+  operationalCache = null;
+  operationalCacheAt = 0;
+}
 
-  for (const doc of sessionsSnap.docs) {
-    const data = doc.data();
-    if (!psychologyUids.has(data.therapistUid)) continue;
-    const current = stats.get(data.therapistUid) || { count: 0, completed: 0, lastAt: null };
-    current.count += 1;
-    if (data.status === 'completed') current.completed += 1;
-    const at = toMillis(data.scheduledAt);
-    if (at && (!current.lastAt || at > current.lastAt)) current.lastAt = at;
-    stats.set(data.therapistUid, current);
-    const status = cleanText(data.status || 'unknown', 30);
-    sessionStatuses[status] = (sessionStatuses[status] || 0) + 1;
+async function loadOperationalData({ fresh = false } = {}) {
+  if (!fresh && operationalCache && Date.now() - operationalCacheAt < OPERATIONAL_CACHE_MS) {
+    return operationalCache;
   }
+  if (!fresh && operationalLoadPromise) return operationalLoadPromise;
 
-  const professionals = psychologyDocs
-    .map(doc => publicProfessional(doc, stats.get(doc.id)))
-    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  const incidents = incidentsSnap.docs.map(serializeDoc).sort((a, b) => (b.occurredAt || b.createdAt || 0) - (a.occurredAt || a.createdAt || 0));
-  const supervisions = supervisionsSnap.docs.map(serializeDoc).sort((a, b) => (b.supervisedAt || b.createdAt || 0) - (a.supervisedAt || a.createdAt || 0));
+  const db = getDb();
+  operationalLoadPromise = (async () => {
+    // Projecoes explicitas impedem que dados de pacientes, prontuarios,
+    // pagamentos ou configuracoes privadas entrem na memoria do portal RT.
+    const [professionalsSnap, sessionsSnap, incidentsSnap, supervisionsSnap] = await Promise.all([
+      db.collection('therapists').select(
+        'displayName', 'nome', 'email', 'tipoConselho', 'numeroConselho', 'crp', 'crm',
+        'verificationStatus', 'disabled', 'status', 'createdAt'
+      ).get(),
+      db.collection('therapy_sessions').select(
+        'therapistUid', 'scheduledAt', 'status', 'durationMinutes',
+        'therapistJoinedAt', 'completedAt', 'createdAt',
+        'publicProgramId', 'publicSchoolId', 'fundingSource'
+      ).get(),
+      db.collection('therapy_rt_incidents').get(),
+      db.collection('therapy_rt_supervisions').get()
+    ]);
 
-  return { professionals, incidents, supervisions, sessionStatuses };
+    const aggregation = buildProfessionalAggregation({
+      professionalDocs: professionalsSnap.docs,
+      sessionDocs: sessionsSnap.docs,
+      resolveCouncil: resolveSiglaFromTherapist
+    });
+    const incidents = incidentsSnap.docs.map(serializeDoc)
+      .sort((a, b) => (b.occurredAt || b.createdAt || 0) - (a.occurredAt || a.createdAt || 0));
+    const supervisions = supervisionsSnap.docs.map(serializeDoc)
+      .sort((a, b) => (b.supervisedAt || b.createdAt || 0) - (a.supervisedAt || a.createdAt || 0));
+    const result = {
+      groupByUid: aggregation.groupByUid,
+      professionals: aggregation.groups.map(publicAggregatedProfessional),
+      incidents,
+      supervisions,
+      sessionStatuses: aggregation.recentSessionStatuses,
+      allSessionStatuses: aggregation.allSessionStatuses
+    };
+    operationalCache = result;
+    operationalCacheAt = Date.now();
+    return result;
+  })();
+
+  try { return await operationalLoadPromise; }
+  finally { operationalLoadPromise = null; }
 }
 
 router.get('/rt/me', asyncHandler(async (req, res) => {
@@ -207,24 +205,33 @@ router.get('/rt/me', asyncHandler(async (req, res) => {
 router.get('/rt/dashboard', asyncHandler(async (req, res) => {
   const actor = await authenticateRt(req, res);
   if (!actor) return;
-  const data = await loadOperationalData();
+  const data = await loadOperationalData({ fresh: req.query.fresh === '1' });
+  const activeProfessionals = data.professionals.filter(p => p.active);
   const completed = Object.entries(data.sessionStatuses)
-    .filter(([status]) => ['completed', 'finished', 'done'].includes(status))
+    .filter(([status]) => COMPLETED_STATUSES.has(status))
     .reduce((sum, [, count]) => sum + count, 0);
   const totalSessions = Object.values(data.sessionStatuses).reduce((sum, count) => sum + count, 0);
+  const totalSessionsAllTime = Object.values(data.allSessionStatuses).reduce((sum, count) => sum + count, 0);
+  const completedAllTime = Object.entries(data.allSessionStatuses)
+    .filter(([status]) => COMPLETED_STATUSES.has(status))
+    .reduce((sum, [, count]) => sum + count, 0);
   return res.json({
     ok: true,
     generatedAt: Date.now(),
     metrics: {
-      professionals: data.professionals.length,
-      verifiedProfessionals: data.professionals.filter(p => p.verified && p.councilNumber).length,
+      professionals: activeProfessionals.length,
+      totalProfessionals: data.professionals.length,
+      verifiedProfessionals: activeProfessionals.filter(p => p.verified && p.councilNumber).length,
       sessions30d: totalSessions,
       completedSessions30d: completed,
+      sessionsAllTime: totalSessionsAllTime,
+      completedSessionsAllTime: completedAllTime,
+      duplicateProfessionals: data.professionals.filter(p => p.duplicate).length,
       openIncidents: data.incidents.filter(i => i.status !== 'resolved').length,
       criticalIncidents: data.incidents.filter(i => i.status !== 'resolved' && i.severity === 'critical').length,
       supervisions30d: data.supervisions.filter(s => (s.supervisedAt || s.createdAt || 0) >= Date.now() - 30 * 86400000).length
     },
-    attention: data.professionals.filter(p => !p.verified || !p.councilNumber).slice(0, 12),
+    attention: data.professionals.filter(p => !p.verified || !p.councilNumber || p.duplicate).slice(0, 12),
     recentIncidents: data.incidents.slice(0, 8),
     recentSupervisions: data.supervisions.slice(0, 8),
     sessionStatuses: data.sessionStatuses
@@ -235,13 +242,49 @@ router.get('/rt/profissionais', asyncHandler(async (req, res) => {
   const actor = await authenticateRt(req, res);
   if (!actor) return;
   const data = await loadOperationalData();
-  return res.json({ ok: true, professionals: data.professionals });
+  return res.json({
+    ok: true,
+    professionals: data.professionals,
+    meta: { total: data.professionals.length, duplicates: data.professionals.filter(item => item.duplicate).length }
+  });
+}));
+
+router.get('/rt/profissionais/:uid/historico', asyncHandler(async (req, res) => {
+  const actor = await authenticateRt(req, res);
+  if (!actor) return;
+  const uid = cleanText(req.params.uid, 160);
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.max(5, Math.min(100, Number.parseInt(req.query.pageSize, 10) || 20));
+  const wantedStatus = cleanText(req.query.status || 'all', 30).toLowerCase();
+  const data = await loadOperationalData();
+  const group = data.groupByUid.get(uid);
+  if (!group) return sendError(res, 404, 'PROFISSIONAL_NAO_ENCONTRADO');
+  const filtered = wantedStatus === 'all'
+    ? group.sessions
+    : group.sessions.filter(session => {
+      if (wantedStatus === 'completed') return COMPLETED_STATUSES.has(session.status);
+      if (wantedStatus === 'canceled') return ['canceled', 'cancelled', 'rejected'].includes(session.status);
+      return session.status === wantedStatus;
+    });
+  const start = (page - 1) * pageSize;
+  await writeRtAudit(actor, 'professional_history_viewed', { professionalUid: group.uid, page });
+  return res.json({
+    ok: true,
+    professional: publicAggregatedProfessional(group),
+    sessions: filtered.slice(start, start + pageSize),
+    pagination: {
+      page,
+      pageSize,
+      total: filtered.length,
+      totalPages: Math.max(1, Math.ceil(filtered.length / pageSize))
+    }
+  });
 }));
 
 router.get('/rt/incidentes', asyncHandler(async (req, res) => {
   const actor = await authenticateRt(req, res);
   if (!actor) return;
-  const snap = await getDb().collection('therapy_rt_incidents').limit(500).get();
+  const snap = await getDb().collection('therapy_rt_incidents').get();
   const incidents = snap.docs.map(serializeDoc).sort((a, b) => (b.occurredAt || b.createdAt || 0) - (a.occurredAt || a.createdAt || 0));
   return res.json({ ok: true, incidents });
 }));
@@ -267,6 +310,7 @@ router.post('/rt/incidentes', asyncHandler(async (req, res) => {
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
+  invalidateOperationalCache();
   await writeRtAudit(actor, 'incident_created', { incidentId: ref.id, severity, category });
   logInfo('rt_incident_created', { incidentId: ref.id, severity, category });
   return res.status(201).json({ ok: true, id: ref.id });
@@ -290,6 +334,7 @@ router.patch('/rt/incidentes/:id', asyncHandler(async (req, res) => {
   };
   if (status === 'resolved') update.resolvedAt = admin.firestore.FieldValue.serverTimestamp();
   await incidentRef.set(update, { merge: true });
+  invalidateOperationalCache();
   await writeRtAudit(actor, 'incident_updated', { incidentId: id, status });
   return res.json({ ok: true, id, status });
 }));
@@ -297,7 +342,7 @@ router.patch('/rt/incidentes/:id', asyncHandler(async (req, res) => {
 router.get('/rt/supervisoes', asyncHandler(async (req, res) => {
   const actor = await authenticateRt(req, res);
   if (!actor) return;
-  const snap = await getDb().collection('therapy_rt_supervisions').limit(500).get();
+  const snap = await getDb().collection('therapy_rt_supervisions').get();
   const supervisions = snap.docs.map(serializeDoc).sort((a, b) => (b.supervisedAt || b.createdAt || 0) - (a.supervisedAt || a.createdAt || 0));
   return res.json({ ok: true, supervisions });
 }));
@@ -326,6 +371,7 @@ router.post('/rt/supervisoes', asyncHandler(async (req, res) => {
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
+  invalidateOperationalCache();
   await writeRtAudit(actor, 'supervision_created', { supervisionId: ref.id, type });
   logInfo('rt_supervision_created', { supervisionId: ref.id, type });
   return res.status(201).json({ ok: true, id: ref.id });
