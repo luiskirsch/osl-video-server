@@ -8,6 +8,8 @@ updates:
       time: "07:00"
       timezone: America/Sao_Paulo
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       production-minor-patch:
         dependency-type: production
@@ -27,6 +29,8 @@ updates:
       day: monday
       time: "07:15"
       timezone: America/Sao_Paulo
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: docker
     directory: /
@@ -35,3 +39,5 @@ updates:
       day: monday
       time: "07:30"
       timezone: America/Sao_Paulo
+    cooldown:
+      default-days: 7

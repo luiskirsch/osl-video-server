@@ -47,7 +47,7 @@ remoto aponta pra ele via tunnel HTTPS (ou tudo local se preferir 100% offline).
 5. Abre o JSON num editor de texto, **copia tudo**
 6. No `.env`, na linha `FIREBASE_SERVICE_ACCOUNT_JSON=`, cola o JSON inteiro em uma linha só. Exemplo:
    ```
-   FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"sextolugar-staging","private_key_id":"abc...","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvgIBADAN...\n-----END PRIVATE KEY-----\n","client_email":"firebase-adminsdk-xxxxx@sextolugar-staging.iam.gserviceaccount.com",...}
+   FIREBASE_SERVICE_ACCOUNT_JSON=<JSON_DA_CONTA_DE_SERVICO_FIREBASE_EM_UMA_LINHA>
    ```
    **Importante:** `\n` dentro do `private_key` permanece como `\n` literal (não é newline real).
 

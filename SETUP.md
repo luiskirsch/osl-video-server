@@ -45,7 +45,7 @@ Console Firebase → `sextolugar-staging` → Project Settings → Service accou
 Cola o JSON inteiro como UMA LINHA na env var:
 
 ```
-FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"sextolugar-staging",...}
+FIREBASE_SERVICE_ACCOUNT_JSON=<JSON_DA_CONTA_DE_SERVICO_FIREBASE>
 ```
 
 ### 3. LiveKit (já configurado se /health.livekitConfigured=true)
