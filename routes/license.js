@@ -1,7 +1,7 @@
 const express = require("express");
 const admin = require("firebase-admin");
-const { logError, logWarn } = require("../logger");
-const { asyncHandler, sendError, normalizeUid, normalizeEmail } = require("../utils");
+const { logError } = require("../logger");
+const { asyncHandler, sendError, normalizeEmail } = require("../utils");
 const { ensureDb, saveLicenseRecord, claimOrValidateLicenseOwnership } = require("../services/firestore");
 const { mercadoPagoFetch } = require("../services/payments");
 const { approveReferralRewardFromPayment } = require("../services/affiliate");
@@ -13,12 +13,12 @@ const {
 // null SEM enviar erro. Usado em rotas legadas que aceitavam uid no body
 // pra compat — quando Bearer existe, e' preferido (defesa em profundidade
 // contra atacante reivindicando licenseCode com uid forjado).
-async function tryDecodeBearerUid(req) {
+async function tryDecodeBearerIdentity(req) {
   const bearer = getBearerToken(req);
   if (!bearer) return null;
   try {
     const decoded = await admin.auth().verifyIdToken(bearer);
-    return decoded.uid || null;
+    return decoded?.uid ? decoded : null;
   } catch {
     return null;
   }
@@ -35,8 +35,8 @@ const router = express.Router();
 router.post("/emitir-licenca", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
 
-  const callerUid = await tryDecodeBearerUid(req);
-  if (!callerUid) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
+  const caller = await tryDecodeBearerIdentity(req);
+  if (!caller) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
 
   const paymentId = String(req.body?.paymentId || "").trim();
   if (!paymentId) return sendError(res, 400, "PAYMENT_ID_OBRIGATORIO");
@@ -65,6 +65,9 @@ router.post("/emitir-licenca", asyncHandler(async (req, res) => {
   const externalReference = String(payment.external_reference || "").trim();
 
   if (!email || !externalReference) return sendError(res, 400, "DADOS_INSUFICIENTES_PARA_LICENCA");
+  if (!caller.email || String(caller.email).trim().toLowerCase() !== email) {
+    return sendError(res, 403, "PAGAMENTO_DE_OUTRA_CONTA");
+  }
 
   const licenseCode = generateLicenseCode(payment.id, externalReference, email);
 
@@ -111,12 +114,11 @@ router.post("/validar-codigo-licenca", asyncHandler(async (req, res) => {
   // Prefere uid do Bearer Firebase quando presente — defesa contra atacante
   // claimar licenseCode com uid forjado. Se Bearer ausente (clientes legados),
   // cai pro body uid + loga warn pra observabilidade.
-  const bearerUid = await tryDecodeBearerUid(req);
-  const uid = bearerUid || normalizeUid(req.body?.uid);
-  if (!bearerUid && req.body?.uid) {
-    logWarn("license_validar_sem_bearer", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress, licenseCode: licenseCode.slice(0, 8) + "..." });
-  }
-  const email       = normalizeEmail(req.body?.email);
+  const bearerIdentity = await tryDecodeBearerIdentity(req);
+  if (!bearerIdentity) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
+  const uid = bearerIdentity.uid;
+  const email = normalizeEmail(bearerIdentity.email);
+  if (!email) return sendError(res, 401, "TOKEN_SEM_EMAIL");
 
   if (!licenseCode) return sendError(res, 400, "CODIGO_OBRIGATORIO");
 
@@ -159,12 +161,11 @@ router.post("/emitir-acesso-por-codigo", asyncHandler(async (req, res) => {
 
   const licenseCode = String(req.body?.licenseCode || "").trim().toUpperCase();
   // Mesmo padrao do /validar-codigo-licenca — prefere uid do Bearer quando presente.
-  const bearerUid = await tryDecodeBearerUid(req);
-  const uid = bearerUid || normalizeUid(req.body?.uid);
-  if (!bearerUid && req.body?.uid) {
-    logWarn("license_emitir_sem_bearer", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress, licenseCode: licenseCode.slice(0, 8) + "..." });
-  }
-  const email       = normalizeEmail(req.body?.email);
+  const bearerIdentity = await tryDecodeBearerIdentity(req);
+  if (!bearerIdentity) return sendError(res, 401, "FIREBASE_TOKEN_OBRIGATORIO");
+  const uid = bearerIdentity.uid;
+  const email = normalizeEmail(bearerIdentity.email);
+  if (!email) return sendError(res, 401, "TOKEN_SEM_EMAIL");
 
   if (!licenseCode) return sendError(res, 400, "CODIGO_OBRIGATORIO");
 
@@ -216,6 +217,10 @@ router.post("/registrar-compra", asyncHandler(async (req, res) => {
 
   const pagamento = pagamentosAprovados.get(ref);
   if (!pagamento || !pagamento.approved) return sendError(res, 400, "COMPRA_NAO_APROVADA");
+  const callerEmail = normalizeEmail(req.firebaseUser?.email);
+  if (!callerEmail || (pagamento.email && normalizeEmail(pagamento.email) !== callerEmail)) {
+    return sendError(res, 403, "PAGAMENTO_DE_OUTRA_CONTA");
+  }
 
   const productId    = pagamento.produto || PRODUCT_ID;
   const catalogEntry = PRODUCT_CATALOG[productId];

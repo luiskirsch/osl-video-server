@@ -19,12 +19,20 @@ router.get("/analytics/room/:roomId/stats", asyncHandler(async (req, res) => {
 
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
   if (!token) return sendError(res, 401, "TOKEN_OBRIGATORIO");
-  try { await admin.auth().verifyIdToken(token); } catch (_) {
+  let decoded;
+  try { decoded = await admin.auth().verifyIdToken(token); } catch (_) {
     return sendError(res, 403, "TOKEN_INVALIDO");
   }
 
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+  const roomSnap = await db.collection("salas").doc(roomId).get();
+  if (!roomSnap.exists) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
+  const room = roomSnap.data();
+  const members = Array.isArray(room.memberUids) ? room.memberUids : [];
+  if (String(room.hostId || "") !== decoded.uid && !members.includes(decoded.uid)) {
+    return sendError(res, 403, "ACESSO_NEGADO");
+  }
 
   const snap = await db.collection("salas").doc(roomId)
     .collection("sessions")

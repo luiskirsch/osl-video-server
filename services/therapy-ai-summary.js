@@ -5,7 +5,17 @@ const whisper = require("./whisper");
 const sessionSummary = require("./session-summary");
 const { encryptJson } = require("./clinical-encryption");
 
-async function processAiSummary({ audioBuffer, sessionId, therapist, session, clientEncryption, db, admin }) {
+async function updateCurrentAttempt({ db, summaryRef, attemptId, data }) {
+  return db.runTransaction(async tx => {
+    const snap = await tx.get(summaryRef);
+    const current = snap.exists ? snap.data() : null;
+    if (!current || current.status !== "processing" || current.attemptId !== attemptId) return false;
+    tx.set(summaryRef, data, { merge: true });
+    return true;
+  });
+}
+
+async function processAiSummary({ audioBuffer, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
   const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
 
   try {
@@ -22,7 +32,7 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session, cl
     });
 
     if (transcriptResult.hallucinated) {
-      await summaryRef.set({
+      const stored = await updateCurrentAttempt({ db, summaryRef, attemptId, data: {
         status: "failed",
         error: "TRANSCRIPT_ALUCINADO",
         transcript: admin.firestore.FieldValue.delete(),
@@ -31,8 +41,8 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session, cl
         transcribeMs,
         completedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
+      } });
+      if (stored) logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
       return;
     }
 
@@ -55,7 +65,7 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session, cl
       transcript: transcriptResult.text,
     }, clientEncryption.key);
 
-    await summaryRef.set({
+    const stored = await updateCurrentAttempt({ db, summaryRef, attemptId, data: {
       status: "completed",
       patientId: session.patientId || null,
       encryptionVersion: encrypted.version,
@@ -73,7 +83,12 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session, cl
       summarizeMs,
       tokenUsage: summaryResult.usage || null,
       completedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    } });
+
+    if (!stored) {
+      logWarn("ai_summary_stale_attempt_discarded", { sessionId, attemptId });
+      return;
+    }
 
     logInfo("ai_summary_completed", {
       sessionId,
@@ -82,15 +97,16 @@ async function processAiSummary({ audioBuffer, sessionId, therapist, session, cl
       outputTokens: summaryResult.usage?.output,
     });
   } catch (error) {
-    await summaryRef.set({
+    const stored = await updateCurrentAttempt({ db, summaryRef, attemptId, data: {
       status: "failed",
       error: error.message.slice(0, 500),
       failedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
-    logError("ai_summary_failed", error, { sessionId });
+    } });
+    if (stored) logError("ai_summary_failed", error, { sessionId });
+    else logWarn("ai_summary_stale_failure_discarded", { sessionId, attemptId });
   } finally {
     clientEncryption?.key?.fill(0);
   }
 }
 
-module.exports = { processAiSummary };
+module.exports = { processAiSummary, updateCurrentAttempt };

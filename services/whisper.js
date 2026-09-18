@@ -23,6 +23,26 @@ let _pipelineP = null;
 let _WaveFile = null;
 let _pipelineFactory = null;
 
+const ALLOWED_AUDIO_EXTENSIONS = new Set(["webm", "mp3", "ogg", "oga", "wav", "m4a", "mp4", "aac", "flac"]);
+const MAX_AUDIO_BYTES = 32 * 1024 * 1024;
+function boundedNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+const MAX_DURATION_SECONDS = boundedNumber(
+  process.env.WHISPER_MAX_DURATION_SECONDS,
+  2 * 60 * 60,
+  60,
+  4 * 60 * 60
+);
+const FFMPEG_TIMEOUT_MS = boundedNumber(
+  process.env.WHISPER_FFMPEG_TIMEOUT_MS,
+  2 * 60_000,
+  10_000,
+  10 * 60_000
+);
+const MAX_FFMPEG_ERROR_CHARS = 4_000;
+
 // Lazy load — modelo grande (150MB) só carrega quando alguem chama transcribe()
 async function getPipeline() {
   if (_pipelineP) return _pipelineP;
@@ -42,7 +62,20 @@ async function getPipeline() {
     const modelName = process.env.WHISPER_MODEL || "Xenova/whisper-base";
     return pipeline("automatic-speech-recognition", modelName);
   })();
-  return _pipelineP;
+  try {
+    return await _pipelineP;
+  } catch (error) {
+    // Falha transitória no download/cache não deve inutilizar o recurso até o
+    // próximo deploy. A chamada seguinte pode tentar inicializar novamente.
+    _pipelineP = null;
+    throw error;
+  }
+}
+
+function normalizeAudioExtension(value) {
+  const ext = String(value || "webm").trim().toLowerCase().replace(/^\./, "");
+  if (!ALLOWED_AUDIO_EXTENSIONS.has(ext)) throw new Error("AUDIO_EXTENSAO_INVALIDA");
+  return ext;
 }
 
 /**
@@ -51,9 +84,16 @@ async function getPipeline() {
  */
 function convertToWav(audioBuffer, srcExt = "webm") {
   return new Promise((resolve, reject) => {
+    let safeExt;
+    try {
+      safeExt = normalizeAudioExtension(srcExt);
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const tmpDir = os.tmpdir();
     const rand = crypto.randomBytes(8).toString("hex");
-    const srcPath = path.join(tmpDir, `whisper-src-${rand}.${srcExt}`);
+    const srcPath = path.join(tmpDir, `whisper-src-${rand}.${safeExt}`);
     const wavPath = path.join(tmpDir, `whisper-out-${rand}.wav`);
 
     fs.writeFileSync(srcPath, audioBuffer);
@@ -67,6 +107,7 @@ function convertToWav(audioBuffer, srcExt = "webm") {
       "-y",
       "-loglevel", "error",
       "-i", srcPath,
+      "-t", String(MAX_DURATION_SECONDS),
       "-ar", "16000",
       "-ac", "1",
       "-c:a", "pcm_s16le",
@@ -74,11 +115,32 @@ function convertToWav(audioBuffer, srcExt = "webm") {
     ]);
 
     let stderr = "";
-    ff.stderr.on("data", (d) => { stderr += d.toString(); });
+    let settled = false;
+    const cleanup = () => {
+      try { fs.unlinkSync(srcPath); } catch (_) { /* empty */ }
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { ff.kill("SIGKILL"); } catch (_) { /* process already gone */ }
+      cleanup();
+      try { fs.unlinkSync(wavPath); } catch (_) { /* empty */ }
+      reject(new Error("FFMPEG_TIMEOUT"));
+    }, FFMPEG_TIMEOUT_MS);
+    timeout.unref?.();
+
+    ff.stderr.on("data", (d) => {
+      if (stderr.length < MAX_FFMPEG_ERROR_CHARS) {
+        stderr += d.toString().slice(0, MAX_FFMPEG_ERROR_CHARS - stderr.length);
+      }
+    });
 
     ff.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
       // Cleanup source regardless
-      try { fs.unlinkSync(srcPath); } catch (_) { /* empty */ }
+      cleanup();
       if (code !== 0) {
         try { fs.unlinkSync(wavPath); } catch (_) { /* empty */ }
         return reject(new Error(`ffmpeg failed (code ${code}): ${stderr.slice(0, 300)}`));
@@ -87,7 +149,11 @@ function convertToWav(audioBuffer, srcExt = "webm") {
     });
 
     ff.on("error", (err) => {
-      try { fs.unlinkSync(srcPath); } catch (_) { /* empty */ }
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cleanup();
+      try { fs.unlinkSync(wavPath); } catch (_) { /* empty */ }
       reject(new Error(`ffmpeg spawn failed: ${err.message}`));
     });
   });
@@ -128,10 +194,13 @@ function loadWavAsFloat32(wavPath) {
  */
 async function transcribe(audioBuffer, opts = {}) {
   const language = opts.language || "portuguese";
-  const srcExt = opts.srcExt || "webm";
+  const srcExt = normalizeAudioExtension(opts.srcExt || "webm");
 
   if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) {
     throw new Error("audioBuffer vazio ou invalido");
+  }
+  if (audioBuffer.length > MAX_AUDIO_BYTES) {
+    throw new Error("AUDIO_MUITO_GRANDE");
   }
 
   const pipeline = await getPipeline();
@@ -192,4 +261,4 @@ function isHallucinated(text) {
   return false;
 }
 
-module.exports = { transcribe };
+module.exports = { transcribe, isHallucinated, normalizeAudioExtension };

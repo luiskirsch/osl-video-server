@@ -28,6 +28,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const JOIN_TOKEN_VALIDITY_MS = 2 * HOUR_MS; // bate com routes/therapy.js
 
 let timer = null;
+let startupTimer = null;
+let fullTickRunning = false;
 
 const REMINDER_CANCEL_VALIDITY_MS = 60 * 24 * 60 * 60 * 1000; // 60d
 const REMINDER_CONFIRM_VALIDITY_MS = REMINDER_CANCEL_VALIDITY_MS;
@@ -319,18 +321,28 @@ async function runReminder1hTick() {
 }
 
 async function runFullTick() {
-  await runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
-  await runReminder1hTick().catch(e => logError("reminder_1h_tick_unhandled", e));
-  await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
-  await runStudentDocCleanup().catch(e => logError("student_doc_cleanup_unhandled", e));
-  await runBirthdayTick().catch(e => logError("birthday_tick_unhandled", e));
-  await runNpsTick().catch(e => logError("nps_tick_unhandled", e));
-  // Chat: dispara e-mail fallback pra threads com mensagem unread > 24h
-  // (best-effort caso push notification tenha falhado ou user esteja off).
-  await runChatUnreadEmailTick().catch(e => logError("chat_unread_tick_unhandled", e));
-  // Reverificação anual de tiers (estudante expira / recém-formado vira pro)
-  await runStudentExpirationTick().catch(e => logError("student_expiration_tick_unhandled", e));
-  await runRecemFormadoTransitionTick().catch(e => logError("recem_formado_transition_tick_unhandled", e));
+  if (fullTickRunning) {
+    logWarn("scheduler_tick_skipped_overlap");
+    return false;
+  }
+  fullTickRunning = true;
+  try {
+    await runReminderTick().catch(e => logError("reminder_tick_unhandled", e));
+    await runReminder1hTick().catch(e => logError("reminder_1h_tick_unhandled", e));
+    await processPendingReferrals().catch(e => logError("affiliate_retry_tick_unhandled", e));
+    await runStudentDocCleanup().catch(e => logError("student_doc_cleanup_unhandled", e));
+    await runBirthdayTick().catch(e => logError("birthday_tick_unhandled", e));
+    await runNpsTick().catch(e => logError("nps_tick_unhandled", e));
+    // Chat: dispara e-mail fallback pra threads com mensagem unread > 24h
+    // (best-effort caso push notification tenha falhado ou user esteja off).
+    await runChatUnreadEmailTick().catch(e => logError("chat_unread_tick_unhandled", e));
+    // Reverificação anual de tiers (estudante expira / recém-formado vira pro)
+    await runStudentExpirationTick().catch(e => logError("student_expiration_tick_unhandled", e));
+    await runRecemFormadoTransitionTick().catch(e => logError("recem_formado_transition_tick_unhandled", e));
+    return true;
+  } finally {
+    fullTickRunning = false;
+  }
 }
 
 // ─── Chat: e-mail fallback pra unread > 24h ──────────────────────────
@@ -765,17 +777,25 @@ async function runRecemFormadoTransitionTick() {
 }
 
 function startSchedulerLoop() {
-  if (timer) return;
+  if (timer || startupTimer) return;
   // Primeiro tick depois de 1min (evita bater no startup do Firebase Admin).
-  setTimeout(() => {
-    runFullTick();
-    timer = setInterval(runFullTick, TICK_INTERVAL_MS);
+  startupTimer = setTimeout(() => {
+    startupTimer = null;
+    runFullTick().catch(e => logError("scheduler_tick_unhandled", e));
+    timer = setInterval(() => {
+      runFullTick().catch(e => logError("scheduler_tick_unhandled", e));
+    }, TICK_INTERVAL_MS);
     timer.unref();
   }, 60 * 1000);
+  startupTimer.unref?.();
   logInfo("scheduler_loop_started", { intervalMs: TICK_INTERVAL_MS, lookaheadHours: REMINDER_LOOKAHEAD_HOURS });
 }
 
 function stopSchedulerLoop() {
+  if (startupTimer) {
+    clearTimeout(startupTimer);
+    startupTimer = null;
+  }
   if (timer) {
     clearInterval(timer);
     timer = null;

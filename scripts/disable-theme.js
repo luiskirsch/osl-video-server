@@ -3,6 +3,7 @@
 require('dotenv').config();
 const admin = require('firebase-admin');
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+require('./confirm-firebase-project').assertFirebaseProjectConfirmed(sa, 'disable-theme');
 admin.initializeApp({ credential: admin.credential.cert(sa) });
 const db = admin.firestore();
 (async () => {

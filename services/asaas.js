@@ -11,6 +11,7 @@
 // throw — caller decide se propaga. apiKey ausente vira { ok: false, skipped: true }.
 
 const { logInfo, logError } = require("../logger");
+const { httpFetch } = require("../utils");
 
 const BASE_BY_ENV = {
   sandbox:    "https://api-sandbox.asaas.com/v3",
@@ -30,7 +31,7 @@ async function asaasFetch({ apiKey, env, path, method = "GET", body = null }) {
     "User-Agent":   "EspacoPreludio/1.0"
   };
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined

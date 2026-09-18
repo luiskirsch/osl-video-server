@@ -1,17 +1,32 @@
 const express = require("express");
 const fs      = require("fs");
+const crypto  = require("crypto");
 const { APP_START_TIME, LOG_FILE } = require("../logger");
-const { PORT, APP_ENV, LIVEKIT_API_KEY, LIVEKIT_URL, ADMIN_SECRET } = require("../config");
+const { PORT, APP_ENV, IS_PRODUCTION, LIVEKIT_API_KEY, LIVEKIT_URL, ADMIN_SECRET } = require("../config");
 const { getDb } = require("../services/firestore");
 const { activeStreams, activeRecordings } = require("../game/state");
 const { verifySignedToken } = require("../services/auth");
 
 const router = express.Router();
+const PANEL_COOKIE = "osl_panel_session";
+
+function readCookie(req, name) {
+  const raw = String(req.headers?.cookie || "");
+  for (const item of raw.split(";")) {
+    const separator = item.indexOf("=");
+    if (separator < 0) continue;
+    if (item.slice(0, separator).trim() !== name) continue;
+    try { return decodeURIComponent(item.slice(separator + 1).trim()); }
+    catch { return ""; }
+  }
+  return "";
+}
 
 function checkPanelToken(req) {
   const fromQuery  = req.query.token || "";
   const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
-  const token = fromQuery || fromHeader;
+  const fromCookie = readCookie(req, PANEL_COOKIE);
+  const token = fromHeader || fromCookie || fromQuery;
   if (!token || !ADMIN_SECRET) return false;
   const r = verifySignedToken(token, ADMIN_SECRET);
   return r.valid && r.payload?.token_type === "panel_session";
@@ -23,6 +38,17 @@ function firebaseProjectId() {
   // firebase-admin firestore exposes the projectId on the underlying app options
   try { return db.app?.options?.projectId || db._settings?.projectId || null; }
   catch { return null; }
+}
+
+function readLogTail(maxBytes = 512 * 1024) {
+  if (!fs.existsSync(LOG_FILE)) return "";
+  const size = fs.statSync(LOG_FILE).size;
+  const start = Math.max(0, size - maxBytes);
+  const length = size - start;
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(LOG_FILE, "r");
+  try { fs.readSync(fd, buffer, 0, length, start); } finally { fs.closeSync(fd); }
+  return buffer.toString("utf-8");
 }
 
 router.get("/", (req, res) => {
@@ -41,33 +67,61 @@ router.get("/health", (req, res) => {
   // rodando (debug de auto-deploy stale).
   const commitSha = process.env.RAILWAY_GIT_COMMIT_SHA || null;
   const commitShort = commitSha ? commitSha.substring(0, 7) : null;
+  const privileged = checkPanelToken(req);
   return res.status(200).json({
     ok: true,
     service: "osl-video-server",
     appEnv: APP_ENV,
-    nodeEnv: process.env.NODE_ENV || "development",
     uptimeSec: Math.round(process.uptime()),
     startedAt: new Date(APP_START_TIME).toISOString(),
     now: new Date().toISOString(),
     commitSha: commitShort,
-    railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
-    firebaseConfigured: !!getDb(),
-    firebaseProjectId: firebaseProjectId(),
-    livekitConfigured: !!LIVEKIT_API_KEY,
-    livekitUrl: LIVEKIT_URL || null,
-    activeStreams: activeStreams.size,
-    activeRecordings: activeRecordings.size
+    ...(privileged ? {
+      nodeEnv: process.env.NODE_ENV || "development",
+      railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
+      firebaseConfigured: !!getDb(),
+      firebaseProjectId: firebaseProjectId(),
+      livekitConfigured: !!LIVEKIT_API_KEY,
+      livekitUrl: LIVEKIT_URL || null,
+      activeStreams: activeStreams.size,
+      activeRecordings: activeRecordings.size
+    } : {})
   });
 });
 
 router.get("/panel", (req, res) => {
+  if (!checkPanelToken(req)) {
+    return res.status(403).json({ ok: false, error: "ADMIN_SECRET_INVALIDO" });
+  }
+  // Migra o token recebido uma única vez na URL para cookie HttpOnly. Assim
+  // ele não permanece no address bar, histórico, screenshots nem em cada
+  // reconexão do EventSource.
+  if (req.query.token) {
+    const cookie = [
+      `${PANEL_COOKIE}=${encodeURIComponent(String(req.query.token))}`,
+      "Path=/",
+      "HttpOnly",
+      "SameSite=Strict",
+      "Max-Age=28800",
+      ...(IS_PRODUCTION ? ["Secure"] : []),
+    ].join("; ");
+    res.setHeader("Set-Cookie", cookie);
+    res.setHeader("Cache-Control", "no-store");
+    return res.redirect(303, "/panel");
+  }
+  const nonce = crypto.randomBytes(18).toString("base64");
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  res.setHeader(
+    "Content-Security-Policy",
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`
+  );
   res.send(`
   <!DOCTYPE html>
   <html>
   <head>
     <title>OSL Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
+    <style nonce="${nonce}">
       body { margin:0; background:#050507; color:#e6c07b; font-family:monospace; display:flex; flex-direction:column; height:100vh; }
       .header { padding:20px; border-bottom:1px solid rgba(255,255,255,0.1); font-size:18px; letter-spacing:1px; }
       .status { padding:16px 20px; color:#82d996; border-bottom:1px solid rgba(255,255,255,0.06); }
@@ -81,7 +135,7 @@ router.get("/panel", (req, res) => {
     <div class="header">OSL VIDEO SERVER</div>
     <div class="status" id="status">Conectando...</div>
     <div class="logs"   id="logs"></div>
-    <script>
+    <script nonce="${nonce}">
       const statusEl = document.getElementById("status");
       const logsEl   = document.getElementById("logs");
 
@@ -124,9 +178,11 @@ router.get("/panel", (req, res) => {
 });
 
 router.get("/logs", (req, res) => {
+  if (!checkPanelToken(req)) {
+    return res.status(403).json({ ok: false, error: "ADMIN_SECRET_INVALIDO" });
+  }
   try {
-    if (!fs.existsSync(LOG_FILE)) return res.json([]);
-    const data  = fs.readFileSync(LOG_FILE, "utf-8");
+    const data  = readLogTail();
     const lines = data.split("\n").filter(Boolean);
     return res.json(lines);
   } catch {
@@ -154,7 +210,7 @@ router.get("/logs/stream", (req, res) => {
 
   try {
     if (fs.existsSync(LOG_FILE)) {
-      const initialLines = fs.readFileSync(LOG_FILE, "utf-8").split("\n").filter(Boolean).slice(-100);
+      const initialLines = readLogTail().split("\n").filter(Boolean).slice(-100);
       sendEvent("bootstrap", JSON.stringify(initialLines));
       lastSize = fs.statSync(LOG_FILE).size;
     } else {
@@ -169,7 +225,9 @@ router.get("/logs/stream", (req, res) => {
       if (!fs.existsSync(LOG_FILE)) return;
       if (curr.size < lastSize) lastSize = 0;
       if (curr.size > lastSize) {
-        const stream = fs.createReadStream(LOG_FILE, { encoding: "utf-8", start: lastSize, end: curr.size });
+        const maxChunkBytes = 512 * 1024;
+        const readStart = Math.max(lastSize, curr.size - maxChunkBytes);
+        const stream = fs.createReadStream(LOG_FILE, { encoding: "utf-8", start: readStart, end: curr.size - 1 });
         let chunk = "";
         stream.on("data", (data) => { chunk += data; });
         stream.on("end",  ()     => { chunk.split("\n").filter(Boolean).forEach(sendLogLine); lastSize = curr.size; });

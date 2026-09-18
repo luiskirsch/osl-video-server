@@ -50,12 +50,10 @@ function auditLog(category) {
         statusCode: res.statusCode,
         durationMs: Date.now() - started,
         uid: extractUid(req),
-        ip: req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
-          || req.socket?.remoteAddress
-          || null,
-        userAgent: req.headers["user-agent"] || null,
+        ip: req.ip || req.socket?.remoteAddress || null,
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 512) || null,
         requestId: req.requestId || null,
-        roomId: req.body?.roomId || null,
+        roomId: String(req.body?.roomId || "").slice(0, 128) || null,
       };
 
       logInfo("audit_event", entry);

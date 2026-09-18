@@ -8,6 +8,7 @@ const { getFirestore, Timestamp } = require("firebase-admin/firestore");
 const { cert } = require("firebase-admin/app");
 
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+require("./confirm-firebase-project").assertFirebaseProjectConfirmed(sa, "patch-add-clinico-geral");
 if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
 initializeApp({ credential: cert({ projectId: sa.project_id, clientEmail: sa.client_email, privateKey: sa.private_key }) });
 const db = getFirestore();

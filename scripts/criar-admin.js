@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Cria (ou atualiza a senha de) contato@espacopreludio.com.br no Firebase Auth.
-// Uso: node scripts/criar-admin.js <senha>
-// Exemplo: node scripts/criar-admin.js MinhaS3nh@Segura123
+// Uso: NEW_ADMIN_PASSWORD=<senha> node scripts/criar-admin.js
+// A senha não é aceita como argumento para evitar vazamento no histórico/ps.
 
 require('dotenv').config();
 const admin = require('firebase-admin');
@@ -13,17 +13,23 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   process.exit(1);
 }
 
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+require('./confirm-firebase-project').assertFirebaseProjectConfirmed(serviceAccount, 'criar-admin');
+
 if (admin.apps.length === 0) {
   admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON))
+    credential: admin.credential.cert(serviceAccount)
   });
 }
 
 async function run() {
-  const password = process.argv[2];
-  if (!password || password.length < 10) {
-    console.error('❌  Informe uma senha (mín. 10 caracteres) como argumento.');
-    console.error('    node scripts/criar-admin.js MinhaS3nh@123');
+  if (process.argv[2]) {
+    console.error('❌  Não passe senha na linha de comando; use NEW_ADMIN_PASSWORD.');
+    process.exit(1);
+  }
+  const password = String(process.env.NEW_ADMIN_PASSWORD || '');
+  if (password.length < 12) {
+    console.error('❌  Defina NEW_ADMIN_PASSWORD com no mínimo 12 caracteres.');
     process.exit(1);
   }
 

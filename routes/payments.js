@@ -182,6 +182,10 @@ router.get("/status-pagamento/:ref", async (req, res) => {
 
     const pagamento = pagamentosAprovados.get(ref);
     if (!pagamento) return res.json({ ok: true, found: false, approved: false });
+    const callerEmail = normalizeEmail(req.firebaseUser?.email);
+    if (!callerEmail || (pagamento.email && normalizeEmail(pagamento.email) !== callerEmail)) {
+      return sendError(res, 403, "PAGAMENTO_DE_OUTRA_CONTA");
+    }
 
     return res.json({ ok: true, found: true, approved: true, paymentId: pagamento.paymentId, status: pagamento.status, ref: pagamento.ref, produto: pagamento.produto || null });
   } catch (error) {
@@ -200,6 +204,10 @@ router.get("/verificar-compra/:ref", async (req, res) => {
 
     const pagamento = pagamentosAprovados.get(ref);
     if (!pagamento) return res.json({ ok: true, found: false, approved: false });
+    const callerEmail = normalizeEmail(req.firebaseUser?.email);
+    if (!callerEmail || (pagamento.email && normalizeEmail(pagamento.email) !== callerEmail)) {
+      return sendError(res, 403, "PAGAMENTO_DE_OUTRA_CONTA");
+    }
 
     const productId    = pagamento.produto || PRODUCT_ID;
     const catalogEntry = PRODUCT_CATALOG[productId] || PRODUCT_CATALOG[PRODUCT_ID];

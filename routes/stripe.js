@@ -13,6 +13,19 @@ const stripeSvc = require("../services/stripe");
 const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("../services/firestore");
 
+const STRIPE_ALLOWED_ORIGINS = new Set([
+  "https://espacopreludio.com.br",
+  "https://www.espacopreludio.com.br",
+  "https://staging.espacopreludio.com.br",
+  "http://localhost:3000",
+  "http://localhost:5173",
+]);
+
+function stripeReturnOrigin(req) {
+  const raw = String(req.headers.origin || "").replace(/\/$/, "");
+  return STRIPE_ALLOWED_ORIGINS.has(raw) ? raw : "https://espacopreludio.com.br";
+}
+
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
@@ -39,15 +52,8 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
     email = snap.data()?.email || undefined;
   } catch (_) { /* best-effort */ }
 
-  const STRIPE_ALLOWED_ORIGINS = [
-    "https://espacopreludio.com.br",
-    "https://www.espacopreludio.com.br",
-    "https://staging.espacopreludio.com.br",
-    "http://localhost:3000",
-    "http://localhost:5173",
-  ];
   const rawOrigin = (req.headers.origin || "").replace(/\/$/, "");
-  const origin = STRIPE_ALLOWED_ORIGINS.includes(rawOrigin)
+  const origin = STRIPE_ALLOWED_ORIGINS.has(rawOrigin)
     ? rawOrigin
     : "https://espacopreludio.com.br";
   const { url } = await stripeSvc.createCheckoutSession({
@@ -77,7 +83,7 @@ webhookRouter.post("/stripe/webhook",
       event = stripeSvc.constructWebhookEvent(req.body, sig);
     } catch (err) {
       logWarn("stripe_webhook_sig_failed", { error: err.message });
-      return res.status(400).send(`Webhook Error: ${err.message}`);
+      return res.status(400).json({ ok: false, error: "STRIPE_SIGNATURE_INVALIDA" });
     }
 
     const db = getDb();
@@ -173,7 +179,7 @@ webhookRouter.post("/stripe/webhook",
       }
     } catch (err) {
       logError("stripe_webhook_handler_failed", err, { type: event.type });
-      // Retorna 200 mesmo em erro de handler — evita que Stripe re-envie infinitamente
+      return res.status(503).json({ received: false, error: "STRIPE_PROCESSING_FAILED" });
     }
 
     return res.json({ received: true });
@@ -192,7 +198,7 @@ router.post("/stripe/portal", asyncHandler(async (req, res) => {
     return res.status(404).json({ ok: false, error: "SEM_ASSINATURA_STRIPE" });
   }
 
-  const origin = (req.headers.origin || "https://espacopreludio.com.br").replace(/\/$/, "");
+  const origin = stripeReturnOrigin(req);
   const url = await stripeSvc.createPortalSession({
     stripeCustomerId,
     returnUrl: `${origin}/perfil.html`,

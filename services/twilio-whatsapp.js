@@ -10,6 +10,7 @@
 //   TWILIO_WHATSAPP_FROM — número aprovado, ex: "whatsapp:+14155238886"
 
 const { logWarn, logError } = require("../logger");
+const { httpFetch } = require("../utils");
 const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM } = require("../config");
 
 function isConfigured() {
@@ -46,7 +47,7 @@ async function sendText({ to, message }) {
   }).toString();
 
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Basic ${credentials}`,

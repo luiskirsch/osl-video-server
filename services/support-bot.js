@@ -13,6 +13,7 @@
 // Rate-limited: 30 perguntas/dia por user (custo maximo $0.72/user/mes).
 
 const Anthropic = require("@anthropic-ai/sdk");
+const { logError } = require("../logger");
 
 const SYSTEM_PROMPT = `Você é a Aurora, assistente de IA do Espaço Prelúdio — plataforma de telessaúde brasileira (espacopreludio.com.br).
 
@@ -84,7 +85,7 @@ let _client = null;
 function getClient() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
-  if (!_client) _client = new Anthropic({ apiKey });
+  if (!_client) _client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 1 });
   return _client;
 }
 
@@ -106,16 +107,22 @@ async function askBot({ history = [], userMessage, userName = "" }) {
   const cleanMsg = String(userMessage).slice(0, 2000); // sanity cap
 
   // Trim history pra ultimas 10 mensagens (5 turns) pra controlar tokens
-  const recentHistory = (history || []).slice(-10).map(h => ({
-    role: h.role === "user" ? "user" : "assistant",
-    content: String(h.content || "").slice(0, 2000)
-  }));
+  const recentHistory = (Array.isArray(history) ? history : [])
+    .filter(h => h?.role === "user" || h?.role === "assistant")
+    .slice(-10)
+    .map(h => ({
+      role: h.role,
+      content: String(h.content || "").replace(/\u0000/g, "").slice(0, 2000)
+    }))
+    .filter(h => h.content.trim());
 
   // Monta system prompt com bloco de identificação. Primeiro nome só (mais
   // natural). Se nome vier vazio, omite o bloco e cai no comportamento padrão.
   // isFirstMessage = true quando history ainda não tem nenhuma resposta do
   // assistant — sinaliza pro bot cumprimentar pelo nome.
-  const firstName = String(userName || "").trim().split(/\s+/)[0] || "";
+  const firstName = (String(userName || "").trim().split(/\s+/)[0] || "")
+    .replace(/[^\p{L}'-]/gu, "")
+    .slice(0, 40);
   const isFirstMessage = !recentHistory.some(h => h.role === "assistant");
   let systemPrompt = SYSTEM_PROMPT;
   if (firstName) {
@@ -151,7 +158,8 @@ async function askBot({ history = [], userMessage, userName = "" }) {
       }
     };
   } catch (err) {
-    return { ok: false, error: "ANTHROPIC_FALHOU", detail: err.message };
+    logError("support_bot_anthropic_failed", err);
+    return { ok: false, error: "ANTHROPIC_FALHOU" };
   }
 }
 

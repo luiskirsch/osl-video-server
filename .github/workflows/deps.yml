@@ -6,54 +6,68 @@ on:
   pull_request:
     branches: ["**"]
   schedule:
-    - cron: '0 9 * * 1'  # Segunda-feira 9h — scan semanal
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deps-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   npm-audit:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '22'
-          cache: 'npm'
+          persist-credentials: false
 
-      - name: Instalar dependências
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependências sem executar scripts de terceiros
         run: npm ci --ignore-scripts
 
-      - name: npm audit (high + critical)
-        run: npm audit --audit-level=high --json | tee audit-report.json; npm audit --audit-level=high
-        continue-on-error: true
+      - name: npm audit (produção, high + critical)
         id: audit
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high --json > audit-report.json
 
-      - name: Upload relatório de auditoria
-        uses: actions/upload-artifact@v4
+      - name: Upload do relatório de auditoria
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-audit-report
           path: audit-report.json
+          if-no-files-found: error
           retention-days: 30
 
       - name: Falhar build se há vulnerabilidades high/critical
         if: steps.audit.outcome == 'failure'
         run: |
           echo "npm audit encontrou vulnerabilidades high ou critical."
-          echo "Rode 'npm audit' localmente e aplique 'npm audit fix' ou atualize o pacote manualmente."
+          echo "Rode 'npm audit' localmente e atualize o pacote afetado."
           exit 1
 
-  validate-secrets:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '22'
+          persist-credentials: false
 
-      - name: Verificar secrets obrigatórios no Railway
-        run: node scripts/validate-env.js --ci
-        env:
-          CI_MODE: "true"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependências sem executar scripts de terceiros
+        run: npm ci --ignore-scripts
+
+      - name: Validar sintaxe e testes
+        run: npm run check

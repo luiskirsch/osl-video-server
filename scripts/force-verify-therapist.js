@@ -9,6 +9,7 @@
 // (porque o objetivo é só ativar a flag pra teste do selo público).
 
 const admin = require("firebase-admin");
+const { assertFirebaseProjectConfirmed } = require("./confirm-firebase-project");
 
 (async () => {
   const targetUid = process.env.TARGET_UID || "";
@@ -27,9 +28,11 @@ const admin = require("firebase-admin");
         try { parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8")); }
         catch (e) { console.error("FIREBASE_SERVICE_ACCOUNT inválido:", e.message); process.exit(1); }
       }
+      assertFirebaseProjectConfirmed(parsed, "force-verify-therapist");
       admin.initializeApp({ credential: admin.credential.cert(parsed) });
     } else {
-      admin.initializeApp();
+      console.error("FIREBASE_SERVICE_ACCOUNT_JSON/BASE64 é obrigatório para confirmar o projeto alvo.");
+      process.exit(1);
     }
   }
 

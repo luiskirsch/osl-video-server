@@ -65,7 +65,7 @@ function ensureDb(res) {
 
 // --- Operações de usuário / Discord ---
 
-async function saveDiscordLinkToUser({ uid, discordUser, discordAccessToken }) {
+async function saveDiscordLinkToUser({ uid, discordUser }) {
   const userRef = db.collection("users").doc(uid);
   await userRef.set(
     {
@@ -74,7 +74,10 @@ async function saveDiscordLinkToUser({ uid, discordUser, discordAccessToken }) {
       discordUsername: String(discordUser.username || ""),
       discordGlobalName: String(discordUser.global_name || ""),
       discordAvatar: buildDiscordAvatarUrl(discordUser),
-      discordAccessToken: String(discordAccessToken || ""),
+      // O access token de usuário só é necessário durante o callback para
+      // entrar no guild. Persisti-lo aumentava o impacto de um vazamento do
+      // Firestore sem nenhuma utilidade posterior. Remove também dados legados.
+      discordAccessToken: admin.firestore.FieldValue.delete(),
       discordLinkedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     },

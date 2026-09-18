@@ -4,7 +4,7 @@ const {
   panelRooms, activeRecordings, activeStreams,
   completedRecordings, pagamentosAprovados, pendingJoinRequests
 } = require("../game/state");
-const { egressClient } = require("../video/webrtc");
+const { egressClient, stopRoomRecording, stopRoomStreaming } = require("../video/webrtc");
 
 // TTLs (em ms)
 const STALE_STREAM_TTL_MS    = 6 * 60 * 60 * 1000;   // egress sem stop em 6h → assume crashado
@@ -19,26 +19,35 @@ const ORPHAN_POLL_INTERVAL_MS = 15 * 60 * 1000; // 15min
 
 let cleanupTimer = null;
 let orphanTimer  = null;
+let orphanStartupTimer = null;
 
-function pruneStaleEntries() {
+async function pruneStaleEntries() {
   const now = Date.now();
   let pruned = 0;
 
   // Streams órfãos (sem /stop em 6h)
   for (const [roomId, job] of activeStreams.entries()) {
     if (now - (job.startedAt || 0) > STALE_STREAM_TTL_MS) {
-      activeStreams.delete(roomId);
-      pruned++;
-      logWarn("stale_stream_pruned", { roomId, ageMs: now - job.startedAt });
+      const stopped = await stopRoomStreaming(roomId);
+      if (stopped?.egressStopOk) {
+        pruned++;
+        logWarn("stale_stream_stopped", { roomId, ageMs: now - job.startedAt });
+      } else {
+        logWarn("stale_stream_stop_pending", { roomId, ageMs: now - job.startedAt });
+      }
     }
   }
 
   // Recordings órfãos
   for (const [roomId, job] of activeRecordings.entries()) {
     if (now - (job.startedAt || 0) > STALE_STREAM_TTL_MS) {
-      activeRecordings.delete(roomId);
-      pruned++;
-      logWarn("stale_recording_pruned", { roomId, ageMs: now - job.startedAt });
+      const stopped = await stopRoomRecording(roomId);
+      if (stopped?.egressStopOk) {
+        pruned++;
+        logWarn("stale_recording_stopped", { roomId, ageMs: now - job.startedAt });
+      } else {
+        logWarn("stale_recording_stop_pending", { roomId, ageMs: now - job.startedAt });
+      }
     }
   }
 
@@ -90,14 +99,19 @@ async function pollLiveKitOrphans() {
     const list = await egressClient.listEgress({ active: true });
     if (!Array.isArray(list)) return;
 
-    const knownRooms = new Set([...activeStreams.keys(), ...activeRecordings.keys()]);
+    // Compare pelo egressId. Comparar só roomName deixava um segundo egress
+    // órfão escapar sempre que houvesse outro job legítimo na mesma sala.
+    const knownEgressIds = new Set([
+      ...[...activeStreams.values()].map(job => job?.egressId).filter(Boolean),
+      ...[...activeRecordings.values()].map(job => job?.egressId).filter(Boolean),
+    ]);
     let orphansFound = 0, orphansStopped = 0, orphansFailed = 0;
 
     for (const e of list) {
       const roomName = e?.roomName || e?.request?.roomName || null;
       const egressId = e?.egressId || null;
       if (!egressId) continue;
-      if (roomName && knownRooms.has(roomName)) continue; // tracked, ok
+      if (knownEgressIds.has(egressId)) continue; // tracked, ok
 
       orphansFound++;
       try {
@@ -111,7 +125,7 @@ async function pollLiveKitOrphans() {
     }
 
     if (orphansFound > 0) {
-      logInfo("livekit_orphan_poll", { orphansFound, orphansStopped, orphansFailed, knownRooms: knownRooms.size });
+      logInfo("livekit_orphan_poll", { orphansFound, orphansStopped, orphansFailed, knownEgresses: knownEgressIds.size });
     }
   } catch (err) {
     logError("livekit_orphan_poll_error", err);
@@ -121,25 +135,33 @@ async function pollLiveKitOrphans() {
 function startCleanupLoop() {
   if (cleanupTimer) return;
   // Roda a cada 1h
-  cleanupTimer = setInterval(pruneStaleEntries, 60 * 60 * 1000);
+  cleanupTimer = setInterval(() => {
+    pruneStaleEntries().catch(e => logError("cleanup_prune_unhandled", e));
+  }, 60 * 60 * 1000);
   cleanupTimer.unref();
   logInfo("cleanup_loop_started", { intervalMs: 60 * 60 * 1000 });
 
   // Orphan poll a cada 15min — só se egressClient configurado.
   if (egressClient && !orphanTimer) {
     // Primeiro poll após 2min do startup (evita corrida com LiveKit init).
-    setTimeout(() => {
+    orphanStartupTimer = setTimeout(() => {
+      orphanStartupTimer = null;
       pollLiveKitOrphans().catch(e => logError("orphan_poll_unhandled", e));
       orphanTimer = setInterval(() => {
         pollLiveKitOrphans().catch(e => logError("orphan_poll_unhandled", e));
       }, ORPHAN_POLL_INTERVAL_MS);
       orphanTimer.unref();
     }, 2 * 60 * 1000);
+    orphanStartupTimer.unref?.();
     logInfo("orphan_poll_loop_started", { intervalMs: ORPHAN_POLL_INTERVAL_MS });
   }
 }
 
 function stopCleanupLoop() {
+  if (orphanStartupTimer) {
+    clearTimeout(orphanStartupTimer);
+    orphanStartupTimer = null;
+  }
   if (cleanupTimer) {
     clearInterval(cleanupTimer);
     cleanupTimer = null;

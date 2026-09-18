@@ -160,11 +160,17 @@ function requireAdmin(req, res, next) {
 }
 
 async function verifyFirebaseToken(req, res) {
+  if (req.verifiedFirebaseToken?.uid) {
+    req.firebaseUid = req.verifiedFirebaseToken.uid;
+    return req.verifiedFirebaseToken.uid;
+  }
   const bearer = getBearerToken(req);
   if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
   try {
     const decoded = await admin.auth().verifyIdToken(bearer);
+    req.verifiedFirebaseToken = decoded;
     req.firebaseUid = decoded.uid;
+    req.firebaseUser = decoded;
     return decoded.uid;
   } catch {
     sendError(res, 401, "TOKEN_INVALIDO");

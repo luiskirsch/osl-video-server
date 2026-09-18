@@ -1,4 +1,4 @@
-name: SAST – Semgrep
+name: SAST - Semgrep
 
 on:
   push:
@@ -6,21 +6,32 @@ on:
   pull_request:
     branches: ["**"]
   schedule:
-    - cron: '0 8 * * 1'  # Segunda-feira 8h — scan completo semanal
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sast-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   semgrep:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       security-events: write
     container:
-      image: semgrep/semgrep
+      image: semgrep/semgrep:1.176.1-nonroot@sha256:4f79d592f85f91aa37597c0cfbad94ea5fa35c65571425fb061e406e6724d76e
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Semgrep scan
         id: semgrep
+        continue-on-error: true
         run: |
           semgrep \
             --config=p/nodejs \
@@ -28,21 +39,22 @@ jobs:
             --config=p/secrets \
             --config=p/jwt \
             --config=p/express \
+            --error \
+            --metrics=off \
             --sarif \
             --output=semgrep.sarif \
             --exclude=node_modules \
             --exclude=.git \
             .
-        continue-on-error: true
 
       - name: Upload SARIF ao GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: semgrep.sarif
 
       - name: Falhar build se há findings
         if: steps.semgrep.outcome == 'failure'
         run: |
-          echo "Semgrep encontrou vulnerabilidades — veja a aba Security > Code scanning alerts."
+          echo "Semgrep encontrou vulnerabilidades ou erros de análise."
           exit 1

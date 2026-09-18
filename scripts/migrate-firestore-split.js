@@ -59,6 +59,19 @@ async function main() {
   try { targetCred = require(targetPath); }
   catch { console.error("Não achei", targetPath); process.exit(1); }
 
+  if (sourceCred.project_id === targetCred.project_id) {
+    throw new Error("Origem e destino apontam para o mesmo projeto; migração cancelada.");
+  }
+  if (!dryRun) {
+    const confirmedTarget = String(process.env.CONFIRM_FIREBASE_TARGET_PROJECT || "").trim();
+    if (confirmedTarget !== String(targetCred.project_id || "").trim()) {
+      throw new Error(
+        `Confirme o destino com CONFIRM_FIREBASE_TARGET_PROJECT=${targetCred.project_id} ` +
+        "ou execute primeiro com --dry-run."
+      );
+    }
+  }
+
   const sourceApp = admin.initializeApp({
     credential: admin.credential.cert(sourceCred)
   }, "source");

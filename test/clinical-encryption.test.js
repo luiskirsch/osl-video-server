@@ -72,7 +72,17 @@ test("AI pipeline persists no clinical plaintext and clears its transient key", 
   });
 
   const writes = [];
-  const db = { collection: () => ({ doc: () => ({ set: async (value) => writes.push(value) }) }) };
+  const summaryRef = {};
+  const db = {
+    collection: () => ({ doc: () => summaryRef }),
+    runTransaction: async callback => callback({
+      get: async () => ({
+        exists: true,
+        data: () => ({ status: "processing", attemptId: "attempt-1" }),
+      }),
+      set: (_ref, value) => writes.push(value),
+    }),
+  };
   const deleted = Symbol("deleted");
   const admin = { firestore: { FieldValue: {
     delete: () => deleted,
@@ -82,6 +92,7 @@ test("AI pipeline persists no clinical plaintext and clears its transient key", 
   await processAiSummary({
     audioBuffer: Buffer.from("audio"),
     sessionId: "session-1",
+    attemptId: "attempt-1",
     therapist: { displayName: "Profissional" },
     session: { patientId: "patient-1", patientName: "Paciente" },
     clientEncryption: { key, wrappedKey: "wrapped", wrappedKeyIv: "wrapped-iv" },

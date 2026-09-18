@@ -1,4 +1,14 @@
-const PORT = Number(process.env.PORT || 3000);
+function envNumber(name, fallback, { min = -Infinity, max = Infinity, integer = false } = {}) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+    return fallback;
+  }
+  return value;
+}
+
+const PORT = envNumber("PORT", 3000, { min: 1, max: 65535, integer: true });
 
 // Logical environment (independent of NODE_ENV which is mostly about
 // optimization). Set APP_ENV=staging on the Railway staging service so
@@ -12,7 +22,8 @@ function normalizeAppEnv(value) {
   if (["prod", "producao", "production"].includes(normalized)) return "production";
   if (["stage", "staging", "homolog", "homologacao"].includes(normalized)) return "staging";
   if (["dev", "development", "desenvolvimento", "local"].includes(normalized)) return "local";
-  return normalized;
+  // Valor desconhecido nunca deve desativar protecoes de producao por engano.
+  return "production";
 }
 
 const APP_ENV = normalizeAppEnv(process.env.APP_ENV);
@@ -257,16 +268,16 @@ const THERAPY_RT_EMAILS = [...new Set([
 //   - "profissional"  (R$ 99,00)  — profissional habilitado com mensalidade
 //   - "empresa"       (R$ 0,00)   — gratuito pro profissional; consultas a R$60 cobradas ao paciente
 // THERAPY_PLAN_AMOUNT mantido por compat (default sem flag explícita).
-const THERAPY_PLAN_AMOUNT                 = Number(process.env.THERAPY_PLAN_AMOUNT                || 99.00);
-const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_AMOUNT  || 99.00); // legado
-const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = Number(process.env.THERAPY_PLAN_PROFISSIONAL_AMOUNT   || 99.00);
-const THERAPY_PLAN_EMPRESA_AMOUNT         = Number(process.env.THERAPY_PLAN_EMPRESA_AMOUNT        || 0.00);
-const THERAPY_PLAN_EMPRESA_SESSION_AMOUNT = Number(process.env.THERAPY_PLAN_EMPRESA_SESSION_AMOUNT || 60.00);
+const THERAPY_PLAN_AMOUNT                 = envNumber("THERAPY_PLAN_AMOUNT", 99.00, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = envNumber("THERAPY_PLAN_RECEM_FORMADO_AMOUNT", 99.00, { min: 0, max: 1_000_000 }); // legado
+const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = envNumber("THERAPY_PLAN_PROFISSIONAL_AMOUNT", 99.00, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_EMPRESA_AMOUNT         = envNumber("THERAPY_PLAN_EMPRESA_AMOUNT", 0.00, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_EMPRESA_SESSION_AMOUNT = envNumber("THERAPY_PLAN_EMPRESA_SESSION_AMOUNT", 60.00, { min: 0, max: 1_000_000 });
 // Cobrança anual = mensal x 12 x 0.84 (16% de desconto), preapproval com
 // frequency: 12 / frequency_type: "months" (MP não tem frequency_type "years").
-const THERAPY_PLAN_ANNUAL_AMOUNT               = Number(process.env.THERAPY_PLAN_ANNUAL_AMOUNT               || 997.92);
-const THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT = Number(process.env.THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT || 997.92); // legado
-const THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  = Number(process.env.THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  || 997.92);
+const THERAPY_PLAN_ANNUAL_AMOUNT               = envNumber("THERAPY_PLAN_ANNUAL_AMOUNT", 997.92, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT = envNumber("THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT", 997.92, { min: 0, max: 1_000_000 }); // legado
+const THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT  = envNumber("THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT", 997.92, { min: 0, max: 1_000_000 });
 const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço Prelúdio Pro";
 
 // Trial diferenciado por plano intencionado no cadastro:
@@ -275,14 +286,14 @@ const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço 
 //   - "profissional"  → 30 dias (período de teste padrão)
 //   - default         → 30 dias (cadastros sem flag explícita = profissional)
 // THERAPY_TRIAL_DAYS mantido por compat — usado se intendedTier não vier.
-const THERAPY_TRIAL_DAYS      = Number(process.env.THERAPY_TRIAL_DAYS || 30);
-const THERAPY_TRIAL_DAYS_PROFISSIONAL  = Number(process.env.THERAPY_TRIAL_DAYS_PROFISSIONAL  || 30);
-const THERAPY_TRIAL_DAYS_RECEM_FORMADO = Number(process.env.THERAPY_TRIAL_DAYS_RECEM_FORMADO || 30);
+const THERAPY_TRIAL_DAYS      = envNumber("THERAPY_TRIAL_DAYS", 30, { min: 0, max: 3650, integer: true });
+const THERAPY_TRIAL_DAYS_PROFISSIONAL  = envNumber("THERAPY_TRIAL_DAYS_PROFISSIONAL", 30, { min: 0, max: 3650, integer: true });
+const THERAPY_TRIAL_DAYS_RECEM_FORMADO = envNumber("THERAPY_TRIAL_DAYS_RECEM_FORMADO", 30, { min: 0, max: 3650, integer: true });
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
 // Janela mínima (em horas) para o paciente cancelar uma sessão futura. Abaixo
 // disso, só o terapeuta pode cancelar. Default 24h alinha com a expectativa
 // clínica usual de "no-show fee" em terapia.
-const THERAPY_MIN_CANCEL_HOURS_PATIENT = Number(process.env.THERAPY_MIN_CANCEL_HOURS_PATIENT || 24);
+const THERAPY_MIN_CANCEL_HOURS_PATIENT = envNumber("THERAPY_MIN_CANCEL_HOURS_PATIENT", 24, { min: 0, max: 8760 });
 
 // E-mail (provider Resend, https://resend.com). Se RESEND_API_KEY vazio, o
 // service vira no-op com log warn — funcionalidade de confirmação/lembrete
@@ -292,7 +303,7 @@ const EMAIL_FROM     = process.env.EMAIL_FROM     || "Espaço Prelúdio <agendas
 // Janela do cron de lembretes: lookahead em horas (procura sessões cujo
 // scheduledAt cai entre now+lookahead-1h e now+lookahead). 24h por default;
 // 1h de janela permite que o cron rode 1×/h sem perder eventos.
-const REMINDER_LOOKAHEAD_HOURS = Number(process.env.REMINDER_LOOKAHEAD_HOURS || 24);
+const REMINDER_LOOKAHEAD_HOURS = envNumber("REMINDER_LOOKAHEAD_HOURS", 24, { min: 1, max: 8760 });
 
 // ─── WhatsApp via Z-API ──────────────────────────────────────────────────
 // Provider: https://z-api.io — número único da plataforma envia mensagens

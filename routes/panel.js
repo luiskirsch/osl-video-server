@@ -22,7 +22,7 @@ function panelPassword() {
 router.post("/admin/panel/auth", panelLoginLimiter, (req, res) => {
   const password = String(req.body?.password || "");
   const expected = panelPassword();
-  const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null;
+  const ip = req.ip || req.socket?.remoteAddress || null;
 
   if (!expected) {
     logWarn("panel_login_no_password_configured", {});

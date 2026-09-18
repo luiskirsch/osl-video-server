@@ -11,6 +11,7 @@
 // hacks adicionais.
 
 const { logInfo, logWarn, logError } = require("../logger");
+const { httpFetch } = require("../utils");
 const { RESEND_API_KEY, EMAIL_FROM, THERAPY_FRONTEND_BASE } = require("../config");
 
 const RESEND_API_URL = "https://api.resend.com/emails";
@@ -72,7 +73,7 @@ async function sendEmail({ to, subject, html, text, replyTo }) {
   if (replyTo) payload.reply_to = replyTo;
 
   try {
-    const res = await fetch(RESEND_API_URL, {
+    const res = await httpFetch(RESEND_API_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${RESEND_API_KEY}`,

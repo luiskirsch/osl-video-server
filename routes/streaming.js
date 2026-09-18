@@ -1,4 +1,6 @@
 const express = require("express");
+const dns = require("dns").promises;
+const net = require("net");
 const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const admin = require("firebase-admin");
 const { logError, logInfo } = require("../logger");
@@ -7,10 +9,52 @@ const { activeStreams, pagamentosAprovados } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
 const { startRoomStreaming, stopRoomStreaming, egressClient } = require("../video/webrtc");
 const { getDb, requireFirebaseAuth, requireEmailMatchesToken } = require("../services/firestore");
+const { verifyHostToken } = require("../services/auth");
 const entitlements = require("../services/entitlements");
 const { FREE_TIER_DAILY_LIMIT_MIN, MAX_PLATFORMS_PER_STREAM } = require("../config");
 
 const router = express.Router();
+const streamingStopsInFlight = new Set();
+
+function hasValidHostToken(req, roomId) {
+  const token = String(req.headers["x-host-token"] || req.body?.hostToken || "").trim();
+  return verifyHostToken(token, roomId);
+}
+
+function isPrivateOrReservedIp(address) {
+  let value = String(address || "").toLowerCase();
+  if (value.startsWith("::ffff:")) value = value.slice(7);
+  if (net.isIPv4(value)) {
+    const [a, b] = value.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 198 && (b === 18 || b === 19));
+  }
+  if (net.isIPv6(value)) {
+    return value === "::" || value === "::1" || value.startsWith("fc") ||
+      value.startsWith("fd") || /^fe[89ab]/.test(value);
+  }
+  return true;
+}
+
+async function validateCustomStreamingDestinations(platforms) {
+  for (const platform of platforms) {
+    const name = String(platform?.name || "").trim().toLowerCase();
+    if (name !== "custom" && name !== "tiktok") continue;
+    let target;
+    try { target = new URL(String(platform.streamKey || "")); }
+    catch { return false; }
+    if (!target.hostname || target.hostname === "localhost" || target.hostname.endsWith(".localhost")) return false;
+    let addresses;
+    try { addresses = await dns.lookup(target.hostname, { all: true, verbatim: true }); }
+    catch { return false; }
+    if (!addresses.length || addresses.some(({ address }) => isPrivateOrReservedIp(address))) return false;
+  }
+  return true;
+}
 
 // Security #11: rate limit pra evitar abuso de Egress LiveKit ($) e enumeração
 // Usa IP + email (quando presente) como chave pra evitar bypass simples por IP rotation.
@@ -92,7 +136,7 @@ async function checkAuthAndReserve(email, uid = null) {
     });
   } catch (err) {
     logError("streaming_auth_reserve_error", err);
-    return { allowed: true, type: "auth-error-fallback", reservedMin: 0 };
+    return { allowed: false, reason: "AUTORIZACAO_INDISPONIVEL" };
   }
 }
 
@@ -113,6 +157,7 @@ router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(
   const layoutId  = String(req.body?.layoutId || "cards").trim();
 
   if (!roomId)                            return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!hasValidHostToken(req, roomId))     return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!email)                             return sendError(res, 401, "TOKEN_SEM_EMAIL");
   if (!Array.isArray(platforms) || !platforms.length) return sendError(res, 400, "PLATAFORMAS_OBRIGATORIAS");
   if (platforms.length > MAX_PLATFORMS_PER_STREAM) {
@@ -123,6 +168,9 @@ router.post("/streaming/start", startLimiter, requireFirebaseAuth, asyncHandler(
   for (const p of platforms) {
     if (!p?.name)      return sendError(res, 400, "PLATAFORMA_SEM_NOME");
     if (!p?.streamKey) return sendError(res, 400, "STREAM_KEY_OBRIGATORIA");
+  }
+  if (!await validateCustomStreamingDestinations(platforms)) {
+    return sendError(res, 400, "DESTINO_STREAM_NAO_PERMITIDO");
   }
 
   // Security #5: gate atomico + reserva de quota
@@ -202,6 +250,8 @@ router.get("/streaming/usage/:email", readLimiter, requireFirebaseAuth, requireE
 router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!hasValidHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
+  if (streamingStopsInFlight.has(roomId)) return sendError(res, 409, "STREAM_STOP_EM_ANDAMENTO");
   const activeJob = activeStreams.get(roomId);
   if (!activeJob) return sendError(res, 404, "STREAM_NAO_ENCONTRADO");
 
@@ -214,8 +264,14 @@ router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res
     return sendError(res, 403, "NAO_E_SEU_STREAM");
   }
 
+  streamingStopsInFlight.add(roomId);
   try {
     const job = await stopRoomStreaming(roomId);
+    if (job && job.egressStopOk === false) {
+      return sendError(res, 502, "EGRESS_STOP_FALHOU", {
+        hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
+      });
+    }
     const durationMs = job ? (job.stoppedAt - job.startedAt) : 0;
 
     const email = activeJob.email;
@@ -273,19 +329,12 @@ router.post("/streaming/stop", requireFirebaseAuth, asyncHandler(async (req, res
       }
     }
 
-    // #B4: se o stopEgress falhou, devolve 502 mesmo após registrar
-    // duração/quota — cliente precisa saber pra tentar de novo ou
-    // mostrar mensagem de erro. O Map já foi limpo (ver webrtc.js),
-    // mas o egress real pode estar pendurado na LiveKit.
-    if (job && job.egressStopOk === false) {
-      return sendError(res, 502, "EGRESS_STOP_FALHOU", {
-        hint: "O streaming foi marcado como encerrado, mas o egress da LiveKit pode estar consumindo minutos. Tente parar de novo em alguns segundos."
-      });
-    }
     return res.json({ ok: true, durationMs, minutes });
   } catch (err) {
     logError("streaming_stop_error", err, { roomId });
     return sendError(res, 500, "ERRO_PARAR_STREAMING");
+  } finally {
+    streamingStopsInFlight.delete(roomId);
   }
 }));
 
@@ -338,6 +387,7 @@ router.get("/streaming/history/:email", readLimiter, requireFirebaseAuth, requir
 router.get("/streaming/status/:roomId", (req, res) => {
   try {
     const roomId = normalizeRoomId(req.params.roomId);
+    if (!hasValidHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     const active = activeStreams.get(roomId);
 
     if (active) {

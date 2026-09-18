@@ -41,8 +41,8 @@ no `.gitignore` via padrão geral (mas confirme).
 cd osl-video-server
 node scripts/migrate-firestore-split.js --dry-run
 # Confira a saída: cada collection lista quantos docs serão copiados.
-# Se OK, rode sem --dry-run:
-node scripts/migrate-firestore-split.js
+# Se OK, confirme explicitamente o project_id de destino e rode sem --dry-run:
+CONFIRM_FIREBASE_TARGET_PROJECT=<project-id-destino> node scripts/migrate-firestore-split.js
 ```
 
 O script copia ~20 collections terapia, pulando audit/email-log (começam

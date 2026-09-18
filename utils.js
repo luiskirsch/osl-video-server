@@ -35,9 +35,15 @@ function normalizePathEmail(req) {
 
 function sanitizeNextPath(value) {
   const raw = String(value || "").trim();
-  if (!raw.startsWith("/")) return "/painel.html";
-  if (raw.startsWith("//")) return "/painel.html";
-  return raw;
+  if (!raw.startsWith("/") || raw.startsWith("//") || raw.length > 1024) return "/painel.html";
+  if (/[\\\r\n\0]/.test(raw)) return "/painel.html";
+  try {
+    const parsed = new URL(raw, "https://local.invalid");
+    if (parsed.origin !== "https://local.invalid") return "/painel.html";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/painel.html";
+  }
 }
 
 function sleep(ms) {
@@ -78,10 +84,22 @@ function safeRequestPath(req) {
   }).join("/");
 }
 
-async function httpFetch(...args) {
-  if (typeof fetch === "function") return fetch(...args);
+async function httpFetch(input, options = {}) {
+  const configuredTimeout = Number(
+    options.timeoutMs ?? process.env.OUTBOUND_HTTP_TIMEOUT_MS ?? 15_000
+  );
+  const timeoutMs = Number.isFinite(configuredTimeout)
+    ? Math.min(120_000, Math.max(1_000, configuredTimeout))
+    : 15_000;
+  const { timeoutMs: _ignored, signal: callerSignal, ...fetchOptions } = options;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  fetchOptions.signal = callerSignal
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : timeoutSignal;
+
+  if (typeof fetch === "function") return fetch(input, fetchOptions);
   const mod = await import("node-fetch");
-  return mod.default(...args);
+  return mod.default(input, fetchOptions);
 }
 
 function nowIso() {

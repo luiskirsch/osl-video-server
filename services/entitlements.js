@@ -20,6 +20,7 @@ const { levelFromXP, OSL_PACK_IDS } = require('../data/cards');
 const logger = require('../logger');
 
 const CACHE_TTL_MS   = 120_000;  // 2 minutos
+const CACHE_MAX_ENTRIES = 10_000;
 const PRESTIGE_LEVEL = 50;
 
 const _cache = new Map();  // uid → { data, expiresAt }
@@ -41,14 +42,29 @@ async function getUserEntitlements(uid) {
 
   const cached = _cache.get(uid);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (cached) _cache.delete(uid);
 
   try {
     const data = await _fetch(uid);
+    pruneCache();
     _cache.set(uid, { data, expiresAt: Date.now() + CACHE_TTL_MS });
     return data;
   } catch (err) {
     logger.warn({ err, uid }, 'entitlements_fetch_error');
-    return cached?.data ?? _empty(uid);  // stale fallback em falha de rede
+    // Permissões pagas/revogáveis falham fechadas. Dados expirados em cache
+    // não podem autorizar gravação/streaming indefinidamente durante outage.
+    return _empty(uid);
+  }
+}
+
+function pruneCache(now = Date.now()) {
+  for (const [key, entry] of _cache) {
+    if (!entry || entry.expiresAt <= now) _cache.delete(key);
+  }
+  while (_cache.size >= CACHE_MAX_ENTRIES) {
+    const oldestKey = _cache.keys().next().value;
+    if (oldestKey == null) break;
+    _cache.delete(oldestKey);
   }
 }
 

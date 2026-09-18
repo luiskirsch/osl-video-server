@@ -5,9 +5,9 @@
 #   .\scripts\local-start.ps1
 #
 # Pré-requisitos:
-#   - Node 18+ instalado
+#   - Node 22 LTS ou 24 LTS instalado
 #   - .env preenchido (pelo menos FIREBASE_SERVICE_ACCOUNT_JSON pra login funcionar)
-#   - npm install já rodou (verifica e roda se faltar node_modules)
+#   - npm ci já rodou (verifica e roda se faltar node_modules)
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +23,12 @@ Write-Host ""
 # Checa Node
 $nodeVersion = node --version 2>$null
 if (-not $nodeVersion) {
-  Write-Host "ERRO: Node.js não encontrado. Instala em nodejs.org (18+)." -ForegroundColor Red
+  Write-Host "ERRO: Node.js não encontrado. Instale Node 22 LTS ou 24 LTS." -ForegroundColor Red
+  exit 1
+}
+$nodeMajor = [int](($nodeVersion -replace '^v(\d+).*$', '$1'))
+if ($nodeMajor -notin @(22, 24)) {
+  Write-Host "ERRO: versão $nodeVersion não suportada. Use Node 22 LTS ou 24 LTS." -ForegroundColor Red
   exit 1
 }
 Write-Host "Node:        $nodeVersion" -ForegroundColor Cyan
@@ -48,8 +53,8 @@ if ($missingCritical.Count -gt 0) {
 
 # Instala deps se preciso
 if (-not (Test-Path "node_modules")) {
-  Write-Host "node_modules não existe. Rodando npm install..." -ForegroundColor Yellow
-  npm install
+  Write-Host "node_modules não existe. Rodando npm ci..." -ForegroundColor Yellow
+  npm ci --ignore-scripts
 }
 
 # Pega IP local pra mostrar como acessar de outros devices na mesma rede

@@ -110,7 +110,11 @@ app.disable("x-powered-by");
 // Com "true", Express usa o IP mais à esquerda do XFF (controlado pelo cliente),
 // o que permite bypassar rate limiting via X-Forwarded-For spoofing.
 // Com 1, Express usa o penúltimo valor que Railway inseriu = IP real do cliente.
-app.set("trust proxy", 1);
+const trustedProxyHopsRaw = Number(process.env.TRUST_PROXY_HOPS || (IS_PRODUCTION ? 1 : 0));
+const trustedProxyHops = Number.isSafeInteger(trustedProxyHopsRaw) && trustedProxyHopsRaw >= 0 && trustedProxyHopsRaw <= 5
+  ? trustedProxyHopsRaw
+  : (IS_PRODUCTION ? 1 : 0);
+app.set("trust proxy", trustedProxyHops);
 
 // Identidade e telemetria entram antes dos middlewares que podem encerrar a
 // requisição, cobrindo também bloqueios de CORS, WAF e rate limit.
@@ -126,7 +130,7 @@ app.use((req, res, next) => {
       path: safeRequestPath(req),
       statusCode: res.statusCode,
       durationMs: Date.now() - start,
-      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+      ip: req.ip || req.socket.remoteAddress || null
     });
   });
 
@@ -177,7 +181,7 @@ app.use((req, res, next) => {
 });
 
 // CORS restrito (security fix #8)
-const ALLOWED_ORIGINS = [
+const DEFAULT_ALLOWED_ORIGINS = [
   "https://preludiojogos.com",
   "https://www.preludiojogos.com",
   "https://preludiojogos.com.br",
@@ -190,14 +194,26 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "https://osl-video-server-production.up.railway.app"
 ];
+const configuredAllowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(origin => origin.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+const ALLOWED_ORIGINS = [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredAllowedOrigins])];
 app.use(cors({
   origin: (origin, cb) => {
     // Sem Origin (server-to-server, ferramentas de teste, MP webhook) → permite
     if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS_BLOQUEADO"));
+    if (ALLOWED_ORIGINS.includes(String(origin).replace(/\/$/, ""))) return cb(null, true);
+    return cb(null, false);
   },
-  credentials: false
+  credentials: false,
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Authorization", "Content-Type", "X-Admin-Secret", "X-Host-Token",
+    "X-Locale", "X-Therapy-2FA", "X-Client-Key", "X-Security-Token",
+    "X-Signature", "X-Request-Id", "Stripe-Signature"
+  ],
+  maxAge: 600
 }));
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
 app.use(waf);
@@ -213,7 +229,7 @@ app.use(stripeWebhookRouter);
 // para validação automática do tier estudante. Outros endpoints continuam
 // validando tamanho específico no handler.
 app.use(express.json({ limit: "6mb" }));
-app.use(express.urlencoded({ extended: true, limit: "6mb" }));
+app.use(express.urlencoded({ extended: false, limit: "1mb", parameterLimit: 1000 }));
 
 // Demais rotas Stripe (create-checkout, portal) — precisam do body JSON parseado.
 app.use(stripeRouter);
@@ -293,6 +309,21 @@ app.use((err, req, res, next) => {
 
   if (res.headersSent) return next(err);
 
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      ok: false,
+      error: "CORPO_MUITO_GRANDE",
+      requestId: req.requestId
+    });
+  }
+  if (err instanceof SyntaxError && err?.type === "entity.parse.failed") {
+    return res.status(400).json({
+      ok: false,
+      error: "JSON_INVALIDO",
+      requestId: req.requestId
+    });
+  }
+
   return res.status(500).json({
     ok: false,
     error: "ERRO_INTERNO",
@@ -371,6 +402,8 @@ async function gracefullyStopAllEgress() {
 }
 
 async function shutdown(signal) {
+  if (shutdown.inProgress) return;
+  shutdown.inProgress = true;
   logWarn("shutdown_started", { signal });
   stopCleanupLoop();
   stopSchedulerLoop();

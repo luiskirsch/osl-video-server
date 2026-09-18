@@ -24,9 +24,11 @@ const NFEIO_BASE_URLS = {
   // Production vs Sandbox vira flag no body, mesma URL.
 };
 
+const { httpFetch } = require("../utils");
+
 async function nfeIoFetch({ apiToken, path, method = "GET", body = null }) {
   const url = `${NFEIO_BASE_URLS.production}${path}`;
-  const res = await fetch(url, {
+  const res = await httpFetch(url, {
     method,
     headers: {
       "Authorization": apiToken,

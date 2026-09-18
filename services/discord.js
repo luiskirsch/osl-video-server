@@ -80,7 +80,10 @@ async function exchangeDiscordCode(code) {
   if (result.response.status === 429) {
     const retryFromJson   = Number(result.data?.retry_after || 0);
     const retryFromHeader = Number(result.response.headers.get("retry-after") || 0);
-    const waitSeconds     = Math.max(retryFromJson, retryFromHeader, 30);
+    // Nunca deixe uma resposta externa prender um worker por tempo arbitrário.
+    // OAuth code é one-shot, então mantemos um retry curto e limitado.
+    const requestedWait   = Math.max(retryFromJson, retryFromHeader, 0.25);
+    const waitSeconds     = Math.min(requestedWait, 5);
     logWarn("discord_rate_limit_wait", { waitSeconds });
     await sleep(waitSeconds * 1000);
     result = await discordTokenFetch(payload);

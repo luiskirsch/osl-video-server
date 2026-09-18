@@ -19,6 +19,7 @@ const studentPortalEmail = String(process.argv[2] || "luishenriquekirsch@hotmail
 const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@preludiojogos.com.br").trim().toLowerCase();
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "null");
 if (!sa) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não configurado.");
+require("./confirm-firebase-project").assertFirebaseProjectConfirmed(sa, "seed-programa-publico-demo");
 if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
 const app = initializeApp({ credential: cert({ projectId: sa.project_id, clientEmail: sa.client_email, privateKey: sa.private_key }) });
 const db = getFirestore(app);

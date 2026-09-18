@@ -1,31 +1,42 @@
-name: DAST – OWASP ZAP
+name: DAST - OWASP ZAP
 
 on:
   schedule:
-    - cron: '0 9 * * 1'  # Segunda-feira 9h (após SAST)
-  workflow_dispatch:      # Trigger manual para rodar sob demanda
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast
+  cancel-in-progress: false
 
 jobs:
   zap-scan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.14.0
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
         with:
           target: ${{ secrets.ZAP_TARGET_URL || 'https://osl-video-server-production.up.railway.app' }}
-          rules_file_name: '.zap/rules.tsv'
-          cmd_options: ''
+          rules_file_name: .zap/rules.tsv
+          cmd_options: ""
           allow_issue_writing: false
 
-      - name: Upload relatório ZAP
-        uses: actions/upload-artifact@v4
+      - name: Upload dos relatórios ZAP
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zap-report
-          path: report_html.html
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+          if-no-files-found: error
           retention-days: 30

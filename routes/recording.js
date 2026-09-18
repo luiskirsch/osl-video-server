@@ -75,6 +75,9 @@ router.get("/token", asyncHandler(async (req, res) => {
   const panelRoom = panelRooms.get(normalizedRoom);
   if (!panelRoom) return sendError(res, 403, "SALA_NAO_REGISTRADA");
   if (!panelRoom.players[user]) return sendError(res, 403, "JOGADOR_NAO_APROVADO");
+  if (!panelRoom.players[user].userId || panelRoom.players[user].userId !== decoded.uid) {
+    return sendError(res, 403, "JOGADOR_NAO_CORRESPONDE_A_CONTA");
+  }
 
   const token = await generateLiveKitToken(room, user);
   return res.json({ ok: true, token });
@@ -157,22 +160,26 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   const email  = callerEmail;
 
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!callerEmail) return sendError(res, 401, "TOKEN_SEM_EMAIL");
+  if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
 
   const pag = pagamentosAprovados.get(ref);
   if (!pag || !pag.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
   if (pag.email && callerEmail && pag.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
+  if (pag.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
+  if (pag.roomId && pag.roomId !== roomId) return sendError(res, 403, "PAGAMENTO_DE_OUTRA_SALA");
 
   if (activeRecordings.has(roomId)) {
     const job = activeRecordings.get(roomId);
     job.email = pag.email || email;
-    job.type  = type;
+    job.type  = "gravacao-download";
     job.ref   = ref;
     try {
       const completed = await stopRoomRecording(roomId);
       if (completed && completed.egressStopOk === false) {
         return sendError(res, 502, "EGRESS_STOP_FALHOU", {
-          hint: "A gravação foi marcada como concluída, mas o egress da LiveKit pode estar pendurado. Tente parar de novo em alguns segundos."
+          hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
         });
       }
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
@@ -183,7 +190,9 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   }
 
   const completed = completedRecordings.get(roomId);
-  if (completed) return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+  if (completed && completed.ref === ref && completed.email === callerEmail) {
+    return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+  }
 
   return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");
 }));
@@ -201,6 +210,8 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
   const email  = callerEmail;
 
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  if (!callerEmail) return sendError(res, 401, "TOKEN_SEM_EMAIL");
+  if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
   let authorizedEmail = email;
@@ -225,6 +236,8 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
     const payment = pagamentosAprovados.get(ref);
     if (!payment || !payment.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
     if (payment.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
+    if (payment.email && payment.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
+    if (payment.roomId && payment.roomId !== roomId) return sendError(res, 403, "PAGAMENTO_DE_OUTRA_SALA");
     authorizedEmail = payment.email || email;
     authorizedType  = "gravacao-download";
   }
@@ -249,7 +262,7 @@ router.post("/recording/stop", requireAdmin, asyncHandler(async (req, res) => {
     const completed = await stopRoomRecording(roomId);
     if (completed && completed.egressStopOk === false) {
       return sendError(res, 502, "EGRESS_STOP_FALHOU", {
-        hint: "A gravação foi marcada como concluída, mas o egress da LiveKit pode estar pendurado. Tente parar de novo em alguns segundos."
+        hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
       });
     }
     return res.json({ ok: true, downloadUrl: completed.downloadUrl || null, filepath: completed.filepath, type: completed.type });

@@ -16,6 +16,8 @@ const {
 const egressClient = (LIVEKIT_API_KEY && LIVEKIT_API_SECRET)
   ? new EgressClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
   : null;
+const recordingStartsInFlight = new Set();
+const streamingStartsInFlight = new Set();
 
 // --- Configuração S3 ---
 
@@ -75,7 +77,10 @@ async function startRoomRecording(roomId, type, ref, email) {
   if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
   if (!S3_ACCESS_KEY || !S3_BUCKET) throw new Error("S3_NOT_CONFIGURED");
 
-  if (activeRecordings.has(roomId)) throw new Error("GRAVACAO_JA_ATIVA");
+  if (activeRecordings.has(roomId) || recordingStartsInFlight.has(roomId)) {
+    throw new Error("GRAVACAO_JA_ATIVA");
+  }
+  recordingStartsInFlight.add(roomId);
 
   const ts       = Date.now();
   const filepath = `recordings/${roomId}/${ts}-${type}.mp4`;
@@ -84,21 +89,26 @@ async function startRoomRecording(roomId, type, ref, email) {
   // SDK v2: primeiro arg é a URL. Antes passávamos roomId aqui — a SDK aceitava
   // silenciosamente, mas o egress browser tentava carregar "SL-XXXX" como URL
   // e renderizava em branco (causava o "layout bugado" do recording).
-  const egress = await egressClient.startWebEgress(
-    layoutUrl,
-    {
-      audioOnly: false,
-      videoOnly: false,
-      awaitStartSignal: false,
-      videoWidth: 1080,
-      videoHeight: 1920,
-      fileOutputs: [{
-        fileType: 1,
-        filepath,
-        s3: recordingS3Config()
-      }]
-    }
-  );
+  let egress;
+  try {
+    egress = await egressClient.startWebEgress(
+      layoutUrl,
+      {
+        audioOnly: false,
+        videoOnly: false,
+        awaitStartSignal: false,
+        videoWidth: 1080,
+        videoHeight: 1920,
+        fileOutputs: [{
+          fileType: 1,
+          filepath,
+          s3: recordingS3Config()
+        }]
+      }
+    );
+  } finally {
+    recordingStartsInFlight.delete(roomId);
+  }
 
   const job = { egressId: egress.egressId, type, ref, email, startedAt: ts, filepath };
   activeRecordings.set(roomId, job);
@@ -118,18 +128,19 @@ async function stopRoomRecording(roomId) {
   // 502 ao cliente. Se LiveKit Cloud está fora ou egressId é inválido, o
   // egress real continua rodando — gastando minutos pagos. Cliente vendo
   // 200 OK fica acreditando que parou. Agora o caller decide o que fazer.
-  let stopOk = true;
   try {
     await egressClient.stopEgress(job.egressId);
   } catch (err) {
-    stopOk = false;
     logError("stop_egress_error", err, { roomId, egressId: job.egressId });
+    // Mantém o job ativo para que o cliente/cleanup possa tentar de novo. A
+    // versão anterior apagava o único egressId e tornava o retry impossível.
+    return { ...job, stoppedAt: Date.now(), egressStopOk: false };
   }
 
   activeRecordings.delete(roomId);
 
   const downloadUrl = recordingDownloadUrl(job.filepath);
-  const completed   = { ...job, downloadUrl, completedAt: Date.now(), egressStopOk: stopOk };
+  const completed   = { ...job, downloadUrl, completedAt: Date.now(), egressStopOk: true };
   completedRecordings.set(roomId, completed);
 
   // Buffer máximo de gravações concluídas em memória (D5: race-safe — encontra
@@ -209,7 +220,9 @@ const LIVEKIT_BUILTIN_LAYOUTS = {
 
 async function startRoomStreaming(roomId, platforms, layoutId = "cards") {
   if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
-  if (activeStreams.has(roomId))  throw new Error("STREAM_JA_ATIVO");
+  if (activeStreams.has(roomId) || streamingStartsInFlight.has(roomId)) {
+    throw new Error("STREAM_JA_ATIVO");
+  }
   if (!Array.isArray(platforms) || platforms.length === 0) {
     throw new Error("PLATAFORMAS_OBRIGATORIAS");
   }
@@ -219,20 +232,25 @@ async function startRoomStreaming(roomId, platforms, layoutId = "cards") {
 
   const layout = String(layoutId || "cards").trim();
   let egress;
+  streamingStartsInFlight.add(roomId);
 
-  if (layout === "cards") {
-    // Web Egress com layout HTML custom (recording-layout.html)
-    const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
-    egress = await egressClient.startWebEgress(layoutUrl, streamOutput);
-  } else if (LIVEKIT_BUILTIN_LAYOUTS[layout]) {
-    // Room Composite Egress com layout built-in LiveKit (single-speaker, grid)
-    egress = await egressClient.startRoomCompositeEgress(
-      roomId,
-      streamOutput,
-      { layout: LIVEKIT_BUILTIN_LAYOUTS[layout] }
-    );
-  } else {
-    throw new Error(`LAYOUT_NAO_SUPORTADO:${layout}`);
+  try {
+    if (layout === "cards") {
+      // Web Egress com layout HTML custom (recording-layout.html)
+      const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
+      egress = await egressClient.startWebEgress(layoutUrl, streamOutput);
+    } else if (LIVEKIT_BUILTIN_LAYOUTS[layout]) {
+      // Room Composite Egress com layout built-in LiveKit (single-speaker, grid)
+      egress = await egressClient.startRoomCompositeEgress(
+        roomId,
+        streamOutput,
+        { layout: LIVEKIT_BUILTIN_LAYOUTS[layout] }
+      );
+    } else {
+      throw new Error(`LAYOUT_NAO_SUPORTADO:${layout}`);
+    }
+  } finally {
+    streamingStartsInFlight.delete(roomId);
   }
 
   const job = {
@@ -258,12 +276,11 @@ async function stopRoomStreaming(roomId) {
   // #B4: ver comentário em stopRoomRecording. Mesma motivação aqui — egress
   // de live streaming também consome minutos pagos, e cliente precisa saber
   // se o stop falhou pra mostrar erro ou tentar de novo.
-  let stopOk = true;
   try {
     await egressClient.stopEgress(job.egressId);
   } catch (err) {
-    stopOk = false;
     logError("stop_streaming_egress_error", err, { roomId, egressId: job.egressId });
+    return { ...job, stoppedAt: Date.now(), egressStopOk: false };
   }
 
   activeStreams.delete(roomId);
@@ -271,8 +288,8 @@ async function stopRoomStreaming(roomId) {
   const room = panelRooms.get(roomId);
   if (room) { room.streamingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
 
-  logInfo("streaming_stopped", { roomId, egressId: job.egressId, durationMs: Date.now() - job.startedAt, egressStopOk: stopOk });
-  return { ...job, stoppedAt: Date.now(), egressStopOk: stopOk };
+  logInfo("streaming_stopped", { roomId, egressId: job.egressId, durationMs: Date.now() - job.startedAt, egressStopOk: true });
+  return { ...job, stoppedAt: Date.now(), egressStopOk: true };
 }
 
 module.exports = {

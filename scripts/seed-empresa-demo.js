@@ -13,6 +13,7 @@ const { getFirestore, Timestamp, FieldValue } = require("firebase-admin/firestor
 const { cert } = require("firebase-admin/app");
 
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+require("./confirm-firebase-project").assertFirebaseProjectConfirmed(sa, "seed-empresa-demo");
 if (sa.private_key) sa.private_key = sa.private_key.replace(/\\n/g, "\n");
 initializeApp({ credential: cert({ projectId: sa.project_id, clientEmail: sa.client_email, privateKey: sa.private_key }) });
 const db = getFirestore();

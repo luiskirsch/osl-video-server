@@ -165,6 +165,8 @@ const JOIN_TOKEN_VALIDITY_MS = 2 * 60 * 60 * 1000; // 2h
 const SESSION_TOKEN_VALIDITY_MS = 4 * 60 * 60 * 1000; // 4h
 const PATIENT_NAME_MAX = 80;
 const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
+const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000;
+const TWOFA_HEADER = "x-therapy-2fa";
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
@@ -243,6 +245,68 @@ async function loadTherapist(uid) {
   const snap = await db.collection("therapists").doc(uid).get();
   return snap.exists ? snap.data() : null;
 }
+
+// O segundo fator precisa ser uma decisao do servidor. O frontend pode perder
+// sessionStorage ou ser adulterado e, portanto, nunca e uma fronteira de
+// seguranca. Para todo request Firebase de um profissional com 2FA ativo,
+// exigimos uma sessao curta assinada e vinculada ao uid + geracao atual do 2FA.
+// As quatro rotas do proprio fluxo ficam isentas: setup/enable/verify exigem
+// Firebase (e enable/verify validam TOTP); disable valida TOTP novamente.
+const TWOFA_EXEMPT_PATHS = new Set([
+  "/therapy/2fa/setup",
+  "/therapy/2fa/enable",
+  "/therapy/2fa/verify",
+  "/therapy/2fa/disable"
+]);
+
+function twoFactorVersion(therapist) {
+  return String(therapist?.twoFactorVersion || "legacy");
+}
+
+router.use(asyncHandler(async (req, res, next) => {
+  if (!req.path.startsWith("/therapy/") || TWOFA_EXEMPT_PATHS.has(req.path)) {
+    return next();
+  }
+
+  const firebaseToken = getBearerToken(req);
+  if (!firebaseToken) return next(); // a rota de destino produz o 401 canonico
+
+  let decoded;
+  try {
+    decoded = await admin.auth().verifyIdToken(firebaseToken);
+  } catch {
+    return next(); // evita duplicar a autenticacao da rota de destino
+  }
+  // As rotas protegidas abaixo reutilizam esta verificação, evitando uma
+  // segunda chamada ao Firebase Admin em toda requisição de profissional.
+  req.verifiedFirebaseToken = decoded;
+  req.firebaseUid = decoded.uid;
+
+  const db = getDb();
+  if (!db) return next();
+  const therapist = await loadTherapist(decoded.uid);
+  if (!therapist?.twoFactorEnabled) return next();
+
+  res.setHeader("Cache-Control", "private, no-store, max-age=0");
+  const sessionToken = String(req.headers[TWOFA_HEADER] || "").trim();
+  if (!sessionToken) {
+    return sendError(res, 401, "TWOFA_REQUIRED");
+  }
+
+  const verification = verifySignedToken(sessionToken, ACCESS_TOKEN_SECRET);
+  const payload = verification.payload || {};
+  if (
+    !verification.valid ||
+    payload.token_type !== "twofa_session" ||
+    payload.uid !== decoded.uid ||
+    String(payload.version || "legacy") !== twoFactorVersion(therapist)
+  ) {
+    return sendError(res, 401, "TWOFA_SESSION_INVALID");
+  }
+
+  req.therapyTwoFactor = { uid: decoded.uid, verified: true };
+  return next();
+}));
 
 // Determina se o profissional pode usar funções clínicas (criar consulta,
 // receita, documento, paciente). Regra de produto:
@@ -792,8 +856,8 @@ router.post("/therapy/profissional/recuperar", asyncHandler(async (req, res) => 
 //
 // Coleções:
 //   therapists/{uid}.studentDoc   — metadados (curso, dataEmissao, decision, ...)
-//   therapy_student_docs/{uid}    — fileBase64 + extracted (separado pra não
-//                                    estourar limite de 1MB do Firestore)
+//   therapy_student_docs/{uid}    — metadados + storagePath. O binario fica
+//                                    privado no Cloud Storage.
 //   therapy_student_doc_hashes/{sha256} — dedup, aponta pra primeiro uid que usou
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -803,6 +867,138 @@ const STUDENT_DOC_ALLOWED_MIMES = new Set([
 ]);
 const STUDENT_DOC_RATE_LIMIT_24H = 5;
 const STUDENT_VERIFIED_DAYS = 365;
+
+const DOCUMENT_EXTENSION_BY_MIME = Object.freeze({
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "application/pdf": "pdf"
+});
+
+function decodeDocumentBase64(value) {
+  const encoded = String(value || "").trim();
+  if (!encoded) return { error: "ARQUIVO_OBRIGATORIO" };
+  if (encoded.length > STUDENT_DOC_MAX_BASE64) return { error: "ARQUIVO_MUITO_GRANDE", status: 413 };
+  // Buffer.from(base64) e permissivo: ignora caracteres invalidos. Validamos
+  // a gramatica antes para que hash, tamanho e conteudo sejam inequivocos.
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+    return { error: "BASE64_INVALIDO" };
+  }
+  const buffer = Buffer.from(encoded, "base64");
+  if (!buffer.length) return { error: "ARQUIVO_VAZIO" };
+  return { buffer };
+}
+
+function documentMagicMatches(buffer, mediaType) {
+  if (mediaType === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  }
+  if (mediaType === "image/jpeg") return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  if (mediaType === "image/webp") return buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP";
+  if (mediaType === "application/pdf") return buffer.length >= 5 && buffer.toString("ascii", 0, 5) === "%PDF-";
+  return false;
+}
+
+async function savePrivateVerificationDocument({ category, uid, uploadId, buffer, mediaType }) {
+  const extension = DOCUMENT_EXTENSION_BY_MIME[mediaType];
+  if (!extension || !documentMagicMatches(buffer, mediaType)) {
+    const error = new Error("CONTEUDO_NAO_CORRESPONDE_AO_FORMATO");
+    error.code = "CONTEUDO_NAO_CORRESPONDE_AO_FORMATO";
+    throw error;
+  }
+  const storagePath = `therapy-verification-docs/${category}/${uid}/${uploadId}.${extension}`;
+  await getStorageBucket().file(storagePath).save(buffer, {
+    resumable: false,
+    contentType: mediaType,
+    metadata: {
+      cacheControl: "private, no-store, max-age=0",
+      contentDisposition: `attachment; filename="${uploadId}.${extension}"`
+    }
+  });
+  return storagePath;
+}
+
+async function readVerificationDocumentBase64(upload) {
+  // Compatibilidade de leitura com registros antigos, anteriores a migracao.
+  if (upload?.storagePath) {
+    const [buffer] = await getStorageBucket().file(upload.storagePath).download();
+    return buffer.toString("base64");
+  }
+  return String(upload?.fileBase64 || "");
+}
+
+const DOCUMENT_HASH_RESERVATION_MS = 30 * 60 * 1000;
+
+function documentHashError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+async function reserveDocumentHash({ db, hashRef, uid, uploadId }) {
+  return db.runTransaction(async tx => {
+    const snap = await tx.get(hashRef);
+    if (snap.exists) {
+      const current = snap.data() || {};
+      const reservedUntil = Number(current.reservationExpiresAt || 0);
+      const reservationActive = current.state === "reserved" && reservedUntil > Date.now();
+      if (reservationActive) {
+        throw documentHashError(current.uid === uid
+          ? "DOCUMENTO_EM_PROCESSAMENTO"
+          : "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+      }
+      // Um hash concluido continua permanentemente vinculado a primeira conta.
+      // A mesma conta pode reenviar o documento sem abrir uma janela de race.
+      if (current.state !== "reserved" && current.uid === uid) return false;
+      if (current.state !== "reserved" && current.uid !== uid) {
+        throw documentHashError("DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+      }
+    }
+
+    tx.set(hashRef, {
+      uid,
+      uploadId,
+      state: "reserved",
+      reservationExpiresAt: Date.now() + DOCUMENT_HASH_RESERVATION_MS,
+      reservedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    return true;
+  });
+}
+
+async function finalizeDocumentHash({ db, hashRef, uid, uploadId, decision }) {
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(hashRef);
+    if (!snap.exists) throw documentHashError("DOCUMENT_HASH_RESERVATION_LOST");
+    const current = snap.data() || {};
+    if (current.uid !== uid) throw documentHashError("DOCUMENT_HASH_RESERVATION_LOST");
+    if (current.state === "reserved" && current.uploadId !== uploadId) {
+      throw documentHashError("DOCUMENT_HASH_RESERVATION_LOST");
+    }
+    tx.set(hashRef, {
+      uid,
+      uploadId,
+      state: "completed",
+      decision: decision || null,
+      reservationExpiresAt: admin.firestore.FieldValue.delete(),
+      reservedAt: admin.firestore.FieldValue.delete(),
+      createdAt: current.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+}
+
+async function releaseDocumentHashReservation({ db, hashRef, uid, uploadId, created }) {
+  if (!created) return;
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(hashRef);
+    if (!snap.exists) return;
+    const current = snap.data() || {};
+    if (current.state === "reserved" && current.uid === uid && current.uploadId === uploadId) {
+      tx.delete(hashRef);
+    }
+  }).catch(() => {});
+}
 
 router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -829,29 +1025,32 @@ router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (r
   const fileBase64 = String(req.body?.fileBase64 || "").trim();
   const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
 
-  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
-  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
   if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
 
-  // Hash do conteúdo binário pra dedup. Decodifica base64 → sha256 → hex.
-  let buffer;
-  try {
-    buffer = Buffer.from(fileBase64, "base64");
-  } catch {
-    return sendError(res, 400, "BASE64_INVALIDO");
-  }
-  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const decodedDocument = decodeDocumentBase64(fileBase64);
+  if (decodedDocument.error) return sendError(res, decodedDocument.status || 400, decodedDocument.error);
+  const buffer = decodedDocument.buffer;
+  if (!documentMagicMatches(buffer, mediaType)) return sendError(res, 400, "CONTEUDO_NAO_CORRESPONDE_AO_FORMATO");
   const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
   const db = getDb();
 
   // Dedup: mesmo arquivo não pode ser usado em 2 contas distintas
   const hashRef = db.collection("therapy_student_doc_hashes").doc(fileHash);
-  const hashSnap = await hashRef.get();
-  if (hashSnap.exists && hashSnap.data().uid !== uid) {
-    await logAudit({ type: "student_doc_dedup_block", therapistUid: uid, fileHash });
-    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  const uploadId = newId("doc");
+  let hashReservationCreated;
+  try {
+    hashReservationCreated = await reserveDocumentHash({ db, hashRef, uid, uploadId });
+  } catch (error) {
+    if (["DOCUMENTO_EM_PROCESSAMENTO", "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA"].includes(error.code)) {
+      await logAudit({ type: "student_doc_dedup_block", therapistUid: uid, fileHash });
+      return sendError(res, 409, error.code);
+    }
+    throw error;
   }
+  res.once("finish", () => {
+    releaseDocumentHashReservation({ db, hashRef, uid, uploadId, created: hashReservationCreated });
+  });
 
   // Rate limit: olha submissoes dos últimos 24h
   const since = Date.now() - 24 * 60 * 60 * 1000;
@@ -877,32 +1076,32 @@ router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (r
     requestId: req.requestId
   });
 
-  // Persiste o arquivo + extracted em coleção separada (1 doc por upload, histórico)
-  const uploadId = newId("doc");
+  // O binario vai para Storage; o Firestore recebe apenas metadados pequenos.
   const uploadRef = db.collection("therapy_student_docs").doc(uid).collection("uploads").doc(uploadId);
-  await uploadRef.set({
-    uploadId,
-    therapistUid: uid,
-    fileBase64,
-    mediaType,
-    fileSize: buffer.length,
-    fileHash,
-    extracted: result.extracted,
-    confidence: result.confidence,
-    decision: result.decision,
-    reasons: result.reasons,
-    provider: result.provider,
-    raw: result.raw || null,
-    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  const storagePath = await savePrivateVerificationDocument({ category: "student", uid, uploadId, buffer, mediaType });
+  try {
+    await uploadRef.set({
+      uploadId,
+      therapistUid: uid,
+      storagePath,
+      mediaType,
+      fileSize: buffer.length,
+      fileHash,
+      extracted: result.extracted,
+      confidence: result.confidence,
+      decision: result.decision,
+      reasons: result.reasons,
+      provider: result.provider,
+      raw: result.raw || null,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    throw error;
+  }
 
   // Marca o hash como usado (lock contra reuso multi-conta)
-  await hashRef.set({
-    uid,
-    uploadId,
-    decision: result.decision,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  await finalizeDocumentHash({ db, hashRef, uid, uploadId, decision: result.decision });
 
   // Atualiza therapist com metadados (sem o fileBase64 — fica no doc separado)
   const update = {
@@ -1027,24 +1226,32 @@ router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(asyn
   const fileBase64 = String(req.body?.fileBase64 || "").trim();
   const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
 
-  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
-  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
   if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
 
-  let buffer;
-  try { buffer = Buffer.from(fileBase64, "base64"); } catch { return sendError(res, 400, "BASE64_INVALIDO"); }
-  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const decodedDocument = decodeDocumentBase64(fileBase64);
+  if (decodedDocument.error) return sendError(res, decodedDocument.status || 400, decodedDocument.error);
+  const buffer = decodedDocument.buffer;
+  if (!documentMagicMatches(buffer, mediaType)) return sendError(res, 400, "CONTEUDO_NAO_CORRESPONDE_AO_FORMATO");
   const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
   const db = getDb();
 
   // Dedup
   const hashRef = db.collection("therapy_recem_formado_doc_hashes").doc(fileHash);
-  const hashSnap = await hashRef.get();
-  if (hashSnap.exists && hashSnap.data().uid !== uid) {
-    await logAudit({ type: "recem_formado_doc_dedup_block", therapistUid: uid, fileHash });
-    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  const uploadId = newId("rfdoc");
+  let hashReservationCreated;
+  try {
+    hashReservationCreated = await reserveDocumentHash({ db, hashRef, uid, uploadId });
+  } catch (error) {
+    if (["DOCUMENTO_EM_PROCESSAMENTO", "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA"].includes(error.code)) {
+      await logAudit({ type: "recem_formado_doc_dedup_block", therapistUid: uid, fileHash });
+      return sendError(res, 409, error.code);
+    }
+    throw error;
   }
+  res.once("finish", () => {
+    releaseDocumentHashReservation({ db, hashRef, uid, uploadId, created: hashReservationCreated });
+  });
 
   // Rate limit
   const since = Date.now() - 24 * 60 * 60 * 1000;
@@ -1069,24 +1276,26 @@ router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(asyn
     requestId: req.requestId
   });
 
-  const uploadId = newId("rfdoc");
   const uploadRef = db.collection("therapy_recem_formado_docs").doc(uid).collection("uploads").doc(uploadId);
-  await uploadRef.set({
-    uploadId, therapistUid: uid,
-    fileBase64, mediaType, fileSize: buffer.length, fileHash,
-    extracted: result.extracted,
-    confidence: result.confidence,
-    decision: result.decision,
-    reasons: result.reasons,
-    provider: result.provider,
-    raw: result.raw || null,
-    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  const storagePath = await savePrivateVerificationDocument({ category: "recent-graduate", uid, uploadId, buffer, mediaType });
+  try {
+    await uploadRef.set({
+      uploadId, therapistUid: uid,
+      storagePath, mediaType, fileSize: buffer.length, fileHash,
+      extracted: result.extracted,
+      confidence: result.confidence,
+      decision: result.decision,
+      reasons: result.reasons,
+      provider: result.provider,
+      raw: result.raw || null,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    throw error;
+  }
 
-  await hashRef.set({
-    uid, uploadId, decision: result.decision,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  await finalizeDocumentHash({ db, hashRef, uid, uploadId, decision: result.decision });
 
   const update = {
     recemFormadoDoc: {
@@ -1193,24 +1402,32 @@ router.post("/therapy/profissional/comprovante-formacao", asyncHandler(async (re
   const fileBase64 = String(req.body?.fileBase64 || "").trim();
   const mediaType  = String(req.body?.mediaType  || "").trim().toLowerCase();
 
-  if (!fileBase64) return sendError(res, 400, "ARQUIVO_OBRIGATORIO");
-  if (fileBase64.length > STUDENT_DOC_MAX_BASE64) return sendError(res, 413, "ARQUIVO_MUITO_GRANDE");
   if (!STUDENT_DOC_ALLOWED_MIMES.has(mediaType)) return sendError(res, 400, "FORMATO_NAO_SUPORTADO");
 
-  let buffer;
-  try { buffer = Buffer.from(fileBase64, "base64"); } catch { return sendError(res, 400, "BASE64_INVALIDO"); }
-  if (buffer.length === 0) return sendError(res, 400, "ARQUIVO_VAZIO");
+  const decodedDocument = decodeDocumentBase64(fileBase64);
+  if (decodedDocument.error) return sendError(res, decodedDocument.status || 400, decodedDocument.error);
+  const buffer = decodedDocument.buffer;
+  if (!documentMagicMatches(buffer, mediaType)) return sendError(res, 400, "CONTEUDO_NAO_CORRESPONDE_AO_FORMATO");
   const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
 
   const db = getDb();
 
   // Dedup por hash — mesmo diploma em conta diferente é bloqueado
   const hashRef = db.collection("therapy_formacao_doc_hashes").doc(fileHash);
-  const hashSnap = await hashRef.get();
-  if (hashSnap.exists && hashSnap.data().uid !== uid) {
-    await logAudit({ type: "formacao_doc_dedup_block", therapistUid: uid, fileHash });
-    return sendError(res, 409, "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA");
+  const uploadId = newId("formacao");
+  let hashReservationCreated;
+  try {
+    hashReservationCreated = await reserveDocumentHash({ db, hashRef, uid, uploadId });
+  } catch (error) {
+    if (["DOCUMENTO_EM_PROCESSAMENTO", "DOCUMENTO_JA_UTILIZADO_EM_OUTRA_CONTA"].includes(error.code)) {
+      await logAudit({ type: "formacao_doc_dedup_block", therapistUid: uid, fileHash });
+      return sendError(res, 409, error.code);
+    }
+    throw error;
   }
+  res.once("finish", () => {
+    releaseDocumentHashReservation({ db, hashRef, uid, uploadId, created: hashReservationCreated });
+  });
 
   // Rate limit: max 5 uploads em 24h
   const since = Date.now() - 24 * 60 * 60 * 1000;
@@ -1222,19 +1439,21 @@ router.post("/therapy/profissional/comprovante-formacao", asyncHandler(async (re
     return sendError(res, 429, "MUITAS_TENTATIVAS_EM_24H");
   }
 
-  const uploadId = newId("formacao");
   const uploadRef = db.collection("therapy_formacao_docs").doc(uid).collection("uploads").doc(uploadId);
-  await uploadRef.set({
-    uploadId, therapistUid: uid,
-    fileBase64, mediaType, fileSize: buffer.length, fileHash,
-    decision: "pending-review",
-    uploadedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  const storagePath = await savePrivateVerificationDocument({ category: "education", uid, uploadId, buffer, mediaType });
+  try {
+    await uploadRef.set({
+      uploadId, therapistUid: uid,
+      storagePath, mediaType, fileSize: buffer.length, fileHash,
+      decision: "pending-review",
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    throw error;
+  }
 
-  await hashRef.set({
-    uid, uploadId,
-    createdAt: admin.firestore.FieldValue.serverTimestamp()
-  });
+  await finalizeDocumentHash({ db, hashRef, uid, uploadId, decision: "pending-review" });
 
   await db.collection("therapists").doc(uid).set({
     formacaoDoc: {
@@ -3482,12 +3701,17 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 // Storage: therapists/{uid}.twoFactorSecret, twoFactorEnabled,
 //          twoFactorPendingSecret (durante setup).
 // Secrets NUNCA saem do servidor (filtrados em /me).
-// Enforcement: frontend (auth-guard) — se enabled, redirect pra 2fa-verify
-// quando não houver token válido em sessionStorage.
+// Enforcement: middleware deste router valida X-Therapy-2FA no servidor.
 // ─────────────────────────────────────────────────────────────────────────
-const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000; // 8h (mesmo do access)
+const twoFactorLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "MUITAS_TENTATIVAS_2FA" }
+});
 
-router.post("/therapy/2fa/setup", asyncHandler(async (req, res) => {
+router.post("/therapy/2fa/setup", twoFactorLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
@@ -3508,8 +3732,9 @@ router.post("/therapy/2fa/setup", asyncHandler(async (req, res) => {
   return res.json({ ok: true, secret, otpauthUrl: url });
 }));
 
-router.post("/therapy/2fa/enable", asyncHandler(async (req, res) => {
+router.post("/therapy/2fa/enable", twoFactorLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  if (!ACCESS_TOKEN_SECRET) return sendError(res, 503, "TWOFA_SESSION_SECRET_NAO_CONFIGURADO");
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
@@ -3525,9 +3750,11 @@ router.post("/therapy/2fa/enable", asyncHandler(async (req, res) => {
     return sendError(res, 401, "CODIGO_INCORRETO");
   }
 
+  const version = crypto.randomBytes(16).toString("hex");
   await getDb().collection("therapists").doc(uid).set({
     twoFactorEnabled: true,
     twoFactorSecret: therapist.twoFactorPendingSecret,
+    twoFactorVersion: version,
     twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
     twoFactorEnabledAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -3539,6 +3766,7 @@ router.post("/therapy/2fa/enable", asyncHandler(async (req, res) => {
   const sessionToken = signPayload({
     token_type: "twofa_session",
     uid,
+    version,
     iat: Date.now(),
     exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
   }, ACCESS_TOKEN_SECRET);
@@ -3546,8 +3774,9 @@ router.post("/therapy/2fa/enable", asyncHandler(async (req, res) => {
   return res.json({ ok: true, sessionToken });
 }));
 
-router.post("/therapy/2fa/verify", asyncHandler(async (req, res) => {
+router.post("/therapy/2fa/verify", twoFactorLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  if (!ACCESS_TOKEN_SECRET) return sendError(res, 503, "TWOFA_SESSION_SECRET_NAO_CONFIGURADO");
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
@@ -3569,6 +3798,7 @@ router.post("/therapy/2fa/verify", asyncHandler(async (req, res) => {
   const sessionToken = signPayload({
     token_type: "twofa_session",
     uid,
+    version: twoFactorVersion(therapist),
     iat: Date.now(),
     exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
   }, ACCESS_TOKEN_SECRET);
@@ -3576,7 +3806,7 @@ router.post("/therapy/2fa/verify", asyncHandler(async (req, res) => {
   return res.json({ ok: true, sessionToken });
 }));
 
-router.post("/therapy/2fa/disable", asyncHandler(async (req, res) => {
+router.post("/therapy/2fa/disable", twoFactorLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
@@ -3596,6 +3826,7 @@ router.post("/therapy/2fa/disable", asyncHandler(async (req, res) => {
     twoFactorEnabled: false,
     twoFactorSecret: admin.firestore.FieldValue.delete(),
     twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
+    twoFactorVersion: admin.firestore.FieldValue.delete(),
     twoFactorDisabledAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -4581,11 +4812,62 @@ router.get("/therapy/pacientes/:patientId/sinais", asyncHandler(async (req, res)
   return res.json({ ok: true, entries });
 }));
 
-// POST /therapy/pacientes/:patientId/gemeo-clinico — pergunta livre sobre o
-// histórico do paciente, respondida por IA (Claude Haiku) com base nos
-// resumos de sessão (summary + signals) já gerados. "Gêmeo Clínico" — Fase 5
-// da timeline viva do paciente.
-router.post("/therapy/pacientes/:patientId/gemeo-clinico", asyncHandler(async (req, res) => {
+const clinicalTwinLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "GEMEO_CLINICO_RATE_LIMIT" }
+});
+
+function clippedText(value, max) {
+  return String(value || "").trim().slice(0, max);
+}
+
+function sanitizeClinicalTwinEntry(entry) {
+  const summaryInput = entry?.summary && typeof entry.summary === "object" ? entry.summary : {};
+  const signalsInput = entry?.signals && typeof entry.signals === "object" ? entry.signals : {};
+  const summary = {
+    summary: clippedText(summaryInput.summary, 4000),
+    topics: Array.isArray(summaryInput.topics) ? summaryInput.topics.slice(0, 20).map(topic => ({
+      title: clippedText(topic?.title, 200),
+      summary: clippedText(topic?.summary, 1000)
+    })) : [],
+    commitments: Array.isArray(summaryInput.commitments) ? summaryInput.commitments.slice(0, 20).map(item => ({
+      who: clippedText(item?.who, 100),
+      what: clippedText(item?.what, 500)
+    })) : [],
+    followups: Array.isArray(summaryInput.followups)
+      ? summaryInput.followups.slice(0, 20).map(item => clippedText(item, 500)).filter(Boolean)
+      : []
+  };
+  const boundedScale = value => Number.isFinite(Number(value))
+    ? Math.min(10, Math.max(0, Number(value)))
+    : null;
+  const signals = {
+    mood: boundedScale(signalsInput.mood),
+    anxiety: boundedScale(signalsInput.anxiety),
+    sleepQuality: boundedScale(signalsInput.sleepQuality),
+    selfEsteem: boundedScale(signalsInput.selfEsteem),
+    riskLevel: ["none", "low", "moderate", "high", "critical"].includes(signalsInput.riskLevel)
+      ? signalsInput.riskLevel
+      : "none",
+    riskFactors: Array.isArray(signalsInput.riskFactors)
+      ? signalsInput.riskFactors.slice(0, 20).map(item => clippedText(item, 300)).filter(Boolean)
+      : [],
+    notableEvents: Array.isArray(signalsInput.notableEvents)
+      ? signalsInput.notableEvents.slice(0, 20).map(item => ({ title: clippedText(item?.title, 300) }))
+      : [],
+    keyThemes: Array.isArray(signalsInput.keyThemes)
+      ? signalsInput.keyThemes.slice(0, 30).map(item => clippedText(item, 200)).filter(Boolean)
+      : []
+  };
+  return { summary, signals };
+}
+
+// O plaintext E2EE nunca e persistido no servidor. O cliente descriptografa
+// localmente apenas os resumos escolhidos e os envia transitoriamente aqui.
+router.post("/therapy/pacientes/:patientId/gemeo-clinico", clinicalTwinLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
@@ -4596,6 +4878,15 @@ router.post("/therapy/pacientes/:patientId/gemeo-clinico", asyncHandler(async (r
   const question = String(req.body?.question || "").trim();
   if (!question) return sendError(res, 400, "PERGUNTA_OBRIGATORIA");
   if (question.length > 500) return sendError(res, 400, "PERGUNTA_MUITO_LONGA");
+
+  const submittedEntries = req.body?.entries;
+  if (!Array.isArray(submittedEntries) || submittedEntries.length === 0) {
+    return sendError(res, 400, "HISTORICO_DESCRIPTOGRAFADO_OBRIGATORIO");
+  }
+  if (submittedEntries.length > 30) return sendError(res, 400, "MUITAS_SESSOES", { max: 30 });
+  if (Buffer.byteLength(JSON.stringify(submittedEntries), "utf8") > 256 * 1024) {
+    return sendError(res, 413, "HISTORICO_MUITO_GRANDE");
+  }
 
   const db = getDb();
   const patientSnap = await db.collection("therapy_patients").doc(patientId).get();
@@ -4610,26 +4901,29 @@ router.post("/therapy/pacientes/:patientId/gemeo-clinico", asyncHandler(async (r
 
   if (sessSnap.empty) return sendError(res, 404, "SEM_HISTORICO");
   const patientName = sessSnap.docs[0].data().patientName || null;
-  const sessionIds = sessSnap.docs.map(d => d.data().sessionId).filter(Boolean);
+  const allowedSessionIds = new Set(sessSnap.docs.flatMap(doc => [
+    String(doc.id || ""),
+    String(doc.data().sessionId || "")
+  ]).filter(Boolean));
+  const requestedSessionIds = submittedEntries.map(entry => clippedText(entry?.sessionId, 128));
+  if (requestedSessionIds.some(id => !id || !allowedSessionIds.has(id)) || new Set(requestedSessionIds).size !== requestedSessionIds.length) {
+    return sendError(res, 403, "SESSAO_FORA_DO_HISTORICO");
+  }
 
   const summarySnaps = await Promise.all(
-    sessionIds.map(id => db.collection("therapy_session_summaries").doc(id).get())
+    requestedSessionIds.map(id => db.collection("therapy_session_summaries").doc(id).get())
   );
+  if (summarySnaps.some(snap => !snap.exists || snap.data().status !== "completed")) {
+    return sendError(res, 409, "RESUMO_NAO_DISPONIVEL");
+  }
 
-  const entries = summarySnaps
-    .filter(s => s.exists && s.data().status === "completed")
-    .map(s => {
-      const data = s.data();
-      return {
-        completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
-        summary: data.summary || null,
-        signals: data.signals || null
-      };
-    })
-    .filter(e => e.completedAt)
-    .sort((a, b) => a.completedAt - b.completedAt);
-
-  if (entries.length === 0) return sendError(res, 404, "SEM_HISTORICO");
+  const entries = submittedEntries.map((entry, index) => ({
+    completedAt: summarySnaps[index].data().completedAt?.toMillis?.()
+      || Number(summarySnaps[index].data().completedAt)
+      || null,
+    ...sanitizeClinicalTwinEntry(entry)
+  })).filter(entry => entry.completedAt).sort((a, b) => a.completedAt - b.completedAt);
+  if (!entries.length) return sendError(res, 409, "RESUMO_NAO_DISPONIVEL");
 
   const result = await clinicalTwinSvc.askClinicalTwin({ question, entries, patientName });
   if (!result.ok) return sendError(res, 502, result.error || "GEMEO_FALHOU");
@@ -6760,6 +7054,11 @@ function verifyTherapyMpSignature(req, dataId) {
   const ts = parts.ts, v1 = parts.v1;
   if (!ts || !v1) return { ok: false, reason: "SIG_FORMATO_INVALIDO" };
 
+  const tsMs = Number(ts) * (String(ts).length > 12 ? 1 : 1000);
+  if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > 5 * 60 * 1000) {
+    return { ok: false, reason: "SIG_EXPIRADA" };
+  }
+
   const template = `id:${dataId};request-id:${reqId};ts:${ts};`;
   const expected = crypto.createHmac("sha256", MP_WEBHOOK_SECRET_THERAPY).update(template).digest("hex");
   let match = false;
@@ -6940,17 +7239,61 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
 // navegador e embrulhada pela DEK do profissional.
 // ─────────────────────────────────────────────────────────────────────────
 
+const AI_SUMMARY_AUDIO_MAX_BYTES = 16 * 1024 * 1024;
+const AI_SUMMARY_PROCESSING_LEASE_MS = 60 * 60 * 1000;
+const AI_SUMMARY_MAX_CONCURRENT = 2;
+let aiSummaryAdmissions = 0;
+
+const aiSummaryLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.aiSummaryUid || ipKeyGenerator(req) || "anon",
+  message: { ok: false, error: "AI_SUMMARY_RATE_LIMIT" }
+});
+
+async function authenticateAiSummary(req, res, next) {
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  req.aiSummaryUid = uid;
+  next();
+}
+
+function admitAiSummary(req, res, next) {
+  if (aiSummaryAdmissions >= AI_SUMMARY_MAX_CONCURRENT) {
+    return sendError(res, 503, "AI_SUMMARY_OCUPADO", { retryAfterSec: 60 });
+  }
+  aiSummaryAdmissions += 1;
+  let released = false;
+  req.releaseAiSummaryAdmission = () => {
+    if (released) return;
+    released = true;
+    aiSummaryAdmissions = Math.max(0, aiSummaryAdmissions - 1);
+  };
+  // Falhas de parsing/validacao liberam no fim da resposta. Quando o job e
+  // iniciado, o handler marca handedOff e o finally do job libera a vaga.
+  const releaseIfNotHandedOff = () => {
+    if (!req.aiSummaryHandedOff) req.releaseAiSummaryAdmission();
+  };
+  res.once("finish", releaseIfNotHandedOff);
+  res.once("close", releaseIfNotHandedOff);
+  next();
+}
+
 const express_raw_audio = express.raw({
   type: ["audio/*", "application/octet-stream"],
-  limit: "32mb"
+  limit: AI_SUMMARY_AUDIO_MAX_BYTES
 });
 
 router.post("/therapy/session/:sessionId/ai-summarize",
+  authenticateAiSummary,
+  aiSummaryLimiter,
+  admitAiSummary,
   express_raw_audio,
   asyncHandler(async (req, res) => {
     if (!ensureDb(res)) return;
-    const uid = await verifyFirebaseToken(req, res);
-    if (!uid) return;
+    const uid = req.aiSummaryUid;
 
     const sessionId = String(req.params.sessionId || "").trim();
     if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
@@ -6994,27 +7337,58 @@ router.post("/therapy/session/:sessionId/ai-summarize",
       return sendError(res, 428, "CRIPTOGRAFIA_CLIENTE_OBRIGATORIA", { detail: error.message });
     }
 
-    // Marca como processing no Firestore
+    // Claim atomico e distribuido: impede reprocessamento simultaneo mesmo
+    // com multiplas instancias do servidor. Lease expira para permitir retry
+    // se um processo morrer no meio do Whisper.
     const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
-    await summaryRef.set({
-      sessionId,
-      therapistUid: uid,
-      status: "processing",
-      audioBytes: audioBuffer.length,
-      encryptionVersion: 1,
-      encryptionAlgorithm: "AES-256-GCM",
-      wrappedKey: clientEncryption.wrappedKey,
-      wrappedKeyIv: clientEncryption.wrappedKeyIv,
-      transcript: admin.firestore.FieldValue.delete(),
-      transcriptChunks: admin.firestore.FieldValue.delete(),
-      summary: admin.firestore.FieldValue.delete(),
-      signals: admin.firestore.FieldValue.delete(),
-      payloadCiphertext: admin.firestore.FieldValue.delete(),
-      payloadIv: admin.firestore.FieldValue.delete(),
-      startedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
+    const attemptId = crypto.randomBytes(16).toString("hex");
+    try {
+      await db.runTransaction(async tx => {
+        const currentSnap = await tx.get(summaryRef);
+        const current = currentSnap.exists ? currentSnap.data() : null;
+        if (current?.status === "completed") {
+          const error = new Error("AI_SUMMARY_JA_CONCLUIDO");
+          error.code = "AI_SUMMARY_JA_CONCLUIDO";
+          throw error;
+        }
+        if (
+          current?.status === "processing" &&
+          Number(current.processingLeaseUntil || 0) > Date.now()
+        ) {
+          const error = new Error("AI_SUMMARY_EM_PROCESSAMENTO");
+          error.code = "AI_SUMMARY_EM_PROCESSAMENTO";
+          throw error;
+        }
+        tx.set(summaryRef, {
+          sessionId,
+          therapistUid: uid,
+          status: "processing",
+          attemptId,
+          processingLeaseUntil: Date.now() + AI_SUMMARY_PROCESSING_LEASE_MS,
+          audioBytes: audioBuffer.length,
+          encryptionVersion: 1,
+          encryptionAlgorithm: "AES-256-GCM",
+          wrappedKey: clientEncryption.wrappedKey,
+          wrappedKeyIv: clientEncryption.wrappedKeyIv,
+          transcript: admin.firestore.FieldValue.delete(),
+          transcriptChunks: admin.firestore.FieldValue.delete(),
+          summary: admin.firestore.FieldValue.delete(),
+          signals: admin.firestore.FieldValue.delete(),
+          payloadCiphertext: admin.firestore.FieldValue.delete(),
+          payloadIv: admin.firestore.FieldValue.delete(),
+          startedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      });
+    } catch (error) {
+      clientEncryption?.key?.fill(0);
+      if (["AI_SUMMARY_JA_CONCLUIDO", "AI_SUMMARY_EM_PROCESSAMENTO"].includes(error.code)) {
+        return sendError(res, 409, error.code);
+      }
+      throw error;
+    }
 
     // Retorna 202 imediatamente — processamento continua em background
+    req.aiSummaryHandedOff = true;
     res.status(202).json({
       ok: true,
       status: "processing",
@@ -7026,6 +7400,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     processAiSummary({
       audioBuffer,
       sessionId,
+      attemptId,
       therapist,
       session: sess,
       clientEncryption,
@@ -7033,6 +7408,8 @@ router.post("/therapy/session/:sessionId/ai-summarize",
       admin
     }).catch(err => {
       logError("ai_summary_unhandled", err, { sessionId });
+    }).finally(() => {
+      req.releaseAiSummaryAdmission();
     });
   })
 );
@@ -7512,13 +7889,14 @@ router.get("/therapy/admin/comprovantes-estudante/:uid", asyncHandler(async (req
     .collection("uploads").doc(therapist.studentDoc.lastUploadId).get();
   if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
   const upload = uploadSnap.data();
+  const fileBase64 = await readVerificationDocumentBase64(upload);
 
   return res.json({
     ok: true,
     item: {
       therapistUid: targetUid,
       uploadId: upload.uploadId,
-      fileBase64: upload.fileBase64,
+      fileBase64,
       mediaType: upload.mediaType,
       fileSize: upload.fileSize,
       fileHash: upload.fileHash,
@@ -7716,13 +8094,14 @@ router.get("/therapy/admin/comprovantes-recem-formado/:uid", asyncHandler(async 
     .collection("uploads").doc(therapist.recemFormadoDoc.lastUploadId).get();
   if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
   const upload = uploadSnap.data();
+  const fileBase64 = await readVerificationDocumentBase64(upload);
 
   return res.json({
     ok: true,
     item: {
       therapistUid: targetUid,
       uploadId: upload.uploadId,
-      fileBase64: upload.fileBase64,
+      fileBase64,
       mediaType: upload.mediaType,
       fileSize: upload.fileSize,
       fileHash: upload.fileHash,
@@ -8131,13 +8510,14 @@ router.get("/therapy/admin/comprovantes-formacao/:uid", asyncHandler(async (req,
     .collection("uploads").doc(therapist.formacaoDoc.lastUploadId).get();
   if (!uploadSnap.exists) return sendError(res, 404, "ARQUIVO_NAO_ENCONTRADO");
   const upload = uploadSnap.data();
+  const fileBase64 = await readVerificationDocumentBase64(upload);
 
   return res.json({
     ok: true,
     item: {
       therapistUid: targetUid,
       uploadId: upload.uploadId,
-      fileBase64: upload.fileBase64,
+      fileBase64,
       mediaType: upload.mediaType,
       fileSize: upload.fileSize,
       fileHash: upload.fileHash,
@@ -12306,8 +12686,9 @@ router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
     // ZAPI_WEBHOOK_SECRET no Railway + adicionar `?token=X` na URL do
     // webhook no painel Z-API.
     logWarn("zapi_webhook_no_secret_configured");
+    if (IS_PRODUCTION) return res.status(503).json({ ok: false, error: "WEBHOOK_NAO_CONFIGURADO" });
   } else {
-    const tokenIn = String(req.query?.token || "").trim();
+    const tokenIn = String(req.headers["x-security-token"] || req.query?.token || "").trim();
     let tokenOk = false;
     if (tokenIn.length === ZAPI_WEBHOOK_SECRET.length) {
       try {

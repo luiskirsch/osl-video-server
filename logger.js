@@ -21,6 +21,58 @@ let writeCounter = 0;
 // encheu de vez. Logamos uma vez ao falhar; logamos uma vez ao recuperar.
 let writeFailedSticky = false;
 
+const MAX_LOG_DEPTH = 5;
+const MAX_LOG_ARRAY_ITEMS = 50;
+const MAX_LOG_STRING_CHARS = 4_000;
+const SECRET_KEY_RE = /authorization|cookie|password|passphrase|secret|(?:^|[_-])token(?:$|[_-])|api[_-]?key|private[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token|wrappeddek|certpfx/i;
+const PII_KEY_RE = /email|e-?mail|cpf|cnpj|phone|telefone|celular|patientname|nomepaciente|transcript|documentbase64|filebase64/i;
+
+function redactString(value) {
+  return String(value)
+    .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, "[REDACTED_PEM]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]")
+    .slice(0, MAX_LOG_STRING_CHARS);
+}
+
+// Logs podem receber objetos vindos de SDKs e de input do cliente. Esta
+// normalização evita vazamento de credenciais/PII, objetos circulares e BigInt
+// derrubando JSON.stringify no caminho de tratamento de um erro.
+function sanitizeForLog(value, key = "", depth = 0, seen = new WeakSet()) {
+  if (SECRET_KEY_RE.test(key)) return "[REDACTED]";
+  if (PII_KEY_RE.test(key) && value != null && value !== "") return "[REDACTED_PII]";
+  if (value == null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "string") return redactString(value);
+  if (typeof value === "function" || typeof value === "symbol") return `[${typeof value}]`;
+  if (depth >= MAX_LOG_DEPTH) return "[MAX_DEPTH]";
+  if (value instanceof Error) {
+    return {
+      name: redactString(value.name || "Error"),
+      message: redactString(value.message || String(value)),
+      stack: value.stack ? redactString(value.stack) : null,
+    };
+  }
+  if (typeof value !== "object") return redactString(value);
+  if (seen.has(value)) return "[CIRCULAR]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_LOG_ARRAY_ITEMS)
+      .map((entry) => sanitizeForLog(entry, key, depth + 1, seen));
+  }
+  const clean = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    clean[childKey] = sanitizeForLog(childValue, childKey, depth + 1, seen);
+  }
+  return clean;
+}
+
+function safeMeta(meta) {
+  if (!meta || typeof meta !== "object") return {};
+  const clean = sanitizeForLog(meta);
+  return clean && typeof clean === "object" && !Array.isArray(clean) ? clean : {};
+}
+
 function rotateIfNeeded() {
   try {
     const st = fs.statSync(LOG_FILE);
@@ -66,10 +118,10 @@ function writeToFile(line) {
 
 function logInfo(message, meta = {}) {
   const line = JSON.stringify({
+    ...safeMeta(meta),
     level: "info",
     time: new Date().toISOString(),
-    message,
-    ...meta
+    message: redactString(message)
   });
   console.log(line);
   writeToFile(line);
@@ -77,10 +129,10 @@ function logInfo(message, meta = {}) {
 
 function logWarn(message, meta = {}) {
   const line = JSON.stringify({
+    ...safeMeta(meta),
     level: "warn",
     time: new Date().toISOString(),
-    message,
-    ...meta
+    message: redactString(message)
   });
   console.warn(line);
   writeToFile(line);
@@ -88,15 +140,11 @@ function logWarn(message, meta = {}) {
 
 function logError(message, error, meta = {}) {
   const line = JSON.stringify({
+    ...safeMeta(meta),
     level: "error",
     time: new Date().toISOString(),
-    message,
-    error: {
-      name: error?.name || "Error",
-      message: error?.message || String(error),
-      stack: error?.stack || null
-    },
-    ...meta
+    message: redactString(message),
+    error: sanitizeForLog(error instanceof Error ? error : new Error(String(error)))
   });
   console.error(line);
   writeToFile(line);
@@ -155,5 +203,6 @@ function error(first, second, third) {
 module.exports = {
   APP_START_TIME, LOG_FILE, MAX_LOG_SIZE_BYTES,
   writeToFile, logInfo, logWarn, logError,
-  info, warn, error
+  info, warn, error,
+  sanitizeForLog
 };

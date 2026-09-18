@@ -14,6 +14,7 @@
 // futuro webhook do MercadoPago saber que isso não veio de uma assinatura paga.
 
 const admin = require("firebase-admin");
+const { assertFirebaseProjectConfirmed } = require("./confirm-firebase-project");
 
 (async () => {
   const targetUid   = String(process.env.TARGET_UID   || "").trim();
@@ -33,9 +34,11 @@ const admin = require("firebase-admin");
         try { parsed = JSON.parse(Buffer.from(raw, "base64").toString("utf8")); }
         catch (e) { console.error("FIREBASE_SERVICE_ACCOUNT inválido:", e.message); process.exit(1); }
       }
+      assertFirebaseProjectConfirmed(parsed, "force-unblock-therapist");
       admin.initializeApp({ credential: admin.credential.cert(parsed) });
     } else {
-      admin.initializeApp();
+      console.error("FIREBASE_SERVICE_ACCOUNT_JSON/BASE64 é obrigatório para confirmar o projeto alvo.");
+      process.exit(1);
     }
   }
 
