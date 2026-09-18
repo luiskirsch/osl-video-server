@@ -19,6 +19,7 @@ const { logInfo } = require('../logger');
 const {
   COMPLETED_STATUSES,
   buildProfessionalAggregation,
+  normalizeCouncil,
   publicProfessional: publicAggregatedProfessional
 } = require('../services/rt-professional-aggregation');
 
@@ -259,6 +260,7 @@ router.get('/rt/profissionais/:uid/historico', asyncHandler(async (req, res) => 
   const data = await loadOperationalData();
   const group = data.groupByUid.get(uid);
   if (!group) return sendError(res, 404, 'PROFISSIONAL_NAO_ENCONTRADO');
+  const reviewSnap = await getDb().collection('therapy_rt_professional_reviews').doc(group.uid).get();
   const filtered = wantedStatus === 'all'
     ? group.sessions
     : group.sessions.filter(session => {
@@ -271,6 +273,7 @@ router.get('/rt/profissionais/:uid/historico', asyncHandler(async (req, res) => 
   return res.json({
     ok: true,
     professional: publicAggregatedProfessional(group),
+    review: reviewSnap.exists ? serializeDoc(reviewSnap) : null,
     sessions: filtered.slice(start, start + pageSize),
     pagination: {
       page,
@@ -279,6 +282,76 @@ router.get('/rt/profissionais/:uid/historico', asyncHandler(async (req, res) => 
       totalPages: Math.max(1, Math.ceil(filtered.length / pageSize))
     }
   });
+}));
+
+router.patch('/rt/profissionais/:uid/revisao', asyncHandler(async (req, res) => {
+  const actor = await authenticateRt(req, res);
+  if (!actor) return;
+  const uid = cleanText(req.params.uid, 160);
+  const data = await loadOperationalData();
+  const group = data.groupByUid.get(uid);
+  if (!group) return sendError(res, 404, 'PROFISSIONAL_NAO_ENCONTRADO');
+  if (group.memberUids.length > 100) return sendError(res, 409, 'MUITAS_CONTAS_ASSOCIADAS');
+
+  const displayName = cleanText(req.body?.displayName, 100);
+  const councilNumber = cleanText(req.body?.councilNumber, 40);
+  const verificationStatus = cleanText(req.body?.verificationStatus, 20).toLowerCase();
+  const active = req.body?.active;
+  const note = cleanText(req.body?.note, 1000);
+  if (!displayName) return sendError(res, 400, 'NOME_OBRIGATORIO');
+  if (normalizeCouncil(councilNumber).length < 4) return sendError(res, 400, 'CRP_INVALIDO');
+  if (!['verified', 'pending', 'rejected'].includes(verificationStatus)) {
+    return sendError(res, 400, 'SITUACAO_CADASTRAL_INVALIDA');
+  }
+  if (typeof active !== 'boolean') return sendError(res, 400, 'SITUACAO_ATIVA_INVALIDA');
+  if (verificationStatus === 'rejected' && !note) return sendError(res, 400, 'JUSTIFICATIVA_OBRIGATORIA');
+
+  const db = getDb();
+  const batch = db.batch();
+  const update = {
+    displayName,
+    tipoConselho: 'CRP',
+    numeroConselho: councilNumber,
+    crp: councilNumber,
+    verificationStatus,
+    disabled: !active,
+    status: active ? 'active' : 'inactive',
+    rtReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+    rtReviewedByUid: actor.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  for (const memberUid of group.memberUids) {
+    batch.set(db.collection('therapists').doc(memberUid), update, { merge: true });
+  }
+  const reviewRef = db.collection('therapy_rt_professional_reviews').doc(group.uid);
+  batch.set(reviewRef, {
+    professionalUid: group.uid,
+    displayName,
+    councilNumber,
+    verificationStatus,
+    active,
+    note,
+    consolidatedAccountCount: group.memberUids.length,
+    reviewedByUid: actor.uid,
+    reviewedByName: actor.name,
+    reviewedByEmail: actor.email,
+    lastReviewedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await batch.commit();
+  invalidateOperationalCache();
+  await writeRtAudit(actor, 'professional_review_updated', {
+    professionalUid: group.uid,
+    accountCount: group.memberUids.length,
+    verificationStatus,
+    active
+  });
+  logInfo('rt_professional_review_updated', {
+    professionalUid: group.uid,
+    accountCount: group.memberUids.length,
+    verificationStatus,
+    active
+  });
+  return res.json({ ok: true, professionalUid: group.uid, accountCount: group.memberUids.length });
 }));
 
 router.get('/rt/incidentes', asyncHandler(async (req, res) => {
