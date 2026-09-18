@@ -24,6 +24,8 @@ jobs:
       security-events: write
     container:
       image: semgrep/semgrep:1.176.1-nonroot@sha256:4f79d592f85f91aa37597c0cfbad94ea5fa35c65571425fb061e406e6724d76e
+      # O runner precisa gravar seus file commands durante checkout/upload.
+      options: --user 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
