@@ -266,13 +266,14 @@ const THERAPY_RT_EMAILS = [...new Set([
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Tiers ativos:
 //   - "profissional"  (R$ 99,00)  — profissional habilitado com mensalidade
-//   - "empresa"       (R$ 0,00)   — gratuito pro profissional; consultas a R$60 cobradas ao paciente
+//   - "empresa"       (R$ 10,00)  — 7 dias grátis após cadastrar o meio de pagamento
 // THERAPY_PLAN_AMOUNT mantido por compat (default sem flag explícita).
 const THERAPY_PLAN_AMOUNT                 = envNumber("THERAPY_PLAN_AMOUNT", 99.00, { min: 0, max: 1_000_000 });
 const THERAPY_PLAN_RECEM_FORMADO_AMOUNT   = envNumber("THERAPY_PLAN_RECEM_FORMADO_AMOUNT", 99.00, { min: 0, max: 1_000_000 }); // legado
 const THERAPY_PLAN_PROFISSIONAL_AMOUNT    = envNumber("THERAPY_PLAN_PROFISSIONAL_AMOUNT", 99.00, { min: 0, max: 1_000_000 });
-const THERAPY_PLAN_EMPRESA_AMOUNT         = envNumber("THERAPY_PLAN_EMPRESA_AMOUNT", 0.00, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_EMPRESA_AMOUNT         = envNumber("THERAPY_PLAN_EMPRESA_AMOUNT", 10.00, { min: 0.01, max: 1_000_000 });
 const THERAPY_PLAN_EMPRESA_SESSION_AMOUNT = envNumber("THERAPY_PLAN_EMPRESA_SESSION_AMOUNT", 60.00, { min: 0, max: 1_000_000 });
+const THERAPY_PLAN_EMPRESA_TRIAL_DAYS     = envNumber("THERAPY_PLAN_EMPRESA_TRIAL_DAYS", 7, { min: 0, max: 3650, integer: true });
 // Cobrança anual = mensal x 12 x 0.84 (16% de desconto), preapproval com
 // frequency: 12 / frequency_type: "months" (MP não tem frequency_type "years").
 const THERAPY_PLAN_ANNUAL_AMOUNT               = envNumber("THERAPY_PLAN_ANNUAL_AMOUNT", 997.92, { min: 0, max: 1_000_000 });
@@ -367,6 +368,7 @@ module.exports = {
   ADMIN_SECRET, PANEL_TOTP_SECRET,
   THERAPY_ADMIN_EMAILS, THERAPY_RT_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
+  THERAPY_PLAN_EMPRESA_AMOUNT, THERAPY_PLAN_EMPRESA_SESSION_AMOUNT, THERAPY_PLAN_EMPRESA_TRIAL_DAYS,
   THERAPY_PLAN_ANNUAL_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT,
   THERAPY_PLAN_NAME,
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
