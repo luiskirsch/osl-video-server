@@ -573,6 +573,11 @@ function canStartInstitutionalSubscription(therapist) {
   return therapist?.plano === "empresa";
 }
 
+function institutionalPayerEmail(accountEmail, alternateEmail) {
+  const email = normalizeClinicEmail(alternateEmail || accountEmail);
+  return email.length <= 254 && isValidClinicEmail(email) ? email : null;
+}
+
 function mpPreapprovalErrorInfo(response, data) {
   const cause = Array.isArray(data?.cause) ? data.cause.find(item => item && typeof item === "object") : null;
   const message = cause?.description || data?.message;
@@ -6989,13 +6994,17 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
   }
   if (billingCycle === "year") planLabel += " — Anual";
 
-  // Pega e-mail do Firebase Auth (preapproval exige payer_email)
-  let payerEmail = "";
+  // O Mercado Pago exige um pagador. Quando a conta do profissional também é
+  // a recebedora, ele pode autorizar a assinatura com outra conta pagadora.
+  let accountEmail = "";
   try {
     const fbUser = await admin.auth().getUser(uid);
-    payerEmail = fbUser.email || "";
+    accountEmail = fbUser.email || "";
   } catch { /* ignore */ }
-  if (!payerEmail) return sendError(res, 400, "EMAIL_INDISPONIVEL");
+  const payerEmail = tier === "empresa"
+    ? institutionalPayerEmail(accountEmail, req.body?.payerEmail)
+    : accountEmail;
+  if (!payerEmail) return sendError(res, 400, tier === "empresa" ? "EMAIL_PAGADOR_INVALIDO" : "EMAIL_INDISPONIVEL");
 
   const externalRef = `EP_THERAPY_${uid}`;
 
@@ -20087,5 +20096,5 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
-router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, mpPreapprovalErrorInfo, professionalTrialStartDate };
+router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, institutionalPayerEmail, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

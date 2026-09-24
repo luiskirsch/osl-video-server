@@ -10,7 +10,7 @@ const {
   THERAPY_TRIAL_DAYS_PROFISSIONAL
 } = require("../config");
 
-const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, mpPreapprovalErrorInfo, professionalTrialStartDate } = therapyRouter._test;
+const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, institutionalPayerEmail, mpPreapprovalErrorInfo, professionalTrialStartDate } = therapyRouter._test;
 
 test("plano institucional custa R$ 10 e oferece 7 dias", () => {
   assert.equal(THERAPY_PLAN_EMPRESA_AMOUNT, 10);
@@ -40,6 +40,12 @@ test("checkout institucional aceita plano aprovado mesmo sem campos de revisão 
   assert.equal(canStartInstitutionalSubscription({ plano: "empresa", intendedTier: "profissional" }), true);
   assert.equal(canStartInstitutionalSubscription({ plano: "empresa-pending-review", intendedTier: "empresa" }), false);
   assert.equal(canStartInstitutionalSubscription({ plano: "trial", empresaRejectReason: "Vínculo não aprovado" }), false);
+});
+
+test("checkout institucional permite e-mail pagador alternativo sem alterar a conta", () => {
+  assert.equal(institutionalPayerEmail("profissional@example.com", ""), "profissional@example.com");
+  assert.equal(institutionalPayerEmail("profissional@example.com", " OUTRA@EXAMPLE.COM "), "outra@example.com");
+  assert.equal(institutionalPayerEmail("profissional@example.com", "invalido"), null);
 });
 
 test("falha do Mercado Pago preserva diagnóstico sem expor e-mail ou credencial", () => {
