@@ -52,7 +52,7 @@ const STRIPE_LOCALES = {
  * @param {string}  [opts.email]       - Preenche e-mail no checkout
  * @returns {Promise<{url: string, sessionId: string}>}
  */
-async function createCheckoutSession({ tier, billingCycle, locale, therapistUid, successUrl, cancelUrl, email }) {
+async function createCheckoutSession({ tier, billingCycle, locale, therapistUid, successUrl, cancelUrl, email, trialDays = 0 }) {
   const plan = STRIPE_PLANS[tier];
   if (!plan) throw new Error("TIER_INVALIDO");
 
@@ -81,6 +81,9 @@ async function createCheckoutSession({ tier, billingCycle, locale, therapistUid,
       metadata: { therapistUid, tier, billingCycle: cycle },
     },
   };
+  if (Number.isInteger(trialDays) && trialDays > 0) {
+    params.subscription_data.trial_period_days = trialDays;
+  }
   if (email) params.customer_email = email;
 
   const session = await stripe.checkout.sessions.create(params);

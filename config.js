@@ -265,7 +265,7 @@ const THERAPY_RT_EMAILS = [...new Set([
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Tiers ativos:
-//   - "profissional"  (R$ 99,00)  — profissional habilitado com mensalidade
+//   - "profissional"  (R$ 99,00)  — 30 dias grátis após cadastrar o meio de pagamento
 //   - "empresa"       (R$ 10,00)  — 7 dias grátis após cadastrar o meio de pagamento
 // THERAPY_PLAN_AMOUNT mantido por compat (default sem flag explícita).
 const THERAPY_PLAN_AMOUNT                 = envNumber("THERAPY_PLAN_AMOUNT", 99.00, { min: 0, max: 1_000_000 });

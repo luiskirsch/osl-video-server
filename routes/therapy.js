@@ -357,6 +357,15 @@ function evaluatePlanAccess(therapist) {
     }
     return { ok: false, reason: "STUDENT_EXPIRADO", plano, studentVerifiedUntil: studentUntil || null };
   }
+  // O teste do plano Profissional só começa após a autorização do meio de
+  // pagamento. Enquanto o checkout não for concluído, nenhuma consulta pode
+  // ser criada, mesmo que trialUntil ainda esteja no futuro.
+  if (plano === "trial" && therapist.intendedTier === "profissional") {
+    if (String(therapist.mpPreapprovalStatus || "").toLowerCase() === "authorized") {
+      return { ok: true, plano };
+    }
+    return { ok: false, reason: "MEIO_PAGAMENTO_OBRIGATORIO", plano };
+  }
   const until = therapist.trialUntil?.toMillis ? therapist.trialUntil.toMillis() : Number(therapist.trialUntil) || 0;
   if (until && until > Date.now()) {
     return { ok: true, plano, trialUntil: until };
@@ -371,7 +380,9 @@ async function requirePaidPlan(req, res, uid) {
   const access = evaluatePlanAccess(therapist);
   if (!access.ok) {
     const detail = access.reason === "MEIO_PAGAMENTO_OBRIGATORIO"
-      ? "Cadastre um meio de pagamento para liberar as consultas do programa institucional. Os primeiros 7 dias são gratuitos."
+      ? (therapist?.intendedTier === "profissional"
+        ? "Cadastre um meio de pagamento para liberar as consultas. Os primeiros 30 dias do plano Profissional são gratuitos."
+        : "Cadastre um meio de pagamento para liberar as consultas do programa institucional. Os primeiros 7 dias são gratuitos.")
       : "Sua trial expirou ou você não tem assinatura ativa. Acesse o seu perfil para contratar um plano.";
     sendError(res, 402, access.reason, {
       plano: access.plano,
@@ -556,6 +567,11 @@ function institutionalTrialStartDate(therapist, nowMs = Date.now()) {
   return new Date(nowMs + THERAPY_PLAN_EMPRESA_TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function professionalTrialStartDate(therapist, nowMs = Date.now()) {
+  if (therapist?.professionalTrialUsedAt || THERAPY_TRIAL_DAYS_PROFISSIONAL <= 0) return null;
+  return new Date(nowMs + THERAPY_TRIAL_DAYS_PROFISSIONAL * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function issueTherapyPresenceToken(sessionId, role) {
   const now = Date.now();
   return signPayload({
@@ -721,7 +737,8 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   const lockedWrappedDEKIv = existingData?.wrappedDEKIv || wrappedDEKIv;
 
   // Trial é setado uma vez na criação; não estende em re-cadastros.
-  // Duração depende do tier escolhido: profissional 7d, recém-formado 30d,
+  // Duração depende do tier escolhido: profissional 30d após autorizar o
+  // meio de pagamento, recém-formado 30d,
   // estudante 0 (vai virar student-active após validar doc).
   const trialDays =
     intendedTier === "estudante"      ? 0 :
@@ -6980,10 +6997,13 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     status: "pending"
   };
 
-  // O checkout do Mercado Pago coleta o meio de pagamento agora, mas agenda
-  // a primeira cobrança para depois do teste institucional de 7 dias.
+  // O checkout coleta o meio de pagamento agora, mas agenda a primeira
+  // cobrança para depois do teste gratuito aplicável ao plano.
   if (planTier === "empresa") {
     const trialStartDate = institutionalTrialStartDate(therapist);
+    if (trialStartDate) body.auto_recurring.start_date = trialStartDate;
+  } else if (planTier === "profissional") {
+    const trialStartDate = professionalTrialStartDate(therapist);
     if (trialStartDate) body.auto_recurring.start_date = trialStartDate;
   }
 
@@ -7014,6 +7034,9 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     ...(planTier === "empresa" ? {
       empresaTrialDays: THERAPY_PLAN_EMPRESA_TRIAL_DAYS,
       empresaPaymentRequired: true
+    } : planTier === "profissional" ? {
+      professionalTrialDays: THERAPY_TRIAL_DAYS_PROFISSIONAL,
+      professionalPaymentRequired: true
     } : {}),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -7202,6 +7225,12 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   };
   if (plano) update.plano = plano;
   if (plano === "pro") update.proSince = admin.firestore.FieldValue.serverTimestamp();
+  if (plano === "pro" && savedTier === "profissional") {
+    update.professionalPaymentRequired = false;
+    if (!savedTherapist.professionalTrialUsedAt) {
+      update.professionalTrialUsedAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+  }
   if (plano === "empresa") {
     update.empresaSubscriptionSince = admin.firestore.FieldValue.serverTimestamp();
     update.empresaPaymentRequired = false;
@@ -20042,5 +20071,5 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
-router._test = { evaluatePlanAccess, institutionalTrialStartDate };
+router._test = { evaluatePlanAccess, institutionalTrialStartDate, professionalTrialStartDate };
 module.exports = router;

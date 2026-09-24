@@ -12,6 +12,7 @@ const { verifyFirebaseToken } = require("../services/auth");
 const stripeSvc = require("../services/stripe");
 const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("../services/firestore");
+const { THERAPY_TRIAL_DAYS_PROFISSIONAL } = require("../config");
 
 const STRIPE_ALLOWED_ORIGINS = new Set([
   "https://espacopreludio.com.br",
@@ -47,10 +48,15 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
 
   // Pega e-mail do profissional pra preencher no checkout (melhor conversão)
   let email;
+  let therapist = {};
   try {
     const snap = await getDb().collection("therapists").doc(uid).get();
-    email = snap.data()?.email || undefined;
+    therapist = snap.data() || {};
+    email = therapist.email || undefined;
   } catch (_) { /* best-effort */ }
+  const trialDays = tier === "profissional" && !therapist.professionalTrialUsedAt
+    ? THERAPY_TRIAL_DAYS_PROFISSIONAL
+    : 0;
 
   const rawOrigin = (req.headers.origin || "").replace(/\/$/, "");
   const origin = STRIPE_ALLOWED_ORIGINS.has(rawOrigin)
@@ -62,9 +68,18 @@ router.post("/stripe/create-checkout", asyncHandler(async (req, res) => {
     locale,
     therapistUid: uid,
     email,
+    trialDays,
     successUrl: `${origin}/planos.html?stripe=success&session_id={CHECKOUT_SESSION_ID}`,
     cancelUrl:  `${origin}/planos.html?stripe=cancel`,
   });
+
+  if (tier === "profissional") {
+    await getDb().collection("therapists").doc(uid).set({
+      professionalTrialDays: trialDays,
+      professionalPaymentRequired: true,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  }
 
   return res.json({ ok: true, url });
 }));
@@ -104,7 +119,7 @@ webhookRouter.post("/stripe/webhook",
           const plan = stripeSvc.STRIPE_PLANS[tier];
           const proPriceCents = plan ? (cycle === "year" ? plan.amountAnnual : plan.amount) : null;
 
-          await db.collection("therapists").doc(therapistUid).set({
+          const activation = {
             plano:                  "pro",
             proTier,
             proPriceCents,
@@ -115,7 +130,12 @@ webhookRouter.post("/stripe/webhook",
             stripeSubscriptionId:   session.subscription,
             planActivatedAt:        admin.firestore.FieldValue.serverTimestamp(),
             updatedAt:              admin.firestore.FieldValue.serverTimestamp(),
-          }, { merge: true });
+          };
+          if (proTier === "profissional") {
+            activation.professionalPaymentRequired = false;
+            activation.professionalTrialUsedAt = admin.firestore.FieldValue.serverTimestamp();
+          }
+          await db.collection("therapists").doc(therapistUid).set(activation, { merge: true });
 
           logInfo("stripe_plan_activated", { therapistUid, tier, billingCycle: cycle, customerId: session.customer });
           break;
