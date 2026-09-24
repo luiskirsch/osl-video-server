@@ -573,6 +573,19 @@ function canStartInstitutionalSubscription(therapist) {
   return therapist?.plano === "empresa";
 }
 
+function mpPreapprovalErrorInfo(response, data) {
+  const cause = Array.isArray(data?.cause) ? data.cause.find(item => item && typeof item === "object") : null;
+  const message = cause?.description || data?.message;
+  const detail = typeof message === "string"
+    ? message.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[e-mail]")
+      .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [oculto]")
+      .replace(/\b(?:APP_USR|TEST)-[A-Za-z0-9._-]+/gi, "[credencial]").slice(0, 240)
+    : null;
+  const code = cause?.code ?? data?.error;
+  const providerCode = code == null ? null : String(code).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) || null;
+  return { detail, providerStatus: response.status, providerCode };
+}
+
 function professionalTrialStartDate(therapist, nowMs = Date.now()) {
   if (therapist?.professionalTrialUsedAt || THERAPY_TRIAL_DAYS_PROFISSIONAL <= 0) return null;
   return new Date(nowMs + THERAPY_TRIAL_DAYS_PROFISSIONAL * 24 * 60 * 60 * 1000).toISOString();
@@ -7023,7 +7036,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
 
   if (!response.ok || !data?.id || !data?.init_point) {
     logError("therapy_preapproval_create_response_invalid", new Error("MP_RESPONSE_INVALID"), { uid, status: response.status, data });
-    return sendError(res, 502, "MP_FALHOU", { detail: data?.message || null });
+    return sendError(res, 502, "MP_FALHOU", mpPreapprovalErrorInfo(response, data));
   }
 
   const db = getDb();
@@ -20074,5 +20087,5 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
-router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, professionalTrialStartDate };
+router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

@@ -10,7 +10,7 @@ const {
   THERAPY_TRIAL_DAYS_PROFISSIONAL
 } = require("../config");
 
-const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, professionalTrialStartDate } = therapyRouter._test;
+const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, mpPreapprovalErrorInfo, professionalTrialStartDate } = therapyRouter._test;
 
 test("plano institucional custa R$ 10 e oferece 7 dias", () => {
   assert.equal(THERAPY_PLAN_EMPRESA_AMOUNT, 10);
@@ -40,6 +40,17 @@ test("checkout institucional aceita plano aprovado mesmo sem campos de revisão 
   assert.equal(canStartInstitutionalSubscription({ plano: "empresa", intendedTier: "profissional" }), true);
   assert.equal(canStartInstitutionalSubscription({ plano: "empresa-pending-review", intendedTier: "empresa" }), false);
   assert.equal(canStartInstitutionalSubscription({ plano: "trial", empresaRejectReason: "Vínculo não aprovado" }), false);
+});
+
+test("falha do Mercado Pago preserva diagnóstico sem expor e-mail ou credencial", () => {
+  assert.deepEqual(mpPreapprovalErrorInfo({ status: 400 }, {
+    message: "Invalid request",
+    cause: [{ code: "PA-123", description: "payer test@example.com Bearer APP_USR-secret is invalid" }]
+  }), {
+    detail: "payer [e-mail] Bearer [oculto] is invalid",
+    providerStatus: 400,
+    providerCode: "PA-123"
+  });
 });
 
 test("plano profissional custa 30 dias grátis e exige meio de pagamento no trial", () => {
