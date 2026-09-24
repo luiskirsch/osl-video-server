@@ -567,6 +567,12 @@ function institutionalTrialStartDate(therapist, nowMs = Date.now()) {
   return new Date(nowMs + THERAPY_PLAN_EMPRESA_TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function canStartInstitutionalSubscription(therapist) {
+  // A aprovação coloca a conta em "empresa". Contas legadas ou ajustadas pelo
+  // admin podem não ter os campos de revisão usados no fluxo mais recente.
+  return therapist?.plano === "empresa";
+}
+
 function professionalTrialStartDate(therapist, nowMs = Date.now()) {
   if (therapist?.professionalTrialUsedAt || THERAPY_TRIAL_DAYS_PROFISSIONAL <= 0) return null;
   return new Date(nowMs + THERAPY_TRIAL_DAYS_PROFISSIONAL * 24 * 60 * 60 * 1000).toISOString();
@@ -6941,10 +6947,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
   const billingCycle = tier === "empresa" ? "month" : requestedBillingCycle;
   let amount, planTier, planLabel;
   if (tier === "empresa") {
-    const approvedForInstitutionalProgram = therapist.intendedTier === "empresa"
-      && therapist.empresaReviewedAt
-      && !therapist.empresaRejectReason;
-    if (!approvedForInstitutionalProgram) {
+    if (!canStartInstitutionalSubscription(therapist)) {
       return sendError(res, 403, "PROGRAMA_INSTITUCIONAL_NAO_APROVADO", {
         detail: "A equipe precisa aprovar seu vínculo institucional antes do cadastro do meio de pagamento."
       });
@@ -20071,5 +20074,5 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
-router._test = { evaluatePlanAccess, institutionalTrialStartDate, professionalTrialStartDate };
+router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, professionalTrialStartDate };
 module.exports = router;

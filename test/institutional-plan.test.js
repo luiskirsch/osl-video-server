@@ -10,7 +10,7 @@ const {
   THERAPY_TRIAL_DAYS_PROFISSIONAL
 } = require("../config");
 
-const { evaluatePlanAccess, institutionalTrialStartDate, professionalTrialStartDate } = therapyRouter._test;
+const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, professionalTrialStartDate } = therapyRouter._test;
 
 test("plano institucional custa R$ 10 e oferece 7 dias", () => {
   assert.equal(THERAPY_PLAN_EMPRESA_AMOUNT, 10);
@@ -33,6 +33,13 @@ test("teste institucional agenda a primeira cobrança para 7 dias e não se repe
   const now = Date.parse("2026-09-23T12:00:00.000Z");
   assert.equal(institutionalTrialStartDate({}, now), "2026-09-30T12:00:00.000Z");
   assert.equal(institutionalTrialStartDate({ empresaTrialUsedAt: now }, now), null);
+});
+
+test("checkout institucional aceita plano aprovado mesmo sem campos de revisão legados", () => {
+  assert.equal(canStartInstitutionalSubscription({ plano: "empresa" }), true);
+  assert.equal(canStartInstitutionalSubscription({ plano: "empresa", intendedTier: "profissional" }), true);
+  assert.equal(canStartInstitutionalSubscription({ plano: "empresa-pending-review", intendedTier: "empresa" }), false);
+  assert.equal(canStartInstitutionalSubscription({ plano: "trial", empresaRejectReason: "Vínculo não aprovado" }), false);
 });
 
 test("plano profissional custa 30 dias grátis e exige meio de pagamento no trial", () => {
