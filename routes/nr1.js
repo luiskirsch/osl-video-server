@@ -7,7 +7,8 @@ const admin = require("firebase-admin");
 const { getDb, ensureDb } = require("../services/firestore");
 const { getBearerToken, verifyFirebaseToken } = require("../services/auth");
 const { asyncHandler, sendError } = require("../utils");
-const { EMPRESA_JWT_SECRET } = require("../config");
+const { EMPRESA_JWT_SECRET, THERAPY_FRONTEND_BASE } = require("../config");
+const { sendEmail } = require("../services/email");
 const nr1 = require("../services/nr1-workplace");
 
 // O questionário é uma fonte exploratória de evidência, não um laudo, diagnóstico
@@ -23,6 +24,9 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
   const stamp = () => admin.firestore.FieldValue.serverTimestamp();
   const surveyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,
     standardHeaders: true, legacyHeaders: false });
+  const escapeHtml = value => String(value || "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+  })[char]);
 
   async function company(req, res) {
     if (!ensureDb(res)) return null;
@@ -54,8 +58,18 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     const data = snap.data();
     return { id: snap.id, companyId: data.companyId, name: data.name,
       units: data.units, status: data.status, methodology: data.methodology,
-      reviewer: data.reviewer, openedAt: data.openedAt || null,
-      closedAt: data.closedAt || null };
+      reviewer: data.reviewer, governance: data.governance || null,
+      riskCriteria: data.riskCriteria || nr1.RISK_CRITERIA,
+      integration: data.integration || null, technicalConclusion: data.technicalConclusion || null,
+      openedAt: data.openedAt || null, closedAt: data.closedAt || null,
+      finalizedAt: data.finalizedAt || null };
+  }
+
+  function ensureMutableCampaign(snap, res) {
+    if (snap.data().status === "finalized") {
+      sendError(res, 409, "CAMPANHA_FINALIZADA"); return false;
+    }
+    return true;
   }
 
   async function audit(ref, actor, type, details = {}) {
@@ -74,17 +88,10 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     const email = user.email.trim().toLowerCase();
     const lookupHash = crypto.createHmac("sha256", EMPRESA_JWT_SECRET)
       .update(`nr1-roster-v1:${email}`).digest("hex");
-    const [docs, roster] = await Promise.all([
-      getDb().collection("therapy_colaboradores").where("email", "==", email).limit(20).get(),
-      getDb().collection("nr1_participants").where("lookupHash", "==", lookupHash).limit(50).get()
-    ]);
-    const matches = docs.docs.filter(doc => doc.data().status === "ativo"
-      && doc.data().eligibilityVerifiedAt
-      && (!doc.data().patientAccountUid || doc.data().patientAccountUid === uid));
-    const companyIds = [...new Set([
-      ...matches.map(doc => doc.data().empresaId),
-      ...roster.docs.filter(doc => doc.data().status === "active").map(doc => doc.data().companyId)
-    ])].filter(Boolean).filter(id => !roster.docs.some(doc =>
+    const roster = await getDb().collection("nr1_participants")
+      .where("lookupHash", "==", lookupHash).limit(50).get();
+    const companyIds = [...new Set(roster.docs.filter(doc => doc.data().status === "active")
+      .map(doc => doc.data().companyId))].filter(Boolean).filter(id => !roster.docs.some(doc =>
       doc.data().companyId === id && doc.data().status === "revoked"));
     if (!companyIds.length) {
       sendError(res, 403, "COLABORADOR_NAO_APROVADO"); return null;
@@ -111,7 +118,8 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     }
     const ref = campaigns().doc();
     await ref.create({ companyId, name, units, status: "draft",
-      instrument: "EP-WORK-19", instrumentVersion: "1.0", createdBy: operator.email,
+      instrument: "EP-WORK-19", instrumentVersion: "1.0",
+      riskCriteria: nr1.RISK_CRITERIA, createdBy: operator.email,
       createdAt: stamp(), updatedAt: stamp() });
     await audit(ref, operator.email, "campaign_created", { companyId });
     return res.status(201).json({ ok: true, id: ref.id });
@@ -142,17 +150,54 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       const reviewerName = nr1.cleanText(req.body?.reviewerName, 120);
       const reviewerCredential = nr1.cleanText(req.body?.reviewerCredential, 120);
       const methodology = nr1.cleanText(req.body?.methodology, 1200);
+      const governance = nr1.validateGovernance(req.body?.governance);
       if (reviewerName.length < 4 || reviewerCredential.length < 4 || methodology.length < 30
-          || req.body?.reviewedInstrument !== true) {
+          || !governance || req.body?.reviewedInstrument !== true) {
         return sendError(res, 400, "REVISAO_TECNICA_OBRIGATORIA");
       }
       await ref.update({ status: "open", reviewer: { name: reviewerName,
-        credential: reviewerCredential, approvedBy: operator.email }, methodology,
+        credential: reviewerCredential, approvedBy: operator.email }, methodology, governance,
       openedAt: stamp(), updatedAt: stamp() });
       await audit(ref, operator.email, "survey_opened", { reviewerName, reviewerCredential });
     } else if (next === "closed" && snap.data().status === "open") {
       await ref.update({ status: "closed", closedAt: stamp(), updatedAt: stamp() });
       await audit(ref, operator.email, "survey_closed");
+    } else if (next === "finalized" && snap.data().status === "closed") {
+      const technicalConclusion = nr1.cleanText(req.body?.technicalConclusion, 2500);
+      const reviewerName = nr1.cleanText(req.body?.reviewerName, 120);
+      const reviewerCredential = nr1.cleanText(req.body?.reviewerCredential, 120);
+      if (technicalConclusion.length < 30 || reviewerName.length < 4
+          || reviewerCredential.length < 4 || req.body?.confirmTechnicalResponsibility !== true) {
+        return sendError(res, 400, "CONCLUSAO_TECNICA_OBRIGATORIA");
+      }
+      const [observations, risks, actions, communications, responseDocs] = await Promise.all([
+        pageCollection(ref.collection("observations")), pageCollection(ref.collection("risks")),
+        pageCollection(ref.collection("actions")), pageCollection(ref.collection("communications")),
+        pageCollection(ref.collection("responses"))
+      ]);
+      const missingUnits = snap.data().units.filter(unit =>
+        !observations.some(item => item.unitId === unit.id)).map(unit => unit.name);
+      const pendingReviews = risks.filter(item => item.technicalReview !== "reviewed");
+      const risksWithoutAction = risks.filter(risk => risk.priority !== "baixa"
+        && !actions.some(action => action.riskId === risk.id));
+      const invalidEncryptedResponses = responseDocs.filter(item => {
+        try { nr1.openResponse(item.sealed, EMPRESA_JWT_SECRET, snap.id); return false; }
+        catch { return true; }
+      }).length;
+      if (missingUnits.length || pendingReviews.length || risksWithoutAction.length
+          || invalidEncryptedResponses || !communications.length || !snap.data().integration) {
+        return res.status(409).json({ ok: false, error: "CAMPANHA_INCOMPLETA",
+          missingUnits, pendingRiskReviews: pendingReviews.map(item => item.id),
+          risksWithoutAction: risksWithoutAction.map(item => item.id),
+          invalidEncryptedResponses,
+          missingCommunication: !communications.length,
+          missingAepPgrIntegration: !snap.data().integration });
+      }
+      await ref.update({ status: "finalized", technicalConclusion: {
+        text: technicalConclusion, reviewerName, reviewerCredential,
+        confirmedBy: operator.email, criteriaVersion: nr1.RISK_CRITERIA.version
+      }, finalizedAt: stamp(), updatedAt: stamp() });
+      await audit(ref, operator.email, "campaign_finalized", { reviewerName, reviewerCredential });
     } else return sendError(res, 409, "TRANSICAO_INVALIDA");
     return res.json({ ok: true });
   }));
@@ -186,7 +231,24 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     await batch.commit();
     await getDb().collection("nr1_roster_audit").add({ companyId: tenant.id,
       action: "participants_registered", count: emails.length, at: stamp() });
-    return res.status(201).json({ ok: true, count: emails.length });
+    const delivery = { sent: 0, skipped: 0, failed: 0 };
+    if (req.body?.sendInvites !== false) {
+      const surveyUrl = `${String(THERAPY_FRONTEND_BASE).replace(/\/$/, "")}/paciente-nr1.html`;
+      for (let offset = 0; offset < emails.length; offset += 10) {
+        const outcomes = await Promise.all(emails.slice(offset, offset + 10).map(email => sendEmail({
+          to: email,
+          subject: `${tenant.name}: escuta confidencial sobre as condições de trabalho`,
+          text: `A ${tenant.name} abriu uma escuta sobre as condições de trabalho com apoio do Espaço Prelúdio. Entre com este mesmo e-mail verificado e responda em ${surveyUrl}. A empresa não recebe respostas individuais. A pesquisa não é atendimento clínico.`,
+          html: `<p>A <strong>${escapeHtml(tenant.name)}</strong> abriu uma escuta sobre as condições de trabalho com apoio do Espaço Prelúdio.</p><p><a href="${escapeHtml(surveyUrl)}">Acessar a pesquisa</a> usando este mesmo e-mail verificado.</p><p>A empresa não recebe respostas individuais. A pesquisa não é atendimento clínico.</p>`
+        })));
+        for (const result of outcomes) {
+          if (result?.ok) delivery.sent++;
+          else if (result?.skipped) delivery.skipped++;
+          else delivery.failed++;
+        }
+      }
+    }
+    return res.status(201).json({ ok: true, count: emails.length, delivery });
   }));
 
   router.post("/empresa/nr1/participants/revoke", asyncHandler(async (req, res) => {
@@ -221,7 +283,10 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       campaigns().where("companyId", "==", companyId).limit(100).get()));
     return res.json({ ok: true, campaigns: snaps.flatMap(snap => snap.docs)
       .filter(doc => doc.data().status === "open").map(doc => ({
-      id: doc.id, name: doc.data().name, units: doc.data().units
+      id: doc.id, name: doc.data().name, units: doc.data().units,
+      privacyContact: doc.data().governance?.privacyContact || null,
+      privacyNoticeVersion: doc.data().governance?.privacyNoticeVersion || null,
+      retentionMonths: doc.data().governance?.retentionMonths || null
     })), questions: nr1.QUESTIONS, domains: nr1.DOMAINS });
   }));
 
@@ -237,7 +302,9 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       if (snap.data().status !== "open") return sendError(res, 409, "PESQUISA_ENCERRADA");
       const answers = nr1.validateAnswers(req.body?.answers);
       const unitId = nr1.cleanText(req.body?.unitId, 20);
-      if (!answers || !snap.data().units.some(unit => unit.id === unitId)) {
+      if (!answers || !snap.data().units.some(unit => unit.id === unitId)
+          || req.body?.noticeAccepted !== true
+          || req.body?.privacyNoticeVersion !== snap.data().governance?.privacyNoticeVersion) {
         return sendError(res, 400, "RESPOSTAS_INVALIDAS");
       }
       const responseId = crypto.createHmac("sha256", EMPRESA_JWT_SECRET)
@@ -253,7 +320,9 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
           if (existing.exists) {
             const error = new Error("RESPOSTA_JA_ENVIADA"); error.code = "NR1_DUPLICATE"; throw error;
           }
-          tx.create(responseRef, { sealed: nr1.sealResponse({ unitId, answers }, EMPRESA_JWT_SECRET, snap.id),
+          tx.create(responseRef, { sealed: nr1.sealResponse({ unitId, answers,
+            privacyNoticeVersion: snap.data().governance.privacyNoticeVersion,
+            noticeAccepted: true }, EMPRESA_JWT_SECRET, snap.id),
             submittedAt: stamp(), instrumentVersion: "1.0" });
         });
       } catch (error) {
@@ -280,25 +349,43 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     throw new Error("NR1_REPORT_TOO_LARGE");
   }
 
+  function aggregateEncryptedSurvey(responseDocs, campaignSnap) {
+    const opened = [];
+    let invalidEncryptedResponses = 0;
+    for (const item of responseDocs) {
+      try { opened.push(nr1.openResponse(item.sealed, EMPRESA_JWT_SECRET, campaignSnap.id)); }
+      catch { invalidEncryptedResponses++; }
+    }
+    const summary = nr1.summarizeSurvey(opened, campaignSnap.data().units);
+    summary.invalidEncryptedResponses = invalidEncryptedResponses;
+    return summary;
+  }
+
   router.get("/empresa/nr1/campaigns/:id/report", asyncHandler(async (req, res) => {
     const tenant = await company(req, res);
     if (!tenant) return;
     const snap = await campaignForCompany(req.params.id, tenant.id, res);
     if (!snap) return;
-    const [risks, actions, observations, communications] = await Promise.all([
+    const [risks, actions, observations, communications, roster] = await Promise.all([
       pageCollection(snap.ref.collection("risks")),
       pageCollection(snap.ref.collection("actions")),
       pageCollection(snap.ref.collection("observations")),
-      pageCollection(snap.ref.collection("communications"))
+      pageCollection(snap.ref.collection("communications")),
+      getDb().collection("nr1_participants").where("companyId", "==", tenant.id).limit(5000).get()
     ]);
     let survey = null;
-    if (snap.data().status === "closed") {
+    if (["closed", "finalized"].includes(snap.data().status)) {
       const responses = await pageCollection(snap.ref.collection("responses"));
-      survey = nr1.summarizeSurvey(responses.map(item =>
-        nr1.openResponse(item.sealed, EMPRESA_JWT_SECRET, snap.id)), snap.data().units);
+      survey = aggregateEncryptedSurvey(responses, snap);
+      const eligibleParticipants = roster.docs.filter(doc => doc.data().status === "active").length;
+      survey.eligibleParticipants = eligibleParticipants;
+      survey.participationPercent = eligibleParticipants
+        ? Math.min(100, Math.round(100 * survey.totalResponses / eligibleParticipants)) : null;
     }
-    return res.json({ ok: true, campaign: publicCampaign(snap), survey,
+    return res.json({ ok: true, company: { id: tenant.id, name: tenant.name },
+      campaign: publicCampaign(snap), survey,
       risks, actions, observations, communications,
+      controlHierarchy: nr1.CONTROL_HIERARCHY,
       notice: "Subsídio à AEP/PGR: a pesquisa não substitui avaliação técnica, inventário de riscos, plano de ação ou PCMSO." });
   }));
 
@@ -308,13 +395,33 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     if (!operator) return;
     const snap = await campaigns().doc(req.params.id).get();
     if (!snap.exists) return sendError(res, 404, "CAMPANHA_NAO_ENCONTRADA");
-    const [risks, actions, observations, communications] = await Promise.all([
+    const [risks, actions, observations, communications, responseDocs] = await Promise.all([
       pageCollection(snap.ref.collection("risks")),
       pageCollection(snap.ref.collection("actions")),
       pageCollection(snap.ref.collection("observations")),
-      pageCollection(snap.ref.collection("communications"))
+      pageCollection(snap.ref.collection("communications")),
+      pageCollection(snap.ref.collection("responses"))
     ]);
-    return res.json({ ok: true, campaign: publicCampaign(snap), risks, actions, observations, communications });
+    const survey = ["closed", "finalized"].includes(snap.data().status)
+      ? aggregateEncryptedSurvey(responseDocs, snap) : null;
+    return res.json({ ok: true, campaign: publicCampaign(snap), risks, actions,
+      observations, communications, responseCount: responseDocs.length, survey });
+  }));
+
+  router.post("/empresa/nr1/campaigns/:id/integration", asyncHandler(async (req, res) => {
+    const tenant = await company(req, res);
+    if (!tenant) return;
+    const snap = await campaignForCompany(req.params.id, tenant.id, res);
+    if (!snap) return;
+    if (snap.data().status !== "closed") return sendError(res, 409, "COLETA_DEVE_ESTAR_ENCERRADA");
+    const integration = nr1.validateIntegration(req.body);
+    if (!integration) return sendError(res, 400, "INTEGRACAO_AEP_PGR_INVALIDA");
+    await snap.ref.update({ integration: { ...integration, signedByCompanyId: tenant.id,
+      criteriaVersion: nr1.RISK_CRITERIA.version, signedAt: stamp() }, updatedAt: stamp() });
+    await audit(snap.ref, tenant.id, "aep_pgr_integration_recorded", {
+      pgrStatus: integration.pgrStatus, reviewDueDate: integration.reviewDueDate
+    });
+    return res.json({ ok: true });
   }));
 
   router.post("/empresa/nr1/campaigns/:id/communications", asyncHandler(async (req, res) => {
@@ -339,6 +446,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     if (!tenant) return;
     const snap = await campaignForCompany(req.params.id, tenant.id, res);
     if (!snap) return;
+    if (!ensureMutableCampaign(snap, res)) return;
     const unitId = nr1.cleanText(req.body?.unitId, 20);
     const activity = nr1.cleanText(req.body?.activity, 500);
     const conditions = nr1.cleanText(req.body?.conditions, 1500);
@@ -359,6 +467,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     if (!tenant) return;
     const snap = await campaignForCompany(req.params.id, tenant.id, res);
     if (!snap) return;
+    if (!ensureMutableCampaign(snap, res)) return;
     const risk = nr1.validateRisk(req.body, snap.data().units);
     if (!risk) return sendError(res, 400, "RISCO_INVALIDO");
     const ref = snap.ref.collection("risks").doc();
@@ -373,6 +482,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     if (!tenant) return;
     const snap = await campaignForCompany(req.params.id, tenant.id, res);
     if (!snap) return;
+    if (!ensureMutableCampaign(snap, res)) return;
     const action = nr1.validateAction(req.body);
     const riskId = nr1.cleanText(req.body?.riskId, 100);
     if (!action || !/^[A-Za-z0-9_-]{1,100}$/.test(riskId)
@@ -423,6 +533,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     if (!operator) return;
     const snap = await campaigns().doc(req.params.id).get();
     if (!snap.exists) return sendError(res, 404, "CAMPANHA_NAO_ENCONTRADA");
+    if (snap.data().status === "finalized") return sendError(res, 409, "CAMPANHA_FINALIZADA");
     const ref = snap.ref.collection("risks").doc(req.params.riskId);
     if (!(await ref.get()).exists) return sendError(res, 404, "RISCO_NAO_ENCONTRADO");
     const reviewerName = nr1.cleanText(req.body?.reviewerName, 120);
