@@ -20613,5 +20613,6 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
+router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
 router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, institutionalPayerEmail, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;
