@@ -241,13 +241,19 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 const PANEL_TOTP_SECRET = process.env.PANEL_TOTP_SECRET || "";
 
 // Allowlist de e-mails admin do Espaço Prelúdio (verificação de CRP/CRM, etc).
-// Comma-separated. Ex.: "luis@x.com,ops@y.com". Validado contra decoded.email
-// do Firebase ID Token. Sem essa env, ninguém é admin (rejeita 403).
-const THERAPY_ADMIN_EMAILS = String(process.env.THERAPY_ADMIN_EMAILS || "")
-  .toLowerCase()
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+// As contas institucionais abaixo permanecem autorizadas em todos os ambientes.
+// THERAPY_ADMIN_EMAILS pode acrescentar outras contas sem substituir as padrão.
+// O acesso ainda exige um Firebase ID Token com e-mail verificado.
+const THERAPY_ADMIN_EMAILS = [...new Set([
+  "luishenriquekirsch@hotmail.com",
+  "contato@espacopreludio.com.br",
+  "contato@preludiojogos.com.br",
+  ...String(process.env.THERAPY_ADMIN_EMAILS || "")
+    .toLowerCase()
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+])];
 
 // Allowlist inicial de Responsaveis Tecnicos. O acesso tambem pode ser
 // concedido por um documento ativo em therapy_rt_assignments, permitindo

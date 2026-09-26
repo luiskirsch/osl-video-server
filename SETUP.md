@@ -26,7 +26,7 @@ publicados em documentação ou no histórico Git:
 ACCESS_TOKEN_SECRET=<gere-com-openssl-rand-hex-32>
 LICENSE_SECRET=<gere-com-openssl-rand-hex-32>
 ADMIN_SECRET=<gere-com-openssl-rand-hex-32>
-THERAPY_ADMIN_EMAILS=luishenriquekirsch@hotmail.com
+THERAPY_ADMIN_EMAILS=<administradores-adicionais-separados-por-virgula>
 ```
 
 VAPID (push notifications): gere um novo par com
