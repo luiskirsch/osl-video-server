@@ -17168,6 +17168,7 @@ router.get("/public/empresa/:slug", asyncHandler(async (req, res) => {
 
   const e = snap.docs[0].data();
   if (e.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
+  if (e.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
 
   return res.json({
     ok: true,
@@ -17197,6 +17198,7 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
   const empDoc = empSnap.docs[0];
   const empresa = empDoc.data();
   if (empresa.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
+  if (empresa.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
 
   // Verifica limite de colaboradores
   if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
@@ -17261,6 +17263,7 @@ router.get("/public/empresa/verificar", asyncHandler(async (req, res) => {
 
   if (snap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
   const e = snap.docs[0].data();
+  if (e.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
   return res.json({ ok: true, nome: e.nome, id: snap.docs[0].id });
 }));
 
@@ -17290,6 +17293,7 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
   if (empSnap.empty) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
 
   const empresa   = empSnap.docs[0].data();
+  if (empresa.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
   const empresaId = empSnap.docs[0].id;
 
   if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
