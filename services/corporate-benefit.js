@@ -25,6 +25,12 @@ function activeCoveredEntries(entries, now = Date.now()) {
   }));
 }
 
+function requiresActiveBenefitAtApproval(benefit) {
+  // A cobertura é concedida pela empresa; a consulta extra já paga é uma
+  // compra do paciente e deve continuar atendível após desativação do plano.
+  return benefit?.mode === "covered";
+}
+
 function calculateExtraQuote(config) {
   if (!config || config.approved !== true || !config.version) return null;
   const net = Number(config.netPsychologistCents);
@@ -73,6 +79,7 @@ module.exports = {
   benefitMonth,
   usageDocumentId,
   activeCoveredEntries,
+  requiresActiveBenefitAtApproval,
   calculateExtraQuote,
   validPricingConfig
 };

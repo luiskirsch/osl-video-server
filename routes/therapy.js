@@ -44,7 +44,8 @@ const {
 const { mercadoPagoFetchTherapy } = require("../services/payments");
 const {
   MONTHLY_INCLUDED_SESSIONS, benefitMonth, usageDocumentId,
-  activeCoveredEntries, calculateExtraQuote, validPricingConfig
+  activeCoveredEntries, requiresActiveBenefitAtApproval,
+  calculateExtraQuote, validPricingConfig
 } = require("../services/corporate-benefit");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
@@ -11259,7 +11260,10 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     if (current.corporateBenefit?.mode === "extra" && current.paymentStatus !== "paid") {
       approvalError = "PAGAMENTO_PENDENTE"; return;
     }
-    if (current.corporateBenefit) {
+    // Uma consulta extra já paga é um serviço adquirido pelo paciente. A
+    // desativação posterior do benefício corporativo não pode deixá-la paga
+    // e impossível de aprovar; novas consultas cobertas seguem bloqueadas.
+    if (requiresActiveBenefitAtApproval(current.corporateBenefit)) {
       const [company, employee] = await Promise.all([
         tx.get(db.collection("therapy_empresas").doc(current.empresaId)),
         tx.get(db.collection("therapy_colaboradores").doc(current.colaboradorId))
@@ -11271,17 +11275,15 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
           || employee.data().patientAccountUid !== current.patientAccountUid) {
         approvalError = "BENEFICIO_INATIVO"; return;
       }
-      if (current.corporateBenefit.mode === "covered") {
-        const usageRef = db.collection("therapy_corporate_benefit_usage")
-          .doc(current.corporateBenefit.usageId);
-        const usage = await tx.get(usageRef);
-        const entries = usage.exists ? usage.data().entries || {} : {};
-        if (entries[requestId]?.status !== "pending") {
-          approvalError = "RESERVA_BENEFICIO_INVALIDA"; return;
-        }
-        entries[requestId] = { ...entries[requestId], status: "approved", expiresAt: null };
-        tx.update(usageRef, { entries, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      const usageRef = db.collection("therapy_corporate_benefit_usage")
+        .doc(current.corporateBenefit.usageId);
+      const usage = await tx.get(usageRef);
+      const entries = usage.exists ? usage.data().entries || {} : {};
+      if (entries[requestId]?.status !== "pending") {
+        approvalError = "RESERVA_BENEFICIO_INVALIDA"; return;
       }
+      entries[requestId] = { ...entries[requestId], status: "approved", expiresAt: null };
+      tx.update(usageRef, { entries, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
     }
     tx.set(db.collection("therapy_sessions").doc(sId), {
       ...sessionData,

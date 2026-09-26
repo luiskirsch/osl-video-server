@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   benefitMonth, usageDocumentId, activeCoveredEntries,
-  calculateExtraQuote, validPricingConfig
+  requiresActiveBenefitAtApproval, calculateExtraQuote, validPricingConfig
 } = require("../services/corporate-benefit");
 
 test("mês do benefício usa horário de São Paulo na virada", () => {
@@ -25,6 +25,12 @@ test("reservas pendentes expiradas não consomem o saldo", () => {
     canceled: { status: "canceled", expiresAt: null }
   };
   assert.deepEqual(Object.keys(activeCoveredEntries(entries, 100)), ["current", "approved"]);
+});
+
+test("extra pago continua atendível se a empresa desativar o benefício", () => {
+  assert.equal(requiresActiveBenefitAtApproval({ mode: "covered" }), true);
+  assert.equal(requiresActiveBenefitAtApproval({ mode: "extra" }), false);
+  assert.equal(requiresActiveBenefitAtApproval(null), false);
 });
 
 test("preço extra exige todos os parâmetros homologados; não embute CPP nem taxa presumida", () => {
