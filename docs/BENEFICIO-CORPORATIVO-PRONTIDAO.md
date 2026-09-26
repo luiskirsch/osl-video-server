@@ -8,6 +8,8 @@ O contrato com a Campi pode prever uma **fase de implantação após a assinatur
 
 A minuta precisa distinguir data de assinatura, prazo máximo de implantação, condições para ativação, data inicial de faturamento, comunicação aos colaboradores e consequência caso a ativação não ocorra no prazo (prorrogação acordada ou rescisão sem cobrança por serviço não prestado). A RT deve participar da aprovação dos protocolos e da rede antes do primeiro atendimento; mera contratação futura não substitui a regularidade da pessoa jurídica.
 
+**Caixa da implantação:** se os R$ 2.000 líquidos/mês da RT começarem na assinatura, reservar ao menos R$ 4.000 líquidos para 60 dias ou R$ 6.000 para 90 dias, antes de encargos de RPA, software e demais custos. Esse desembolso não aparece na margem mensal calculada para a operação ativa. Definir se haverá taxa de implantação ou capital de giro próprio, sem confundir essa taxa com mensalidade de atendimentos ainda indisponíveis.
+
 ## Antes de ativar o benefício e iniciar atendimentos
 
 - [ ] RT contratada, responsabilidades clínicas e carga horária formalizadas, documentação da pessoa jurídica concluída e enquadramento/regularidade confirmados pelo CRP-MG. Uma cotação de RT não substitui esses passos. Não anunciar inscrição, habilitação ou cobertura de urgência sem comprovação.
