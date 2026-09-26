@@ -42,6 +42,10 @@ const {
   IS_PRODUCTION
 } = require("../config");
 const { mercadoPagoFetchTherapy } = require("../services/payments");
+const {
+  MONTHLY_INCLUDED_SESSIONS, benefitMonth, usageDocumentId,
+  activeCoveredEntries, calculateExtraQuote, validPricingConfig
+} = require("../services/corporate-benefit");
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const tiss     = require("../services/tiss");
@@ -3438,7 +3442,43 @@ async function applyCancellation(db, sessionId, sessData, { canceledBy, reason, 
       publicCase = { caseRef, caseData, nextSessionAt };
     }
 
+    const refundableCorporateSession = Boolean(current.corporateBenefit)
+      && cancellationKind !== "not_held"
+      && (canceledBy === "therapist" || Number(current.scheduledAt) > Date.now());
+    let corporateUsage = null;
+    if (refundableCorporateSession && current.corporateBenefit.mode === "covered"
+        && current.corporateBenefit.usageId) {
+      const usageRef = db.collection("therapy_corporate_benefit_usage")
+        .doc(current.corporateBenefit.usageId);
+      const usageSnap = await tx.get(usageRef);
+      if (usageSnap.exists) {
+        corporateUsage = { ref: usageRef, entries: { ...(usageSnap.data().entries || {}) } };
+        delete corporateUsage.entries[current.schedulingRequestId];
+      }
+    }
+
     tx.set(sessionRef, update, { merge: true });
+    if (corporateUsage) tx.update(corporateUsage.ref, {
+      entries: corporateUsage.entries,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (refundableCorporateSession && current.corporateBenefit.mode === "extra"
+        && current.paymentStatus === "paid") {
+      tx.set(db.collection("therapy_payment_refund_tasks")
+        .doc(String(current.schedulingRequestId || sessionId)), {
+          requestId: current.schedulingRequestId || null,
+          sessionId, paymentId: current.paymentId || null,
+          amountCents: current.corporateBenefit.quote?.totalCents || null,
+          status: "review_required", reason: "session_canceled",
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      if (current.schedulingRequestId) {
+        tx.set(db.collection("therapy_payouts").doc(`pout_${current.schedulingRequestId}`), {
+          status: "on_hold_refund",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+    }
     if (publicCase) {
       tx.set(publicCase.caseRef, {
         scheduledSessions: Math.max(0, Number(publicCase.caseData.scheduledSessions || 0) - 1),
@@ -9953,6 +9993,31 @@ async function enrichLegacyAppScheduledSession(doc) {
   return { doc, data: { ...session, ...sessionContext } };
 }
 
+async function resolveCorporateEmployee(db, uid) {
+  const user = await admin.auth().getUser(uid);
+  const email = String(user.email || "").trim().toLowerCase();
+  if (!email) return { reason: "COLABORADOR_NAO_ENCONTRADO" };
+  const employees = await db.collection("therapy_colaboradores")
+    .where("email", "==", email).limit(20).get();
+  if (employees.empty) return { reason: "COLABORADOR_NAO_ENCONTRADO", email };
+  if (user.emailVerified !== true) return { reason: "EMAIL_NAO_VERIFICADO" };
+  const matching = employees.docs.filter(doc => doc.data().patientAccountUid === uid
+    || !doc.data().patientAccountUid);
+  if (!matching.length) return { reason: "COLABORADOR_NAO_ENCONTRADO", email };
+  const approved = matching.filter(doc => doc.data().status === "ativo"
+    && doc.data().eligibilityVerifiedAt);
+  if (approved.length !== 1) return {
+    reason: approved.length ? "VINCULO_CORPORATIVO_AMBIGUO" : "COLABORADOR_NAO_APROVADO", email
+  };
+  const employeeDoc = approved[0];
+  const companyDoc = await db.collection("therapy_empresas").doc(employeeDoc.data().empresaId).get();
+  if (!companyDoc.exists || companyDoc.data().status !== "ativa"
+      || companyDoc.data().benefitStatus !== "active") {
+    return { reason: "EMPRESA_SEM_BENEFICIO", email };
+  }
+  return { employeeDoc, companyDoc, email };
+}
+
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
 router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -9991,7 +10056,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
 
   const notes = String(req.body?.notes || "").trim().slice(0, SCHEDULING_REQUEST_NOTES_MAX);
 
-  // TCLE — obrigatório para consultas de telessaúde (Res. CFM 2.314/2022)
+  // Consentimento expresso obrigatório para este fluxo de atendimento remoto.
   if (req.body?.tcleSigned !== true) {
     return sendError(res, 400, "TCLE_OBRIGATORIO", {
       hint: "O paciente deve aceitar o Termo de Consentimento Livre e Esclarecido antes de agendar."
@@ -10047,6 +10112,84 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     })
     : null;
 
+  let corporate = null;
+  if (patientAuth && !schoolContext) {
+    corporate = await resolveCorporateEmployee(getDb(), patientAuth.uid);
+    if (corporate.reason === "COLABORADOR_NAO_ENCONTRADO") corporate = null;
+    else if (corporate.reason) return sendError(res, 403, corporate.reason);
+    if (corporate && corporate.email !== patientEmail) {
+      return sendError(res, 403, "EMAIL_COLABORADOR_DIVERGENTE");
+    }
+  }
+
+  let corporateBenefit = null;
+  let paymentRequired = false;
+  if (corporate) {
+    const month = benefitMonth(requestedSlot);
+    const employeeId = corporate.employeeDoc.id;
+    const companyId = corporate.companyDoc.id;
+    const usageRef = getDb().collection("therapy_corporate_benefit_usage")
+      .doc(usageDocumentId(companyId, employeeId, month));
+    const employeeRef = corporate.employeeDoc.ref;
+    const companyRef = corporate.companyDoc.ref;
+    const quote = calculateExtraQuote(corporate.companyDoc.data().extraPricing);
+    const requestRef = getDb().collection("therapy_scheduling_requests").doc(requestId);
+    let outcome = null;
+    await getDb().runTransaction(async tx => {
+      const [usageSnap, freshEmployee, freshCompany] = await Promise.all([
+        tx.get(usageRef), tx.get(employeeRef), tx.get(companyRef)
+      ]);
+      if (!freshEmployee.exists || freshEmployee.data().status !== "ativo"
+          || !freshEmployee.data().eligibilityVerifiedAt
+          || (freshEmployee.data().patientAccountUid
+            && freshEmployee.data().patientAccountUid !== patientAuth.uid)
+          || !freshCompany.exists || freshCompany.data().status !== "ativa"
+          || freshCompany.data().benefitStatus !== "active") {
+        outcome = { error: "BENEFICIO_INATIVO" }; return;
+      }
+      const entries = activeCoveredEntries(usageSnap.exists ? usageSnap.data().entries : {}, Date.now());
+      const used = Object.keys(entries).length;
+      if (used < MONTHLY_INCLUDED_SESSIONS) {
+        entries[requestId] = { status: "pending", expiresAt, scheduledAt: requestedSlot };
+        outcome = { mode: "covered", month, remaining: MONTHLY_INCLUDED_SESSIONS - used - 1 };
+        tx.set(usageRef, { companyId, employeeId, month, entries,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      } else {
+        if (!quote) { outcome = { error: "PRECO_EXTRA_NAO_CONFIGURADO" }; return; }
+        if (!MP_ACCESS_TOKEN_THERAPY || !MP_WEBHOOK_SECRET_THERAPY) {
+          outcome = { error: "PAGAMENTO_INDISPONIVEL" }; return;
+        }
+        if (Number(req.body?.acceptExtraPriceCents) !== quote.totalCents) {
+          outcome = { error: "PRECO_EXTRA_NAO_ACEITO", quote }; return;
+        }
+        outcome = { mode: "extra", month, remaining: 0, quote };
+      }
+      const benefit = { ...outcome, companyId, employeeId,
+        usageId: outcome.mode === "covered" ? usageRef.id : null };
+      if (!freshEmployee.data().patientAccountUid) {
+        tx.set(employeeRef, { patientAccountUid: patientAuth.uid,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      }
+      tx.set(requestRef, {
+        requestId, therapistUid, therapistSlug: slug, patientName, patientEmail,
+        patientPhone, notes, requestedSlot, requestedSlotEnd: slotEndMs,
+        status: "pending", ipHash, expiresAt, tcleSigned: true, tcleSignedAt,
+        requestSource: "corporate_employee", patientAccountUid: patientAuth.uid,
+        empresaId: companyId, colaboradorId: employeeId,
+        corporateBenefit: benefit,
+        paymentStatus: outcome.mode === "covered" ? "not_applicable" : "awaiting_payment",
+        ...(outcome.mode === "extra" ? { valorConsulta: quote.totalCents } : {}),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+    if (outcome.error) return sendError(res,
+      ["PRECO_EXTRA_NAO_CONFIGURADO", "PAGAMENTO_INDISPONIVEL"].includes(outcome.error) ? 503 : 409,
+      outcome.error, outcome.quote ? { quote: outcome.quote } : undefined);
+    corporateBenefit = outcome;
+    paymentRequired = outcome.mode === "extra";
+  } else {
+
   await getDb().collection("therapy_scheduling_requests").doc(requestId).set({
     requestId,
     therapistUid,
@@ -10068,6 +10211,15 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
+  }
+
+  if (paymentRequired) {
+    await logAudit({ type: "corporate_extra_awaiting_payment", requestId,
+      companyId: corporate.companyDoc.id, employeeId: corporate.employeeDoc.id,
+      quoteVersion: corporateBenefit.quote.version,
+      amountCents: corporateBenefit.quote.totalCents });
+    return res.json({ ok: true, requestId, corporateBenefit, paymentRequired: true });
+  }
 
   // E-mail pro terapeuta (fire-and-forget — não bloqueia resposta ao paciente).
   const therapistEmail = await resolveTherapistEmail(therapistUid, therapist);
@@ -10126,7 +10278,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     tag: "scheduling-request"
   }).catch(e => logError("push_scheduling_failed", e, { requestId }));
 
-  return res.json({ ok: true, requestId });
+  return res.json({ ok: true, requestId, corporateBenefit, paymentRequired });
 }));
 
 // POST /public/agendar/:slug/criar-pix — gera cobrança PIX no MP Therapy e retorna QR.
@@ -10149,18 +10301,58 @@ router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(as
   const reqData = reqSnap.data();
   if (reqData.therapistSlug !== slug) return sendError(res, 403, "SOLICITACAO_INCOMPATIVEL");
   if (reqData.paymentStatus === "paid") return sendError(res, 409, "SOLICITACAO_JA_PAGA");
+  if (reqData.status !== "pending" || Number(reqData.expiresAt) <= Date.now()) {
+    return sendError(res, 409, "SOLICITACAO_EXPIRADA");
+  }
+  const isCorporateExtra = reqData.corporateBenefit?.mode === "extra";
+  if (reqData.corporateBenefit?.mode === "covered") {
+    return sendError(res, 409, "SESSAO_COBERTA_SEM_PAGAMENTO");
+  }
+  if (isCorporateExtra) {
+    const callerUid = await verifyFirebaseToken(req, res);
+    if (!callerUid) return;
+    if (callerUid !== reqData.patientAccountUid) return sendError(res, 403, "ACESSO_NEGADO");
+    if (!MP_ACCESS_TOKEN_THERAPY || !MP_WEBHOOK_SECRET_THERAPY) {
+      return sendError(res, 503, "PAGAMENTO_INDISPONIVEL");
+    }
+    if (!Number.isInteger(reqData.valorConsulta) || reqData.valorConsulta <= 0) {
+      return sendError(res, 503, "PRECO_EXTRA_NAO_CONFIGURADO");
+    }
+  }
 
   const therapistDoc = await getDb().collection("therapists").doc(reqData.therapistUid).get();
   if (!therapistDoc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   const therapist = therapistDoc.data();
-  if (!therapist.pixKey) return sendError(res, 400, "PROFISSIONAL_SEM_PIX");
+  if (!isCorporateExtra && !therapist.pixKey) return sendError(res, 400, "PROFISSIONAL_SEM_PIX");
 
-  const valorCentavos = 6000; // R$60 fixo da plataforma
-  const valorReais    = 60;
+  const valorCentavos = isCorporateExtra ? reqData.valorConsulta : 6000;
+  const valorReais    = valorCentavos / 100;
 
-  const expiration    = new Date(Date.now() + 30 * 60 * 1000);
+  if (isCorporateExtra && reqData.paymentId) {
+    if (Number(reqData.paymentExpiresAt) <= Date.now()) return sendError(res, 409, "PAGAMENTO_EXPIRADO");
+    const previous = await mercadoPagoFetchTherapy(
+      `https://api.mercadopago.com/v1/payments/${encodeURIComponent(reqData.paymentId)}`,
+      { method: "GET" }
+    );
+    if (!previous.response.ok) return sendError(res, 502, "ERRO_CONSULTAR_PIX");
+    return res.json({
+      ok: true, paymentId: String(previous.data.id),
+      qrCode: previous.data.point_of_interaction?.transaction_data?.qr_code || null,
+      qrBase64: previous.data.point_of_interaction?.transaction_data?.qr_code_base64 || null,
+      valor: valorReais, expiresAt: reqData.paymentExpiresAt
+    });
+  }
+
+  const expiration    = new Date(Math.min(
+    Date.now() + 30 * 60 * 1000,
+    Number(reqData.expiresAt),
+    isCorporateExtra ? Number(reqData.requestedSlot) : Infinity
+  ));
   // MP exige ISO8601 com timezone explícito (rejeita "Z" pra PIX em produção)
-  const expirationStr = expiration.toISOString().replace("Z", "-03:00");
+  // toISOString() representa UTC; é preciso converter a hora antes de trocar
+  // o sufixo, senão a cobrança fica aberta três horas a mais que o previsto.
+  const expirationStr = new Date(expiration.getTime() - 3 * 60 * 60 * 1000)
+    .toISOString().replace("Z", "-03:00");
 
   const nameParts = (reqData.patientName || "Paciente").split(" ");
   const body = {
@@ -10179,7 +10371,8 @@ router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(as
 
   const { response, data: mpData } = await mercadoPagoFetchTherapy(
     "https://api.mercadopago.com/v1/payments",
-    { method: "POST", body: JSON.stringify(body) }
+    { method: "POST", body: JSON.stringify(body),
+      headers: { "X-Idempotency-Key": isCorporateExtra ? requestId : crypto.randomUUID() } }
   );
 
   if (!response.ok) {
@@ -10192,14 +10385,31 @@ router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(as
   const qrCode   = mpData.point_of_interaction?.transaction_data?.qr_code   || null;
   const qrBase64 = mpData.point_of_interaction?.transaction_data?.qr_code_base64 || null;
 
-  await getDb().collection("therapy_scheduling_requests").doc(requestId).update({
-    paymentId:        String(mpData.id),
-    paymentStatus:    "pending",
-    paymentCreatedAt: Date.now(),
-    valorConsulta:    valorCentavos,
-    paymentExpiresAt: expiration.getTime(),
-    updatedAt:        admin.firestore.FieldValue.serverTimestamp()
-  });
+  if (isCorporateExtra) {
+    let alreadyPaid = false;
+    await getDb().runTransaction(async tx => {
+      const requestRef = getDb().collection("therapy_scheduling_requests").doc(requestId);
+      const current = await tx.get(requestRef);
+      if (!current.exists || current.data().corporateBenefit?.mode !== "extra") {
+        throw new Error("SOLICITACAO_INCOMPATIVEL");
+      }
+      if (current.data().paymentStatus === "paid") { alreadyPaid = true; return; }
+      tx.update(requestRef, {
+        paymentId: String(mpData.id), paymentStatus: "pending",
+        paymentCreatedAt: Date.now(), valorConsulta: valorCentavos,
+        paymentExpiresAt: expiration.getTime(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+    if (alreadyPaid) return res.json({ ok: true, alreadyPaid: true, paymentId: String(mpData.id), valor: valorReais });
+  } else {
+    await getDb().collection("therapy_scheduling_requests").doc(requestId).update({
+      paymentId: String(mpData.id), paymentStatus: "pending",
+      paymentCreatedAt: Date.now(), valorConsulta: valorCentavos,
+      paymentExpiresAt: expiration.getTime(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
 
   logInfo("pix_criado", { requestId, paymentId: String(mpData.id), valor: valorReais });
 
@@ -10223,11 +10433,18 @@ router.get("/public/agendar/:requestId/status-pagamento", asyncHandler(async (re
   const snap = await getDb().collection("therapy_scheduling_requests").doc(requestId).get();
   if (!snap.exists) return sendError(res, 404, "SOLICITACAO_NAO_ENCONTRADA");
   const data = snap.data();
+  if (data.corporateBenefit) {
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+    if (uid !== data.patientAccountUid) return sendError(res, 403, "ACESSO_NEGADO");
+  }
 
   return res.json({
     ok:            true,
     paymentStatus: data.paymentStatus || "pending",
-    paid:          data.paymentStatus === "paid"
+    paid:          data.paymentStatus === "paid" || data.corporateBenefit?.mode === "covered",
+    requestStatus: data.status || "pending",
+    refundStatus: data.refundStatus || null
   });
 }));
 
@@ -10307,16 +10524,46 @@ router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
       logInfo("webhook_pagamento_duplicado_ignorado", { requestId, paymentId });
       return;
     }
+    if (reqData.corporateBenefit?.mode === "covered") {
+      await registerWebhookFailure("covered_request_payment", requestId);
+      return;
+    }
+    if (reqData.corporateBenefit?.mode === "extra") {
+      const receivedCents = Math.round(Number(payment.transaction_amount) * 100);
+      if ((reqData.paymentId && String(reqData.paymentId) !== String(payment.id))
+          || receivedCents !== Number(reqData.valorConsulta)) {
+        await registerWebhookFailure("corporate_payment_mismatch", requestId);
+        return;
+      }
+      if (payment.currency_id !== "BRL" || payment.payment_method_id !== "pix") {
+        await registerWebhookFailure("corporate_payment_method_mismatch", requestId);
+        return;
+      }
+    }
+
+    const expiredCorporateExtra = reqData.corporateBenefit?.mode === "extra"
+      && (reqData.status !== "pending" || Number(reqData.expiresAt) <= Date.now()
+          || Number(reqData.requestedSlot) <= Date.now());
 
     await db.collection("therapy_scheduling_requests").doc(requestId).update({
       paymentStatus: "paid",
       paymentId:     String(payment.id),
       paymentPaidAt: Date.now(),
+      ...(expiredCorporateExtra ? { status: "expired", refundStatus: "review_required" } : {}),
       updatedAt:     admin.firestore.FieldValue.serverTimestamp()
     });
 
+    if (expiredCorporateExtra) {
+      await db.collection("therapy_payment_refund_tasks").doc(requestId).set({
+        requestId, paymentId: String(payment.id), amountCents: reqData.valorConsulta,
+        status: "review_required", reason: "paid_after_request_expired",
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      return;
+    }
+
     // Repasse pendente — processado manualmente ou por automação futura.
-    const valorCentavos = reqData.valorConsulta || 6000;
+    const valorCentavos = reqData.corporateBenefit?.mode === "extra" ? 6000 : (reqData.valorConsulta || 6000);
     await db.collection("therapy_payouts").doc(`pout_${requestId}`).set({
       requestId,
       therapistUid:   reqData.therapistUid,
@@ -10324,9 +10571,42 @@ router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
       patientName:    reqData.patientName,
       paymentId:      String(payment.id),
       valor:          valorCentavos,
+      ...(reqData.corporateBenefit?.mode === "extra" ? {
+        valorBrutoConsulta: reqData.valorConsulta,
+        payoutModel: "rpa_net_configured",
+        quoteVersion: reqData.corporateBenefit.quote?.version || null,
+        companyId: reqData.empresaId
+      } : {}),
       status:         "pending",
       createdAt:      admin.firestore.FieldValue.serverTimestamp()
     });
+
+    if (reqData.corporateBenefit?.mode === "extra") {
+      const therapistSnap = await db.collection("therapists").doc(reqData.therapistUid).get();
+      const therapist = therapistSnap.exists ? therapistSnap.data() : {};
+      const therapistEmail = await resolveTherapistEmail(reqData.therapistUid, therapist);
+      if (therapistEmail) {
+        const template = templateSchedulingRequest({
+          therapistName: therapist.displayName || "Profissional",
+          patientName: reqData.patientName,
+          patientEmail: reqData.patientEmail,
+          patientPhone: reqData.patientPhone,
+          notes: reqData.notes,
+          requestedSlot: reqData.requestedSlot,
+          painelUrl: buildPainelUrl()
+        });
+        sendEmail({ to: therapistEmail, ...template }).catch(error =>
+          logError("corporate_paid_request_email_failed", error, { requestId }));
+      }
+      createNotification({
+        therapistUid: reqData.therapistUid,
+        type: "scheduling_request",
+        title: `Novo pedido de consulta de ${reqData.patientName}`,
+        body: "O pagamento da consulta adicional foi confirmado. Revise o pedido no painel.",
+        link: "/painel.html",
+        data: { requestId, patientName: reqData.patientName, requestedSlot: reqData.requestedSlot }
+      });
+    }
 
     logInfo("pix_pagamento_confirmado", { requestId, paymentId: String(payment.id), valor: valorCentavos });
   } catch (err) {
@@ -10606,7 +10886,7 @@ router.get("/therapy/admin/repasses", asyncHandler(async (req, res) => {
   if (!adminAuth) return;
 
   const wantStatus = String(req.query?.status || "pending").trim().toLowerCase();
-  const allowed    = new Set(["pending", "completed", "failed", "all"]);
+  const allowed    = new Set(["pending", "completed", "failed", "on_hold_refund", "all"]);
   if (!allowed.has(wantStatus)) return sendError(res, 400, "STATUS_INVALIDO");
   const limitN = Math.min(500, Math.max(1, Number(req.query?.limit) || 100));
 
@@ -10661,6 +10941,20 @@ router.post("/therapy/admin/repasses/:id/concluir", asyncHandler(async (req, res
 
   const data = snap.data();
   if (data.status === "completed") return sendError(res, 409, "REPASSE_JA_CONCLUIDO");
+  if (data.payoutModel === "rpa_net_configured") {
+    const requestSnap = await db.collection("therapy_scheduling_requests").doc(data.requestId).get();
+    const request = requestSnap.exists ? requestSnap.data() : null;
+    if (!request || request.status !== "approved" || !request.sessionId) {
+      return sendError(res, 409, "SESSAO_CORPORATIVA_NAO_APROVADA");
+    }
+    const [sessionSnap, refundSnap] = await Promise.all([
+      db.collection("therapy_sessions").doc(request.sessionId).get(),
+      db.collection("therapy_payment_refund_tasks").doc(data.requestId).get()
+    ]);
+    if (!sessionSnap.exists || sessionSnap.data().status !== "completed" || refundSnap.exists) {
+      return sendError(res, 409, "REPASSE_CORPORATIVO_NAO_LIBERADO");
+    }
+  }
 
   const note = String(req.body?.note || "").trim().slice(0, 300);
 
@@ -10799,7 +11093,11 @@ router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) =
   const snap = await db.collection("therapy_scheduling_requests")
     .where("therapistUid", "==", uid)
     .get();
-  const requestDocs = snap.docs.filter(d => includeAll || d.data().status === "pending");
+  const requestDocs = snap.docs.filter(d => {
+    const request = d.data();
+    if (request.corporateBenefit?.mode === "extra" && request.paymentStatus !== "paid") return false;
+    return includeAll || request.status === "pending";
+  });
   const items = await Promise.all(requestDocs.map(async d => {
     const r = d.data();
     // Compatibilidade com solicitações já feitas por versões antigas do app:
@@ -10902,8 +11200,7 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
   };
   const joinToken = signPayload(joinPayload, ACCESS_TOKEN_SECRET);
 
-  const batch = db.batch();
-  batch.set(db.collection("therapy_sessions").doc(sId), {
+  const sessionData = {
     sessionId: sId,
     therapistUid: uid,
     therapistDisplayName: therapist.displayName || "",
@@ -10922,6 +11219,14 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     recurrenceIndex: null,
     recurrenceCount: null,
     schedulingRequestId: requestId,
+    ...(reqData.corporateBenefit ? {
+      empresaId: reqData.empresaId,
+      colaboradorId: reqData.colaboradorId,
+      patientAccountUid: reqData.patientAccountUid,
+      corporateBenefit: reqData.corporateBenefit,
+      paymentStatus: reqData.paymentStatus,
+      paymentId: reqData.paymentId || null
+    } : {}),
     ...(schoolContext ? {
       patientAccountUid: schoolContext.patientAccountUid,
       studentId: schoolContext.studentId,
@@ -10941,15 +11246,58 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  let approvalError = null;
+  await db.runTransaction(async tx => {
+    const fresh = await tx.get(reqDocRef);
+    if (!fresh.exists || fresh.data().therapistUid !== uid) {
+      approvalError = "SOLICITACAO_NAO_ENCONTRADA"; return;
+    }
+    const current = fresh.data();
+    if (current.status !== "pending") { approvalError = "SOLICITACAO_JA_RESPONDIDA"; return; }
+    if (Number(current.expiresAt) <= Date.now()) { approvalError = "SOLICITACAO_EXPIRADA"; return; }
+    if (current.corporateBenefit?.mode === "extra" && current.paymentStatus !== "paid") {
+      approvalError = "PAGAMENTO_PENDENTE"; return;
+    }
+    if (current.corporateBenefit) {
+      const [company, employee] = await Promise.all([
+        tx.get(db.collection("therapy_empresas").doc(current.empresaId)),
+        tx.get(db.collection("therapy_colaboradores").doc(current.colaboradorId))
+      ]);
+      if (!company.exists || company.data().status !== "ativa"
+          || company.data().benefitStatus !== "active"
+          || !employee.exists || employee.data().status !== "ativo"
+          || !employee.data().eligibilityVerifiedAt
+          || employee.data().patientAccountUid !== current.patientAccountUid) {
+        approvalError = "BENEFICIO_INATIVO"; return;
+      }
+      if (current.corporateBenefit.mode === "covered") {
+        const usageRef = db.collection("therapy_corporate_benefit_usage")
+          .doc(current.corporateBenefit.usageId);
+        const usage = await tx.get(usageRef);
+        const entries = usage.exists ? usage.data().entries || {} : {};
+        if (entries[requestId]?.status !== "pending") {
+          approvalError = "RESERVA_BENEFICIO_INVALIDA"; return;
+        }
+        entries[requestId] = { ...entries[requestId], status: "approved", expiresAt: null };
+        tx.update(usageRef, { entries, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      }
+    }
+    tx.set(db.collection("therapy_sessions").doc(sId), {
+      ...sessionData,
+      ...(current.corporateBenefit ? {
+        corporateBenefit: current.corporateBenefit,
+        paymentStatus: current.paymentStatus,
+        paymentId: current.paymentId || null
+      } : {})
+    });
+    tx.update(reqDocRef, {
+      status: "approved", sessionId: sId, ...(schoolContext || {}),
+      respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
   });
-  batch.update(reqDocRef, {
-    status: "approved",
-    sessionId: sId,
-    ...(schoolContext || {}),
-    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  });
-  await batch.commit();
+  if (approvalError) return sendError(res, 409, approvalError);
 
   // Short code pra URL bonita do paciente.
   let joinCode = null;
@@ -11010,12 +11358,49 @@ router.post("/therapy/agendamentos/solicitacoes/:id/rejeitar", asyncHandler(asyn
   if (reqData.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (reqData.status !== "pending")  return sendError(res, 409, "SOLICITACAO_JA_RESPONDIDA");
 
-  await reqDocRef.update({
-    status: "rejected",
-    rejectReason: reason || null,
-    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  let rejectionError = null;
+  await db.runTransaction(async tx => {
+    const fresh = await tx.get(reqDocRef);
+    if (!fresh.exists || fresh.data().therapistUid !== uid) {
+      rejectionError = "SOLICITACAO_NAO_ENCONTRADA"; return;
+    }
+    if (fresh.data().status !== "pending") {
+      rejectionError = "SOLICITACAO_JA_RESPONDIDA"; return;
+    }
+    const benefit = fresh.data().corporateBenefit;
+    let usageRef = null;
+    let entries = null;
+    if (benefit?.mode === "covered" && benefit.usageId) {
+      usageRef = db.collection("therapy_corporate_benefit_usage").doc(benefit.usageId);
+      const usage = await tx.get(usageRef);
+      if (usage.exists) {
+        entries = { ...(usage.data().entries || {}) };
+        delete entries[requestId];
+      } else usageRef = null;
+    }
+    tx.update(reqDocRef, {
+      status: "rejected", rejectReason: reason || null,
+      ...(benefit?.mode === "extra" && fresh.data().paymentStatus === "paid"
+        ? { refundStatus: "review_required" } : {}),
+      respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    if (usageRef) tx.update(usageRef, { entries,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    if (benefit?.mode === "extra" && fresh.data().paymentStatus === "paid") {
+      tx.set(db.collection("therapy_payment_refund_tasks").doc(requestId), {
+        requestId, paymentId: fresh.data().paymentId,
+        amountCents: fresh.data().valorConsulta,
+        status: "review_required", reason: "therapist_rejected",
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      tx.set(db.collection("therapy_payouts").doc(`pout_${requestId}`), {
+        status: "on_hold_refund",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    }
   });
+  if (rejectionError) return sendError(res, 409, rejectionError);
 
   await logAudit({
     type: "scheduling_request_rejected",
@@ -16621,6 +17006,22 @@ router.get("/therapy/admin/empresas", asyncHandler(async (req, res) => {
       contatoEmail: e.contatoEmail || null,
       contatoPhone: e.contatoPhone || null,
       status: e.status || "ativa",
+      benefitStatus: e.benefitStatus || "inactive",
+      extraPricing: e.extraPricing ? {
+        version: e.extraPricing.version,
+        netPsychologistCents: e.extraPricing.netPsychologistCents,
+        workerWithholdingRate: e.extraPricing.workerWithholdingRate,
+        employerContributionRate: e.extraPricing.employerContributionRate,
+        simplesEffectiveRate: e.extraPricing.simplesEffectiveRate,
+        gatewayPercentRate: e.extraPricing.gatewayPercentRate,
+        gatewayFixedCents: e.extraPricing.gatewayFixedCents,
+        otherFixedCents: e.extraPricing.otherFixedCents,
+        approvedAt: e.extraPricing.approvedAt || null
+      } : null,
+      extraQuote: calculateExtraQuote(e.extraPricing) ? {
+        totalCents: calculateExtraQuote(e.extraPricing).totalCents,
+        currency: "BRL"
+      } : null,
       totalColaboradores: e.totalColaboradores || 0,
       limiteColaboradores: e.limiteColaboradores || null,
       createdAt: e.createdAt?.toMillis?.() || null,
@@ -16672,6 +17073,7 @@ router.post("/therapy/admin/empresas", asyncHandler(async (req, res) => {
     limiteColaboradores: limiteColaboradores ? Number(limiteColaboradores) : null,
     obs: obs ? String(obs).trim() : null,
     status: "ativa",
+    benefitStatus: "inactive",
     totalColaboradores: 0,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     createdBy: adminAuth.uid
@@ -16710,6 +17112,29 @@ router.patch("/therapy/admin/empresas/:id", asyncHandler(async (req, res) => {
   }
   if (req.body?.limiteColaboradores !== undefined) {
     updates.limiteColaboradores = req.body.limiteColaboradores ? Number(req.body.limiteColaboradores) : null;
+  }
+
+  if (req.body?.benefitStatus !== undefined) {
+    if (!["active", "inactive"].includes(req.body.benefitStatus)) {
+      return sendError(res, 400, "STATUS_BENEFICIO_INVALIDO");
+    }
+    updates.benefitStatus = req.body.benefitStatus;
+  }
+  if (req.body?.extraPricing !== undefined) {
+    const pricing = req.body.extraPricing;
+    if (!validPricingConfig(pricing) || Number(pricing.netPsychologistCents) !== 6000) {
+      return sendError(res, 400, "CONFIGURACAO_PRECO_EXTRA_INVALIDA");
+    }
+    updates.extraPricing = {
+      ...pricing, approved: true,
+      approvedBy: adminAuth.uid,
+      approvedAt: Date.now()
+    };
+  }
+
+  if (updates.benefitStatus === "active"
+      && !calculateExtraQuote(updates.extraPricing || snap.data().extraPricing)) {
+    return sendError(res, 409, "PRECO_EXTRA_NAO_CONFIGURADO");
   }
 
   await ref.update(updates);
@@ -16795,7 +17220,7 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
     empresaId: empDoc.id,
     empresaNome: empresa.nome,
     empresaSlug: empresa.slug,
-    status: "ativo",
+    status: "pendente",
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };
 
@@ -16812,15 +17237,14 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
       to: doc.email,
       subject: `Bem-vindo ao Espaço Prelúdio via ${empresa.nome}`,
       html: `<p>Olá, ${doc.nome}!</p>
-        <p>Seu cadastro no programa de saúde de <strong>${empresa.nome}</strong> foi confirmado.</p>
-        <p>Acesse <a href="${THERAPY_FRONTEND_BASE}/profissionais.html">nosso diretório</a> para escolher um profissional e agendar sua primeira consulta.</p>
-        <p>O valor da sessão é <strong>R$ 60,00</strong>, pago diretamente ao profissional no momento do agendamento.</p>`
+        <p>Recebemos sua solicitação de cadastro no programa de saúde de <strong>${empresa.nome}</strong>.</p>
+        <p>O acesso ao benefício dependerá da validação de seu vínculo com a empresa. Você receberá orientações quando o cadastro for aprovado.</p>`
     });
   } catch (e) {
     logError("colaborador_welcome_email_failed", e, { colaboradorId: colabRef.id });
   }
 
-  return res.json({ ok: true, id: colabRef.id, empresaNome: empresa.nome });
+  return res.json({ ok: true, id: colabRef.id, empresaNome: empresa.nome, status: "pendente" });
 }));
 
 // GET /public/empresa/verificar?codigo=slug — valida código de empresa (slug).
@@ -16854,6 +17278,7 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
 
   if (!codigoEmpresa) return sendError(res, 400, "CODIGO_EMPRESA_OBRIGATORIO");
   if (!nome)          return sendError(res, 400, "NOME_OBRIGATORIO");
+  if (req.body?.consentLgpd !== true) return sendError(res, 400, "CONSENTIMENTO_OBRIGATORIO");
 
   const db = getDb();
 
@@ -16910,7 +17335,7 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
       empresaNome:        empresa.nome,
       empresaSlug:        codigoEmpresa,
       patientAccountUid:  uid,
-      status:             "ativo",
+      status:             "pendente",
       createdAt:          admin.firestore.FieldValue.serverTimestamp()
     });
     await empSnap.docs[0].ref.update({
@@ -16942,7 +17367,7 @@ router.get("/therapy/admin/colaboradores", asyncHandler(async (req, res) => {
 
   let query = db.collection("therapy_colaboradores");
   if (empresaId) query = query.where("empresaId", "==", empresaId);
-  if (status === "ativo" || status === "inativo") query = query.where("status", "==", status);
+  if (["ativo", "inativo", "pendente"].includes(status)) query = query.where("status", "==", status);
 
   const snap = await query.limit(1000).get();
   let items = snap.docs.map(d => {
@@ -16957,7 +17382,8 @@ router.get("/therapy/admin/colaboradores", asyncHandler(async (req, res) => {
       cargo: c.cargo || null,
       empresaId: c.empresaId || null,
       empresaNome: c.empresaNome || null,
-      status: c.status || "ativo",
+      status: c.status || "pendente",
+      eligibilityVerifiedAt: c.eligibilityVerifiedAt || null,
       createdAt: c.createdAt?.toMillis?.() || null
     };
   });
@@ -16984,15 +17410,112 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
   const id = String(req.params.id || "").trim();
   const db = getDb();
   const ref = db.collection("therapy_colaboradores").doc(id);
-  if (!(await ref.get()).exists) return sendError(res, 404, "COLABORADOR_NAO_ENCONTRADO");
+  const currentSnap = await ref.get();
+  if (!currentSnap.exists) return sendError(res, 404, "COLABORADOR_NAO_ENCONTRADO");
 
   const allowed = ["nome", "telefone", "departamento", "cargo", "status", "obs"];
   const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
   for (const k of allowed) {
     if (req.body?.[k] !== undefined) updates[k] = req.body[k];
   }
+  if (req.body?.status !== undefined) {
+    if (!["pendente", "ativo", "inativo"].includes(req.body.status)) {
+      return sendError(res, 400, "STATUS_COLABORADOR_INVALIDO");
+    }
+    if (req.body.status === "ativo") {
+      updates.eligibilityVerifiedAt = currentSnap.data().eligibilityVerifiedAt || Date.now();
+      updates.eligibilityVerifiedBy = adminAuth.uid;
+    } else {
+      updates.eligibilityVerifiedAt = admin.firestore.FieldValue.delete();
+      updates.eligibilityVerifiedBy = admin.firestore.FieldValue.delete();
+    }
+  }
   await ref.update(updates);
   return res.json({ ok: true });
+}));
+
+// Reembolsos de extras corporativos exigem conferência humana no Mercado Pago.
+// Nunca se considera uma tarefa "concluída" somente porque uma consulta foi
+// cancelada: o dinheiro só voltou ao colaborador após confirmação externa.
+router.get("/therapy/admin/reembolsos", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+  const snap = await getDb().collection("therapy_payment_refund_tasks").limit(500).get();
+  const items = snap.docs.map(doc => {
+    const task = doc.data();
+    return {
+      id: doc.id, requestId: task.requestId || null,
+      paymentId: task.paymentId || null, amountCents: task.amountCents || null,
+      status: task.status || "review_required", reason: task.reason || null,
+      refundReference: task.refundReference || null,
+      createdAt: task.createdAt?.toMillis?.() || null
+    };
+  }).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return res.json({ ok: true, items });
+}));
+
+router.post("/therapy/admin/reembolsos/:id/conferir", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+  const taskRef = getDb().collection("therapy_payment_refund_tasks")
+    .doc(String(req.params.id || ""));
+  const taskSnap = await taskRef.get();
+  if (!taskSnap.exists) return sendError(res, 404, "REEMBOLSO_NAO_ENCONTRADO");
+  const task = taskSnap.data();
+  if (task.status === "refunded") return res.json({ ok: true, refunded: true });
+  if (!/^\d+$/.test(String(task.paymentId || ""))) {
+    return sendError(res, 409, "PAGAMENTO_INVALIDO");
+  }
+  const { response, data: payment } = await mercadoPagoFetchTherapy(
+    `https://api.mercadopago.com/v1/payments/${task.paymentId}`, { method: "GET" });
+  if (!response.ok) return sendError(res, 502, "CONSULTA_REEMBOLSO_FALHOU");
+  if (String(payment.external_reference || "") !== String(task.requestId || "")) {
+    return sendError(res, 409, "PAGAMENTO_DIVERGENTE");
+  }
+  const refunds = Array.isArray(payment.refunds) ? payment.refunds : [];
+  const refundedCents = refunds.reduce((total, refund) => total +
+    Math.round(Number(refund.amount || 0) * 100), 0);
+  if (payment.status !== "refunded" || refundedCents < Number(task.amountCents)) {
+    return res.json({ ok: true, refunded: false,
+      hint: "O Mercado Pago ainda não confirma o reembolso integral. Faça a devolução no painel Mercado Pago e confira novamente." });
+  }
+  await taskRef.update({
+    status: "refunded", refundReference: refunds.map(refund => String(refund.id)).join(","),
+    confirmedAt: Date.now(), confirmedBy: adminAuth.uid,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+  const requestRef = getDb().collection("therapy_scheduling_requests").doc(task.requestId);
+  await requestRef.set({ refundStatus: "refunded",
+    updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+  return res.json({ ok: true, refunded: true });
+}));
+
+// Entitlement pessoal: nunca expõe utilização individual à empresa.
+router.get("/therapy/colaborador/beneficio", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const scheduledAt = req.query?.scheduledAt === undefined ? Date.now() : Number(req.query.scheduledAt);
+  if (!Number.isFinite(scheduledAt) || scheduledAt < Date.now() - 24 * 60 * 60 * 1000
+      || scheduledAt > Date.now() + 366 * 24 * 60 * 60 * 1000) {
+    return sendError(res, 400, "HORARIO_INVALIDO");
+  }
+  const employee = await resolveCorporateEmployee(db, uid);
+  if (employee.reason) return res.json({ ok: true, eligible: false, reason: employee.reason });
+  const month = benefitMonth(scheduledAt);
+  const usageId = usageDocumentId(employee.companyDoc.id, employee.employeeDoc.id, month);
+  const usageSnap = await db.collection("therapy_corporate_benefit_usage").doc(usageId).get();
+  const used = Object.keys(activeCoveredEntries(usageSnap.exists ? usageSnap.data().entries : {})).length;
+  const quote = calculateExtraQuote(employee.companyDoc.data().extraPricing);
+  return res.json({
+    ok: true, eligible: true, empresaNome: employee.companyDoc.data().nome,
+    month, limit: MONTHLY_INCLUDED_SESSIONS, used,
+    remaining: Math.max(0, MONTHLY_INCLUDED_SESSIONS - used),
+    extraQuote: quote || { available: false, reason: "PRECO_EXTRA_NAO_CONFIGURADO" }
+  });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -19265,7 +19788,8 @@ router.post("/therapy/notificacoes/ler-todas", asyncHandler(async (req, res) => 
 
 // ═════════════════════════════════════════════════════════════════════════
 // PAINEL CORPORATIVO — autenticação e métricas de saúde da equipe
-// Dados sempre agregados/anônimos — LGPD compliant.
+// Resposta agregada com supressão de amostras pequenas. A conformidade LGPD
+// depende também de base legal, contratos, acesso, retenção e operação.
 // ═════════════════════════════════════════════════════════════════════════
 
 const { EMPRESA_JWT_SECRET } = require("../config");
@@ -19436,78 +19960,17 @@ router.get("/empresa/dashboard", asyncHandler(async (req, res) => {
   const empresaSnap = await db.collection("therapy_empresas").doc(empresaId).get();
   if (!empresaSnap.exists) return sendError(res, 404, "EMPRESA_NAO_ENCONTRADA");
   const empresa = empresaSnap.data();
+  if (empresa.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
 
   // Fix 3: invalida tokens emitidos antes da última troca de senha
   if (empresa.passwordChangedAt && decoded.iat < empresa.passwordChangedAt) {
     return sendError(res, 401, "TOKEN_INVALIDADO_TROCA_SENHA");
   }
 
-  // Colaboradores
-  const colabSnap = await db.collection("therapy_colaboradores")
-    .where("empresaId", "==", empresaId).limit(2000).get();
-  const colaboradores = colabSnap.docs.map(d => d.data());
-  const totalCadastrados = colaboradores.length;
-  const totalAtivos = colaboradores.filter(c => c.status === "ativo").length;
-
-  // E-mails dos colaboradores para cruzar com pacientes
-  const emails = new Set(colaboradores.map(c => (c.email || "").toLowerCase()).filter(Boolean));
-
-  // Pacientes vinculados (por e-mail)
-  let sessoesMes = 0, sessoesTotal = 0;
-  let especialidades = {};
-  let colaboradoresComSessao = new Set();
-
-  if (emails.size > 0) {
-    // Busca contas de pacientes pelos e-mails
-    const patSnap = await db.collection("therapy_patient_accounts")
-      .where("email", "in", [...emails].slice(0, 30)) // Firestore limit
-      .get().catch(() => null);
-
-    const patUids = new Set((patSnap?.docs || []).map(d => d.data().uid || d.id));
-
-    if (patUids.size > 0) {
-      const now = Date.now();
-      const mes30Start = now - 30 * 24 * 3600 * 1000;
-
-      const sesSnap = await db.collection("therapy_sessions")
-        .where("patientUid", "in", [...patUids].slice(0, 30))
-        .where("status", "==", "completed").get().catch(() => null);
-
-      (sesSnap?.docs || []).forEach(d => {
-        const s = d.data();
-        sessoesTotal++;
-        colaboradoresComSessao.add(s.patientUid);
-        if (Number(s.scheduledAt || 0) >= mes30Start) sessoesMes++;
-
-        // Especialidade do terapeuta (aproximação pelo tipoConselho)
-        const esp = s.therapistEspecialidade || s.especialidade || "Outros";
-        especialidades[esp] = (especialidades[esp] || 0) + 1;
-      });
-    }
-  }
-
-  const taxaAdesao = totalCadastrados > 0
-    ? Math.round((colaboradoresComSessao.size / totalCadastrados) * 100)
-    : 0;
-
-  // LGPD: mascara métricas quando a amostra é pequena demais e arriscaria
-  // identificar um funcionário específico (k-anonymity).
-  const mascarar = totalAtivos > 0 && totalAtivos < 5;
-
-  return res.json({
-    ok: true,
-    empresa: { nome: empresa.nome, segmento: empresa.segmento || null },
-    kpis: {
-      totalCadastrados:  mascarar ? null : totalCadastrados,
-      totalAtivos:       mascarar ? null : totalAtivos,
-      sessoesMes:        mascarar ? null : sessoesMes,
-      sessoesTotal:      mascarar ? null : sessoesTotal,
-      taxaAdesao:        mascarar ? null : taxaAdesao,
-    },
-    especialidades: mascarar ? {} : especialidades,
-    mascarado: mascarar,
-    geradoEm: Date.now()
-  });
+  // Somente vínculos explícitos do benefício corporativo entram na apuração.
+  // Páginas completas evitam truncar empresas com mais de 30 colaboradores.
+  const { getCachedCorporateDashboard } = require("../services/corporate-dashboard");
+  return res.json(await getCachedCorporateDashboard(db, empresaId, empresa));
 }));
 
 // POST /therapy/admin/empresas/:id/definir-acesso — admin define email+senha inicial
