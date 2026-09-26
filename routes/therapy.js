@@ -521,6 +521,12 @@ async function verifyAdminTherapy(req, res) {
     sendError(res, 403, "NAO_AUTORIZADO");
     return null;
   }
+  // Sem isso, cadastrar uma conta nova com um e-mail da allowlist (antes do
+  // dono real criar a dele) bastaria pra virar admin.
+  if (!decoded.email_verified) {
+    sendError(res, 403, "EMAIL_NAO_VERIFICADO");
+    return null;
+  }
   return { uid: decoded.uid, email };
 }
 
@@ -1895,6 +1901,10 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     if (photoBase64) {
       if (photoBase64.length > PHOTO_MAX_BASE64) return sendError(res, 413, "FOTO_GRANDE_DEMAIS");
       if (!PHOTO_ALLOWED_MIMES.has(photoMime))   return sendError(res, 400, "FOTO_TIPO_INVALIDO");
+      // Sem isso, o campo vira sink de HTML: ele volta cru no diretório
+      // público (/therapy/profissionais) e é inserido em atributo style via
+      // innerHTML no profissionais.html.
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(photoBase64)) return sendError(res, 400, "FOTO_BASE64_INVALIDA");
       updates.photoBase64 = photoBase64;
       updates.photoMime   = photoMime;
     } else {
@@ -5087,6 +5097,10 @@ async function autoLinkPatientSessions(uid, db) {
   let email = null;
   try {
     const user = await admin.auth().getUser(uid);
+    // E-mail não confirmado não prova posse da caixa de entrada — sem isso,
+    // qualquer um poderia cadastrar o e-mail de outra pessoa e herdar as
+    // sessões dela. Vínculo fica pendente até o e-mail ser verificado.
+    if (!user.emailVerified) return { linked: 0 };
     email = (user.email || "").trim().toLowerCase();
   } catch { return { linked: 0 }; }
   if (!email) return { linked: 0 };
@@ -10242,6 +10256,19 @@ router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
 
   if (type !== "payment" || !paymentId) return;
 
+  // MP já recebeu 200 (acima) e não reenvia mais este evento — se a busca do
+  // pagamento falhar daqui pra frente, a única forma de não perder a
+  // confirmação é deixar um registro durável pra reconciliação manual, já
+  // que o log sozinho não é monitorado ativamente.
+  const registerWebhookFailure = (reason, detail) =>
+    getDb().collection("therapy_webhook_failures").doc(String(paymentId)).set({
+      paymentId: String(paymentId),
+      reason,
+      detail: String(detail || "").slice(0, 500),
+      resolved: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true }).catch(() => {});
+
   let payment;
   try {
     const { response, data } = await mercadoPagoFetchTherapy(
@@ -10250,11 +10277,13 @@ router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
     );
     if (!response.ok) {
       logWarn("webhook_pagamento_mp_lookup_failed", { paymentId, status: response.status });
+      await registerWebhookFailure("mp_lookup_failed", `status ${response.status}`);
       return;
     }
     payment = data;
   } catch (err) {
     logError("webhook_pagamento_fetch_error", err, { paymentId });
+    await registerWebhookFailure("mp_fetch_error", err.message);
     return;
   }
 
@@ -10267,38 +10296,45 @@ router.post("/therapy/webhook/pagamento", asyncHandler(async (req, res) => {
   if (!requestId) return;
 
   const db = getDb();
-  const snap = await db.collection("therapy_scheduling_requests").doc(requestId).get();
-  if (!snap.exists) {
-    logWarn("webhook_pagamento_solicitacao_nao_encontrada", { requestId, paymentId });
-    return;
+  try {
+    const snap = await db.collection("therapy_scheduling_requests").doc(requestId).get();
+    if (!snap.exists) {
+      logWarn("webhook_pagamento_solicitacao_nao_encontrada", { requestId, paymentId });
+      return;
+    }
+    const reqData = snap.data();
+    if (reqData.paymentStatus === "paid") {
+      logInfo("webhook_pagamento_duplicado_ignorado", { requestId, paymentId });
+      return;
+    }
+
+    await db.collection("therapy_scheduling_requests").doc(requestId).update({
+      paymentStatus: "paid",
+      paymentId:     String(payment.id),
+      paymentPaidAt: Date.now(),
+      updatedAt:     admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Repasse pendente — processado manualmente ou por automação futura.
+    const valorCentavos = reqData.valorConsulta || 6000;
+    await db.collection("therapy_payouts").doc(`pout_${requestId}`).set({
+      requestId,
+      therapistUid:   reqData.therapistUid,
+      therapistSlug:  reqData.therapistSlug,
+      patientName:    reqData.patientName,
+      paymentId:      String(payment.id),
+      valor:          valorCentavos,
+      status:         "pending",
+      createdAt:      admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    logInfo("pix_pagamento_confirmado", { requestId, paymentId: String(payment.id), valor: valorCentavos });
+  } catch (err) {
+    // Pagamento já está approved no MP e o 200 já foi enviado — sem este
+    // registro, essa aprovação se perde silenciosamente.
+    logError("webhook_pagamento_persist_error", err, { requestId, paymentId });
+    await registerWebhookFailure("persist_error", err.message);
   }
-  const reqData = snap.data();
-  if (reqData.paymentStatus === "paid") {
-    logInfo("webhook_pagamento_duplicado_ignorado", { requestId, paymentId });
-    return;
-  }
-
-  await db.collection("therapy_scheduling_requests").doc(requestId).update({
-    paymentStatus: "paid",
-    paymentId:     String(payment.id),
-    paymentPaidAt: Date.now(),
-    updatedAt:     admin.firestore.FieldValue.serverTimestamp()
-  });
-
-  // Repasse pendente — processado manualmente ou por automação futura.
-  const valorCentavos = reqData.valorConsulta || 6000;
-  await db.collection("therapy_payouts").doc(`pout_${requestId}`).set({
-    requestId,
-    therapistUid:   reqData.therapistUid,
-    therapistSlug:  reqData.therapistSlug,
-    patientName:    reqData.patientName,
-    paymentId:      String(payment.id),
-    valor:          valorCentavos,
-    status:         "pending",
-    createdAt:      admin.firestore.FieldValue.serverTimestamp()
-  });
-
-  logInfo("pix_pagamento_confirmado", { requestId, paymentId: String(payment.id), valor: valorCentavos });
 }));
 
 // POST /public/leads/estudante — landing page pública: interessado no tier
@@ -19519,6 +19555,11 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   const userRecord = await admin.auth().getUser(uid);
   const email = userRecord.email?.toLowerCase();
   if (!email) return res.json({ ok: true, sessions: [] });
+  // Sem confirmação do e-mail, o vínculo por patientEmail não prova posse da
+  // caixa de entrada — deixaria qualquer um herdar sessões cadastrando o
+  // e-mail de outra pessoa. Enquanto não verificado, só entram sessões já
+  // vinculadas por UID (patientUid/patientAccountUid), nunca por e-mail.
+  const emailVerified = userRecord.emailVerified === true;
 
   const db  = getDb();
   const now = Date.now();
@@ -19533,9 +19574,9 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
   const linkedStudentIds = (linkedStudentsSnap?.docs || []).map(doc => doc.id);
 
   const [byEmail, byUid, byAccountUid, ...byStudent] = await Promise.all([
-    db.collection("therapy_sessions")
-      .where("patientEmail", "==", email)
-      .get().catch(() => null),
+    emailVerified
+      ? db.collection("therapy_sessions").where("patientEmail", "==", email).get().catch(() => null)
+      : Promise.resolve(null),
     db.collection("therapy_sessions")
       .where("patientUid", "==", uid)
       .get().catch(() => null),
@@ -19597,9 +19638,10 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
 
   // Inclui solicitações pendentes (therapy_scheduling_requests) que ainda não
   // viraram sessão. Só status "pending" — aprovadas já geram therapy_sessions.
-  const reqSnap = await db.collection("therapy_scheduling_requests")
-    .where("patientEmail", "==", email)
-    .get().catch(() => null);
+  // Também depende de e-mail verificado, pelo mesmo motivo do byEmail acima.
+  const reqSnap = emailVerified
+    ? await db.collection("therapy_scheduling_requests").where("patientEmail", "==", email).get().catch(() => null)
+    : null;
 
   const pendingRequests = reqSnap?.docs || [];
   if (pendingRequests.length > 0) {
@@ -19727,9 +19769,11 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
   const session = sessionSnap.data();
   const email = String(userRecord.email || "").trim().toLowerCase();
   const sessionEmail = String(session.patientEmail || "").trim().toLowerCase();
+  // Posse por e-mail só conta com e-mail confirmado — do contrário, cadastrar
+  // o e-mail de um paciente real bastaria pra entrar na consulta dele.
   let ownsSession = session.patientAccountUid === uid
     || session.patientUid === uid
-    || Boolean(email && sessionEmail && email === sessionEmail);
+    || Boolean(userRecord.emailVerified && email && sessionEmail && email === sessionEmail);
   if (!ownsSession && session.studentId) {
     const studentSnap = await getDb().collection("therapy_estudantes").doc(String(session.studentId)).get();
     if (studentSnap.exists) {
@@ -19829,6 +19873,10 @@ router.get("/therapy/paciente/documentos", asyncHandler(async (req, res) => {
   const userRecord = await admin.auth().getUser(uid);
   const email = userRecord.email?.toLowerCase();
   if (!email) return res.json({ ok: true, items: [] });
+  // Recibos/receitas/atestados só são buscados por e-mail — sem confirmação,
+  // qualquer um poderia cadastrar o e-mail de um paciente real e ler os
+  // documentos clínicos dele. Fica vazio até o e-mail ser verificado.
+  if (!userRecord.emailVerified) return res.json({ ok: true, items: [] });
 
   const db = getDb();
   const cutoff = Date.now() - 730 * 24 * 3600 * 1000; // 2 anos

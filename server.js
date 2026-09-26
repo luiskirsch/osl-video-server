@@ -116,6 +116,19 @@ const trustedProxyHops = Number.isSafeInteger(trustedProxyHopsRaw) && trustedPro
   : (IS_PRODUCTION ? 1 : 0);
 app.set("trust proxy", trustedProxyHops);
 
+// Redireciona pra HTTPS só quando a borda (Railway) explicitamente marcou a
+// requisição como HTTP. Ausência do header x-forwarded-proto = requisição
+// direta ao container (ex.: healthcheck interno da própria Railway) — nunca
+// redireciona nesse caso, pra não derrubar o healthcheck.
+if (IS_PRODUCTION) {
+  app.use((req, res, next) => {
+    if (req.headers["x-forwarded-proto"] === "http") {
+      return res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
+    }
+    next();
+  });
+}
+
 // Identidade e telemetria entram antes dos middlewares que podem encerrar a
 // requisição, cobrindo também bloqueios de CORS, WAF e rate limit.
 app.use((req, res, next) => {

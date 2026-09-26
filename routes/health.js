@@ -22,14 +22,20 @@ function readCookie(req, name) {
   return "";
 }
 
-function checkPanelToken(req) {
-  const fromQuery  = req.query.token || "";
-  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
-  const fromCookie = readCookie(req, PANEL_COOKIE);
-  const token = fromHeader || fromCookie || fromQuery;
+function verifyPanelToken(token) {
   if (!token || !ADMIN_SECRET) return false;
   const r = verifySignedToken(token, ADMIN_SECRET);
   return r.valid && r.payload?.token_type === "panel_session";
+}
+
+function checkPanelToken(req) {
+  // Sem query string de propósito: token em URL vaza em log de proxy/CDN e
+  // fica no histórico do navegador a cada requisição repetida (health, SSE
+  // de log). O link mágico de /panel usa verifyPanelToken direto, uma única
+  // vez, e migra pra cookie HttpOnly antes de qualquer outra chamada.
+  const fromHeader = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  const fromCookie = readCookie(req, PANEL_COOKIE);
+  return verifyPanelToken(fromHeader || fromCookie);
 }
 
 function firebaseProjectId() {
@@ -90,7 +96,11 @@ router.get("/health", (req, res) => {
 });
 
 router.get("/panel", (req, res) => {
-  if (!checkPanelToken(req)) {
+  // Único lugar que ainda aceita o token via query string: é o link mágico
+  // de entrada. Validado direto (sem passar por checkPanelToken) e migrado
+  // pra cookie HttpOnly antes de qualquer outra requisição acontecer.
+  const bootstrapping = typeof req.query.token === "string" && verifyPanelToken(req.query.token);
+  if (!checkPanelToken(req) && !bootstrapping) {
     return res.status(403).json({ ok: false, error: "ADMIN_SECRET_INVALIDO" });
   }
   // Migra o token recebido uma única vez na URL para cookie HttpOnly. Assim
