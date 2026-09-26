@@ -2,10 +2,16 @@
 
 Este documento é um *gate de produção*, não uma declaração de que o serviço já esteja habilitado. O programa proposto oferece até duas sessões de psicologia cobertas por colaborador elegível e por mês de calendário em `America/Sao_Paulo`. Sessões adicionais dependem de pagamento confirmado; o preço ao colaborador deve preservar R$ 60 **líquidos** para a profissional ou o profissional pessoa física, após as retenções aplicáveis.
 
-## Antes de divulgar ou vender
+## Assinatura e implantação não são início dos atendimentos
+
+O contrato com a Campi pode prever uma **fase de implantação após a assinatura**, com prazo estendido definido na minuta e início da RT durante essa fase. A assinatura não deve ser apresentada como liberação imediata do benefício: a preparação administrativa pode ocorrer, mas acesso clínico, agendamento e consultas só começam na **data de ativação**, após os requisitos abaixo serem comprovados. A data inicial da mensalidade e eventual taxa de implantação devem ser pactuadas expressamente; a recomendação é não cobrar mensalidade de atendimento antes da ativação. Confirmar a estrutura contratual com assessoria jurídica e com o CRP-MG antes de prometer uma data.
+
+A minuta precisa distinguir data de assinatura, prazo máximo de implantação, condições para ativação, data inicial de faturamento, comunicação aos colaboradores e consequência caso a ativação não ocorra no prazo (prorrogação acordada ou rescisão sem cobrança por serviço não prestado). A RT deve participar da aprovação dos protocolos e da rede antes do primeiro atendimento; mera contratação futura não substitui a regularidade da pessoa jurídica.
+
+## Antes de ativar o benefício e iniciar atendimentos
 
 - [ ] RT contratada, responsabilidades clínicas e carga horária formalizadas, documentação da pessoa jurídica concluída e enquadramento/regularidade confirmados pelo CRP-MG. Uma cotação de RT não substitui esses passos. Não anunciar inscrição, habilitação ou cobertura de urgência sem comprovação.
-- [ ] Contrato com a empresa define vidas elegíveis, confirmação e revogação de vínculo pelo RH, preço por vida, início/vigência, as duas sessões cobertas, extra pago pelo colaborador, reagendamento, faltas, cancelamento, reajuste e responsabilidades de cada parte.
+- [ ] Contrato com a empresa define vidas elegíveis, confirmação e revogação de vínculo pelo RH, preço por vida, assinatura versus ativação/faturamento, prazo máximo de implantação, as duas sessões cobertas, extra pago pelo colaborador, reagendamento, faltas, cancelamento, reajuste e responsabilidades de cada parte.
 - [ ] Rede de psicólogas(os) regular e suficiente para as duas unidades, com horários, continuidade terapêutica, substituições, tempo máximo de acesso e canal de suporte testados. Critérios de crise, encaminhamento e indisponibilidade devem ser aprovados pela RT.
 - [ ] Contabilidade valida CNAE/segregação da receita, anexo e alíquota efetiva do Simples, tratamento do RPA de CPF, INSS, IRRF por competência, eventual CPP fora do DAS e emissão dos comprovantes. O cálculo da sessão extra não pode partir apenas dos R$ 60 líquidos.
 - [ ] Taxa de Pix **da conta Mercado Pago usada em produção** e custos de repasse/reembolso confirmados. Configuração financeira homologada antes de habilitar a cobrança; não usar taxa pública ou estimada como verdade contratual.
@@ -24,6 +30,6 @@ O preço adicional é obtido por `ceil((ceil(6000/(1-retenções)) × (1+encargo
 
 ## Decisão de lançamento
 
-Somente marcar o programa como apto a contratos depois de evidenciar todos os itens acima, testar em homologação e obter aprovação da RT, da contabilidade e da operação. Uma funcionalidade no repositório, por si só, não demonstra atendimento clínico disponível ou regularidade profissional.
+É possível negociar uma assinatura **condicionada à implantação**, desde que o contrato não prometa atendimento imediato. Somente ativar o benefício e divulgar a disponibilidade de consultas aos colaboradores depois de evidenciar todos os itens acima, testar em homologação e obter aprovação da RT, da contabilidade e da operação. Uma funcionalidade no repositório, por si só, não demonstra atendimento clínico disponível ou regularidade profissional.
 
 Referências oficiais: [CRP-MG — Pessoa Jurídica](https://crp04.org.br/servicos/pessoa-juridica/); [Receita Federal — CPP e Anexo IV](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/declaracoes-e-demonstrativos/revisao-de-declaracao-malha/pj-parametro-40.001); [Mercado Pago — integração Pix](https://www.mercadopago.com.br/developers/pt/docs/checkout-api-payments/integration-configuration/integrate-pix).
