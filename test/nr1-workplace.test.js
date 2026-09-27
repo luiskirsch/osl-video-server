@@ -102,4 +102,6 @@ test("respostas ficam cifradas e vinculadas à campanha, sem texto legível no b
   assert.deepEqual(nr1.openResponse(sealed, secret, "campaign-a"), { unitId: "u1", answers });
   assert.throws(() => nr1.openResponse(sealed, secret, "campaign-b"));
   assert.throws(() => nr1.openResponse({ ...sealed, ciphertext: "AAAA" }, secret, "campaign-a"));
+  assert.throws(() => nr1.openResponse({ ...sealed, tag: sealed.tag.slice(0, -2) }, secret, "campaign-a"),
+    /NR1_AUTH_TAG_INVALIDA/);
 });

@@ -232,7 +232,8 @@ function surveyKey(secret) {
 
 function sealResponse(response, secret, campaignId) {
   const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", surveyKey(secret), nonce);
+  const cipher = crypto.createCipheriv("aes-256-gcm", surveyKey(secret), nonce,
+    { authTagLength: 16 });
   cipher.setAAD(Buffer.from(String(campaignId)));
   const ciphertext = Buffer.concat([
     cipher.update(Buffer.from(JSON.stringify(response), "utf8")), cipher.final()
@@ -242,10 +243,12 @@ function sealResponse(response, secret, campaignId) {
 }
 
 function openResponse(sealed, secret, campaignId) {
+  const tag = Buffer.from(sealed.tag, "base64url");
+  if (tag.length !== 16) throw new Error("NR1_AUTH_TAG_INVALIDA");
   const decipher = crypto.createDecipheriv("aes-256-gcm", surveyKey(secret),
-    Buffer.from(sealed.nonce, "base64url"));
+    Buffer.from(sealed.nonce, "base64url"), { authTagLength: 16 });
   decipher.setAAD(Buffer.from(String(campaignId)));
-  decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
+  decipher.setAuthTag(tag);
   return JSON.parse(Buffer.concat([
     decipher.update(Buffer.from(sealed.ciphertext, "base64url")), decipher.final()
   ]).toString("utf8"));
