@@ -1,7 +1,15 @@
 // Script único: aprova colaborador(es) por e-mail em therapy_colaboradores
-// (status:"ativo" + eligibilityVerifiedAt) e ativa a empresa vinculada se
-// ela ainda não estiver com benefício ativo. Só toca em registros que já
-// existem — não cria colaborador nem empresa do zero.
+// (status:"ativo" + eligibilityVerifiedAt + benefitEligible:true) e ativa a
+// empresa vinculada se ela ainda não estiver com benefício ativo. Só toca em
+// registros que já existem — não cria colaborador nem empresa do zero.
+//
+// IMPORTANTE: desde o commit d9c8d54 ("separar vinculo beneficio e escopo
+// nr1"), resolveCorporateEmployee() exige benefitEligible !== false além de
+// status:"ativo" — setar só o status (como a v1 deste script fazia) NÃO É
+// SUFICIENTE pra liberar o benefício. Também setamos employmentType (default
+// "outro" se ausente) porque a rota HTTP /therapy/admin/colaboradores/:id
+// agora exige isso pra aceitar status:"ativo" — mantemos o requisito aqui
+// por consistência, mesmo escrevendo direto no Firestore.
 //
 // Uso: EMAILS="a@x.com,b@y.com" CONFIRM_FIREBASE_PROJECT=<project_id> node scripts/force-approve-colaboradores.js
 //
@@ -50,17 +58,19 @@ const { assertFirebaseProjectConfirmed } = require("./confirm-firebase-project")
       const c = doc.data();
       console.log(`  Colaborador ${doc.id} — empresa ${c.empresaNome || c.empresaId || "?"} — status atual: ${c.status || "pendente"}`);
 
-      if (c.status !== "ativo") {
-        await doc.ref.set({
-          status: "ativo",
-          eligibilityVerifiedAt: c.eligibilityVerifiedAt || Date.now(),
-          eligibilityVerifiedBy: "script:force-approve-colaboradores",
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        console.log("  → status atualizado para ativo.");
-      } else {
-        console.log("  → já estava ativo.");
-      }
+      // Escrita incondicional e idempotente — nunca pular com base em
+      // status já estar "ativo", senão numa 2a rodada benefitEligible/
+      // employmentType nunca seriam corrigidos se só status já tivesse
+      // sido setado numa rodada anterior (bug real da v1 deste script).
+      await doc.ref.set({
+        status: "ativo",
+        employmentType: c.employmentType || "outro",
+        benefitEligible: true,
+        eligibilityVerifiedAt: c.eligibilityVerifiedAt || Date.now(),
+        eligibilityVerifiedBy: "script:force-approve-colaboradores",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      console.log(`  → status:ativo, employmentType:${c.employmentType || "outro"}, benefitEligible:true (era status=${c.status || "pendente"}, benefitEligible=${c.benefitEligible}).`);
 
       if (c.empresaId) {
         const empresaRef = db.collection("therapy_empresas").doc(c.empresaId);
