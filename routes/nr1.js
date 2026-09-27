@@ -90,9 +90,18 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       .update(`nr1-roster-v1:${email}`).digest("hex");
     const roster = await getDb().collection("nr1_participants")
       .where("lookupHash", "==", lookupHash).limit(50).get();
-    const companyIds = [...new Set(roster.docs.filter(doc => doc.data().status === "active")
-      .map(doc => doc.data().companyId))].filter(Boolean).filter(id => !roster.docs.some(doc =>
-      doc.data().companyId === id && doc.data().status === "revoked"));
+    const revokedCompanyIds = new Set(roster.docs.filter(doc => doc.data().status === "revoked")
+      .map(doc => doc.data().companyId).filter(Boolean));
+    const corporateEmployees = await getDb().collection("therapy_colaboradores")
+      .where("email", "==", email).limit(20).get();
+    const companyIds = [...new Set([
+      ...roster.docs.filter(doc => doc.data().status === "active")
+        .map(doc => doc.data().companyId),
+      ...corporateEmployees.docs.filter(doc => doc.data().status === "ativo"
+        && doc.data().eligibilityVerifiedAt
+        && (!doc.data().patientAccountUid || doc.data().patientAccountUid === uid))
+        .map(doc => doc.data().empresaId)
+    ])].filter(Boolean).filter(id => !revokedCompanyIds.has(id));
     if (!companyIds.length) {
       sendError(res, 403, "COLABORADOR_NAO_APROVADO"); return null;
     }
@@ -233,7 +242,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       action: "participants_registered", count: emails.length, at: stamp() });
     const delivery = { sent: 0, skipped: 0, failed: 0 };
     if (req.body?.sendInvites !== false) {
-      const surveyUrl = `${String(THERAPY_FRONTEND_BASE).replace(/\/$/, "")}/paciente-nr1.html`;
+      const surveyUrl = `${String(THERAPY_FRONTEND_BASE).replace(/\/$/, "")}/app/nr1.html`;
       for (let offset = 0; offset < emails.length; offset += 10) {
         const outcomes = await Promise.all(emails.slice(offset, offset + 10).map(email => sendEmail({
           to: email,

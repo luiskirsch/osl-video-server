@@ -71,6 +71,7 @@ const {
   selectTherapyPanelSessions
 } = require("../services/therapy-session-state");
 const studentDevelopment = require("../services/student-development");
+const corporateDevelopment = require("../services/corporate-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
 const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
@@ -10020,6 +10021,88 @@ async function resolveCorporateEmployee(db, uid) {
 }
 
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
+// Jornada educativa do colaborador. O progresso é operacional e separado de
+// prontuários, humor, consultas e respostas da NR-1. A conclusão é validada no
+// servidor e não depende de flags controladas pelo navegador.
+router.get("/therapy/paciente/colaborador/jornada", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const db = getDb();
+  const corporate = await resolveCorporateEmployee(db, uid);
+  if (corporate.reason) return sendError(res, 403, corporate.reason);
+  const companyId = corporate.companyDoc.id;
+  const progressSnap = await db.collection("therapy_employee_development")
+    .doc(`${companyId}_${uid}`).get();
+  return res.json({ ok: true,
+    employee: {
+      name: corporate.employeeDoc.data().nome || null,
+      companyName: corporate.companyDoc.data().nome || null,
+      department: corporate.employeeDoc.data().departamento || null,
+      role: corporate.employeeDoc.data().cargo || null
+    },
+    ...corporateDevelopment.publicCatalog(progressSnap.exists ? progressSnap.data() : {})
+  });
+}));
+
+router.post("/therapy/paciente/colaborador/jornada/modules/:moduleId/complete",
+  asyncHandler(async (req, res) => {
+    if (!ensureDb(res)) return;
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+    const validation = corporateDevelopment.validateCompletion(req.params.moduleId, req.body?.answer);
+    if (!validation.ok) {
+      return sendError(res, validation.error === "RESPOSTA_INCORRETA" ? 422 : 400,
+        validation.error, validation.explanation ? { explanation: validation.explanation } : undefined);
+    }
+    const db = getDb();
+    const corporate = await resolveCorporateEmployee(db, uid);
+    if (corporate.reason) return sendError(res, 403, corporate.reason);
+    const companyId = corporate.companyDoc.id;
+    const progressRef = db.collection("therapy_employee_development").doc(`${companyId}_${uid}`);
+    const prerequisiteId = corporateDevelopment.prerequisiteFor(validation.item.module.id);
+    let alreadyCompleted = false;
+    try {
+      await db.runTransaction(async tx => {
+        const snapshot = await tx.get(progressRef);
+        const current = snapshot.exists ? snapshot.data() : {};
+        const completedModules = corporateDevelopment.cleanCompleted(current.completedModules);
+        if (prerequisiteId && !completedModules[prerequisiteId]) {
+          const error = new Error("MODULO_ANTERIOR_PENDENTE");
+          error.code = "MODULE_PREREQUISITE";
+          throw error;
+        }
+        alreadyCompleted = Boolean(completedModules[validation.item.module.id]);
+        if (!alreadyCompleted) completedModules[validation.item.module.id] = Date.now();
+        tx.set(progressRef, {
+          companyId,
+          employeeId: corporate.employeeDoc.id,
+          employeeUid: uid,
+          catalogVersion: "2026.1",
+          completedModules,
+          createdAt: current.createdAt || admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      });
+    } catch (error) {
+      if (error?.code === "MODULE_PREREQUISITE") {
+        return sendError(res, 409, "MODULO_ANTERIOR_PENDENTE");
+      }
+      throw error;
+    }
+    await logAudit({
+      type: alreadyCompleted ? "employee_learning_reviewed" : "employee_learning_completed",
+      patientAccountUid: uid,
+      companyId,
+      moduleId: validation.item.module.id,
+      courseId: validation.item.course.id
+    });
+    const fresh = await progressRef.get();
+    return res.json({ ok: true, alreadyCompleted,
+      explanation: validation.explanation,
+      ...corporateDevelopment.publicCatalog(fresh.data()) });
+  }));
+
 router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const slug = String(req.params.slug || "").trim().toLowerCase();
