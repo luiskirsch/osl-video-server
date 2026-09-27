@@ -99,6 +99,8 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
         .map(doc => doc.data().companyId),
       ...corporateEmployees.docs.filter(doc => doc.data().status === "ativo"
         && doc.data().eligibilityVerifiedAt
+        && doc.data().benefitEligible !== false
+        && doc.data().nr1Scope !== "excluded"
         && (!doc.data().patientAccountUid || doc.data().patientAccountUid === uid))
         .map(doc => doc.data().empresaId)
     ])].filter(Boolean).filter(id => !revokedCompanyIds.has(id));

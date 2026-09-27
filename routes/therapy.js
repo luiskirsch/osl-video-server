@@ -10007,7 +10007,8 @@ async function resolveCorporateEmployee(db, uid) {
     || !doc.data().patientAccountUid);
   if (!matching.length) return { reason: "COLABORADOR_NAO_ENCONTRADO", email };
   const approved = matching.filter(doc => doc.data().status === "ativo"
-    && doc.data().eligibilityVerifiedAt);
+    && doc.data().eligibilityVerifiedAt
+    && doc.data().benefitEligible !== false);
   if (approved.length !== 1) return {
     reason: approved.length ? "VINCULO_CORPORATIVO_AMBIGUO" : "COLABORADOR_NAO_APROVADO", email
   };
@@ -17265,6 +17266,8 @@ router.get("/public/empresa/:slug", asyncHandler(async (req, res) => {
   });
 }));
 
+const corporateEligibility = require("../services/corporate-eligibility");
+
 // POST /public/colaborador-cadastro — auto-registro de funcionário
 router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -17304,6 +17307,11 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
     cpf: cpf ? String(cpf).trim() : null,
     departamento: departamento ? String(departamento).trim() : null,
     cargo: cargo ? String(cargo).trim() : null,
+    // O auto cadastro nunca define a natureza do vínculo nem o escopo de SST.
+    // Esses dados dependem de conferência da empresa/administração técnica.
+    employmentType: null,
+    benefitEligible: false,
+    nr1Scope: "technical_review",
     empresaId: empDoc.id,
     empresaNome: empresa.nome,
     empresaSlug: empresa.slug,
@@ -17425,6 +17433,9 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
       empresaSlug:        codigoEmpresa,
       patientAccountUid:  uid,
       status:             "pendente",
+      employmentType:     null,
+      benefitEligible:    false,
+      nr1Scope:            "technical_review",
       createdAt:          admin.firestore.FieldValue.serverTimestamp()
     });
     await empSnap.docs[0].ref.update({
@@ -17469,6 +17480,7 @@ router.get("/therapy/admin/colaboradores", asyncHandler(async (req, res) => {
       cpf: c.cpf || null,
       departamento: c.departamento || null,
       cargo: c.cargo || null,
+      ...corporateEligibility.publicEligibility(c),
       empresaId: c.empresaId || null,
       empresaNome: c.empresaNome || null,
       status: c.status || "pendente",
@@ -17507,13 +17519,35 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
   for (const k of allowed) {
     if (req.body?.[k] !== undefined) updates[k] = req.body[k];
   }
+  if (req.body?.employmentType !== undefined) {
+    const employmentType = corporateEligibility.normalizeEmploymentType(req.body.employmentType);
+    if (!employmentType) return sendError(res, 400, "TIPO_VINCULO_INVALIDO");
+    updates.employmentType = employmentType;
+  }
+  if (req.body?.benefitEligible !== undefined) {
+    if (typeof req.body.benefitEligible !== "boolean") {
+      return sendError(res, 400, "ELEGIBILIDADE_BENEFICIO_INVALIDA");
+    }
+    updates.benefitEligible = req.body.benefitEligible;
+  }
+  if (req.body?.nr1Scope !== undefined) {
+    if (!["included", "excluded", "technical_review"].includes(req.body.nr1Scope)) {
+      return sendError(res, 400, "ESCOPO_NR1_INVALIDO");
+    }
+    updates.nr1Scope = req.body.nr1Scope;
+  }
   if (req.body?.status !== undefined) {
     if (!["pendente", "ativo", "inativo"].includes(req.body.status)) {
       return sendError(res, 400, "STATUS_COLABORADOR_INVALIDO");
     }
     if (req.body.status === "ativo") {
+      const effectiveEmploymentType = updates.employmentType || currentSnap.data().employmentType;
+      if (!corporateEligibility.normalizeEmploymentType(effectiveEmploymentType)) {
+        return sendError(res, 400, "TIPO_VINCULO_OBRIGATORIO");
+      }
       updates.eligibilityVerifiedAt = currentSnap.data().eligibilityVerifiedAt || Date.now();
       updates.eligibilityVerifiedBy = adminAuth.uid;
+      if (req.body?.benefitEligible === undefined) updates.benefitEligible = true;
     } else {
       updates.eligibilityVerifiedAt = admin.firestore.FieldValue.delete();
       updates.eligibilityVerifiedBy = admin.firestore.FieldValue.delete();
