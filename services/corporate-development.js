@@ -235,6 +235,56 @@ const TRACKS = [
         ]
       }
     ]
+  },
+  {
+    id: "primeiros_socorros",
+    title: "Primeiros socorros",
+    eyebrow: "Resposta a emergências",
+    description: "Saiba reconhecer uma emergência, acionar o socorro certo e agir com segurança até a ajuda especializada chegar.",
+    color: "coral",
+    courses: [
+      {
+        id: "primeiros_socorros_no_trabalho",
+        title: "Primeiros socorros no trabalho",
+        description: "Reconheça emergências e aja com segurança até a chegada do socorro especializado.",
+        modules: [
+          {
+            id: "reconhecendo_uma_emergencia",
+            title: "Reconhecendo uma emergência",
+            durationMinutes: 8,
+            objective: "Identificar sinais de emergência e acionar o socorro adequado sem perder tempo.",
+            sections: [
+              ["Observe a cena antes de agir", "Antes de se aproximar, verifique se há risco (fogo, eletricidade, trânsito, gás). Sua segurança vem primeiro — socorrista ferido não ajuda ninguém."],
+              ["Reconheça sinais graves", "Perda de consciência, dificuldade grave para respirar, sangramento intenso, dor no peito, convulsão ou queda com impacto forte pedem ajuda profissional imediata."],
+              ["Acione o serviço certo", "Ligue 192 (SAMU) para emergências de saúde. Para incêndio ou risco estrutural, acione a brigada do local e o corpo de bombeiros. Informe o endereço exato e o que aconteceu, e siga as orientações de quem atender até a equipe chegar."]
+            ],
+            quiz: {
+              question: "Ao se deparar com uma emergência, qual deve ser o primeiro passo?",
+              options: ["Agir imediatamente, mesmo sem avaliar o risco", "Verificar se o local é seguro antes de se aproximar", "Esperar alguém mais experiente chegar sem fazer nada"],
+              answer: 1,
+              explanation: "Avaliar a segurança da cena evita que quem ajuda também se machuque, o que só agrava a situação."
+            }
+          },
+          {
+            id: "enquanto_o_socorro_chega",
+            title: "Enquanto o socorro chega",
+            durationMinutes: 7,
+            objective: "Oferecer apoio seguro a alguém em emergência até a chegada de socorro especializado, sem realizar procedimentos que exigem treinamento certificado.",
+            sections: [
+              ["Este conteúdo não substitui um curso certificado", "Manobras como reanimação cardiopulmonar exigem treinamento presencial certificado. Aqui o foco é o que fazer com segurança enquanto o socorro não chega."],
+              ["Mantenha a pessoa segura e calma", "Não mova quem sofreu uma queda ou acidente, a menos que haja risco iminente (fogo, afogamento, trânsito). Fale com calma, mantenha a pessoa consciente e monitore a respiração."],
+              ["Não ofereça comida, bebida ou remédio", "Uma pessoa ferida ou com alteração de consciência pode se engasgar. Espere a avaliação de quem está capacitado antes de oferecer qualquer coisa."]
+            ],
+            quiz: {
+              question: "Uma pessoa caiu e está machucada, mas consciente e em local seguro. O que fazer enquanto o socorro não chega?",
+              options: ["Movê-la imediatamente para uma posição mais confortável", "Mantê-la parada, calma e monitorada, sem mover", "Oferecer água para ela se acalmar"],
+              answer: 1,
+              explanation: "Mover uma pessoa ferida sem necessidade pode agravar lesões; o mais seguro é mantê-la parada e monitorada até a chegada do socorro."
+            }
+          }
+        ]
+      }
+    ]
   }
 ];
 
