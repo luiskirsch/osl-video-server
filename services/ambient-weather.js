@@ -236,9 +236,23 @@ async function fetchWeather(lat, lon) {
   return classifySymbol(now?.next_1_hours?.summary?.symbol_code || now?.next_6_hours?.summary?.symbol_code);
 }
 
+function normalizeCoordinates(lat, lon) {
+  const latitude = Number(lat);
+  const longitude = Number(lon);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  // A grade do Locationforecast e quilometrica. Duas casas preservam a
+  // regiao correta sem enviar precisao residencial desnecessaria ao MET.
+  return {
+    lat: Math.round(latitude * 100) / 100,
+    lon: Math.round(longitude * 100) / 100
+  };
+}
+
 async function weatherFor(lat, lon) {
-  const rLat = Math.round(lat * 10) / 10;
-  const rLon = Math.round(lon * 10) / 10;
+  const coordinates = normalizeCoordinates(lat, lon);
+  if (!coordinates) return null;
+  const { lat: rLat, lon: rLon } = coordinates;
   const key = `${rLat},${rLon}`;
   const hit = weatherCache.get(key);
   if (hit && hit.expires > Date.now()) return hit.value;
@@ -255,6 +269,15 @@ async function weatherFor(lat, lon) {
   return pending;
 }
 
+async function getAmbientWeatherAt({ lat, lon }) {
+  if (!normalizeCoordinates(lat, lon)) return null;
+  try {
+    return await weatherFor(lat, lon);
+  } catch {
+    return null;
+  }
+}
+
 async function getAmbientWeather({ ip, connection, mobileDevice }) {
   ensureGeoLoaded();
   const loc = lookup(ip);
@@ -268,6 +291,7 @@ async function getAmbientWeather({ ip, connection, mobileDevice }) {
 
 module.exports = {
   getAmbientWeather,
+  getAmbientWeatherAt,
   warmUp: ensureGeoLoaded,
-  _test: { parseIp, ipv6High64, parseCityLine, parseAsnLine, newTable, freeze, lookup, isLocationReliable, classifySymbol, candidateMonths }
+  _test: { parseIp, ipv6High64, parseCityLine, parseAsnLine, newTable, freeze, lookup, isLocationReliable, classifySymbol, candidateMonths, normalizeCoordinates }
 };

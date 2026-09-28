@@ -76,3 +76,11 @@ test("tenta o mês atual e o anterior da base DB-IP", () => {
   assert.deepEqual(_test.candidateMonths(new Date(Date.UTC(2026, 0, 1))), ["2026-01", "2025-12"]);
   assert.deepEqual(_test.candidateMonths(new Date(Date.UTC(2026, 8, 28))), ["2026-09", "2026-08"]);
 });
+
+test("valida e reduz coordenadas do dispositivo para precisão regional", () => {
+  assert.deepEqual(_test.normalizeCoordinates(-23.55052, -46.633308), { lat: -23.55, lon: -46.63 });
+  assert.deepEqual(_test.normalizeCoordinates("-29.3211", "-49.7243"), { lat: -29.32, lon: -49.72 });
+  assert.equal(_test.normalizeCoordinates(91, 0), null);
+  assert.equal(_test.normalizeCoordinates(0, -181), null);
+  assert.equal(_test.normalizeCoordinates("invalid", 0), null);
+});

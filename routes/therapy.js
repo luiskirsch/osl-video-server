@@ -5244,7 +5244,14 @@ router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
 // categoria do tempo — nunca cidade/coordenadas — e nada é gravado.
 // `conn` vem de navigator.connection.type (Chrome Android) e ajuda a separar
 // Wi-Fi de 4G quando a operadora usa o mesmo ASN para os dois.
-router.get("/therapy/paciente/ambiente", asyncHandler(async (req, res) => {
+const ambientWeatherLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+router.get("/therapy/paciente/ambiente", ambientWeatherLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
@@ -5256,7 +5263,22 @@ router.get("/therapy/paciente/ambiente", asyncHandler(async (req, res) => {
     mobileDevice
   });
   res.set("Cache-Control", "private, no-store");
-  return res.json({ ok: true, weather });
+  return res.json({ ok: true, weather, source: weather ? "ip" : null });
+}));
+
+// Device coordinates are preferred when the collaborator grants browser
+// permission. The service rounds them to regional precision and never stores,
+// logs or returns them.
+router.post("/therapy/paciente/ambiente", ambientWeatherLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const weather = await ambientWeather.getAmbientWeatherAt({
+    lat: req.body?.lat,
+    lon: req.body?.lon
+  });
+  res.set("Cache-Control", "private, no-store");
+  return res.json({ ok: true, weather, source: weather ? "device" : null });
 }));
 
 // PATCH /therapy/paciente/perfil — paciente atualiza campos opt-in/preferências
