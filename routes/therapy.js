@@ -18,6 +18,7 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const admin   = require("firebase-admin");
 const crypto  = require("crypto");
 const geoipCountry = require("geoip-country");
+const ambientWeather = require("../services/ambient-weather");
 const { AccessToken } = require("livekit-server-sdk");
 
 const { logError, logInfo, logWarn } = require("../logger");
@@ -5236,6 +5237,26 @@ router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
   const account = await loadPatientAccount(uid);
   if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
   return res.json({ ok: true, account });
+}));
+
+// GET /therapy/paciente/ambiente?conn=wifi|ethernet|cellular
+// Clima aproximado (por IP) para o fundo do card da Home. Devolve só a
+// categoria do tempo — nunca cidade/coordenadas — e nada é gravado.
+// `conn` vem de navigator.connection.type (Chrome Android) e ajuda a separar
+// Wi-Fi de 4G quando a operadora usa o mesmo ASN para os dois.
+router.get("/therapy/paciente/ambiente", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const userAgent = String(req.headers["user-agent"] || "");
+  const mobileDevice = req.headers["sec-ch-ua-mobile"] === "?1" || /Mobi|Android|iPhone|iPod/i.test(userAgent);
+  const weather = await ambientWeather.getAmbientWeather({
+    ip: req.ip,
+    connection: String(req.query?.conn || "").toLowerCase(),
+    mobileDevice
+  });
+  res.set("Cache-Control", "private, no-store");
+  return res.json({ ok: true, weather });
 }));
 
 // PATCH /therapy/paciente/perfil — paciente atualiza campos opt-in/preferências
