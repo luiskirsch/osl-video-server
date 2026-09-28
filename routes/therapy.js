@@ -20623,7 +20623,10 @@ router.delete("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res)
 // Coleção: therapy_humor  { uid, date (YYYY-MM-DD), mood (1-5), at }
 // ═════════════════════════════════════════════════════════════════════════
 
-// POST /therapy/paciente/humor  { mood: 1-5, date?: "YYYY-MM-DD" }
+// POST /therapy/paciente/humor  { mood: 1-5 }
+// A data é sempre definida pelo servidor em America/Sao_Paulo. Aceitar uma
+// data do cliente permitiria retroagir/antecipar registros e recriaria o bug
+// da virada UTC em aparelhos com relógio ou fuso incorretos.
 router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);
@@ -20632,8 +20635,7 @@ router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   const mood = Number(req.body?.mood);
   if (!Number.isInteger(mood) || mood < 1 || mood > 5) return sendError(res, 400, "MOOD_INVALIDO");
 
-  const date = String(req.body?.date || publicProgram.dateInSaoPaulo());
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return sendError(res, 400, "DATE_INVALIDA");
+  const date = publicProgram.dateInSaoPaulo();
 
   const db  = getDb();
   const docId = `${uid}_${date}`;
@@ -20665,9 +20667,11 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   const days = Math.min(Math.max(Number(req.query?.days || 30), 1), 3650);
   const db   = getDb();
 
-  // Datas dos últimos N dias
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
+  // Janela inclusiva em dias civis de São Paulo. Para days=1, retorna somente
+  // hoje — nunca o registro de ontem como se fosse o humor atual.
+  const today = publicProgram.dateInSaoPaulo();
+  const cutoff = new Date(`${today}T12:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - (days - 1));
   const cutoffStr = cutoff.toISOString().slice(0, 10);
 
   // Sem orderBy para evitar índice composto — ordena em JS
@@ -20675,7 +20679,6 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
     .where("uid", "==", uid)
     .get();
 
-  const today = publicProgram.dateInSaoPaulo();
   const legacyMigrations = [];
   const normalizedItems = snap.docs
     .map(d => {
