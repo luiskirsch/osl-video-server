@@ -5269,20 +5269,25 @@ router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
     if (name) updates.displayName = name;
   }
 
-  // photoUrl fica em therapy_patient_accounts, nunca em Firebase Auth
-  // photoURL — este projeto Firebase é compartilhado com O SextoLugar (jogo),
-  // e escrever no campo do Auth vazava avatar de jogador pro perfil do
-  // colaborador (e vice-versa) sempre que o mesmo e-mail existisse nos dois
-  // produtos. String vazia remove a foto.
-  if (typeof req.body?.photoUrl === "string") {
-    const url = req.body.photoUrl.trim();
-    if (url === "") {
-      updates.photoUrl = null;
-    } else if (/^https:\/\//.test(url) && url.length <= 2000) {
-      updates.photoUrl = url;
+  // Foto fica em therapy_patient_accounts (base64, mesmo formato do terapeuta),
+  // nunca em Firebase Auth photoURL — o projeto Firebase é compartilhado com
+  // O SextoLugar (jogo) e o campo do Auth vazava avatar entre os produtos.
+  // Também não usa Firebase Storage: o projeto está no plano Spark e não tem
+  // bucket provisionado. String vazia remove a foto.
+  if (req.body?.photoBase64 !== undefined) {
+    const photoBase64 = String(req.body.photoBase64 || "").trim();
+    const photoMime   = String(req.body.photoMime   || "").trim().toLowerCase();
+    if (photoBase64) {
+      if (photoBase64.length > PHOTO_MAX_BASE64) return sendError(res, 413, "FOTO_GRANDE_DEMAIS");
+      if (!PHOTO_ALLOWED_MIMES.has(photoMime))   return sendError(res, 400, "FOTO_TIPO_INVALIDO");
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(photoBase64)) return sendError(res, 400, "FOTO_BASE64_INVALIDA");
+      updates.photoBase64 = photoBase64;
+      updates.photoMime   = photoMime;
     } else {
-      return sendError(res, 400, "PHOTO_URL_INVALIDA");
+      updates.photoBase64 = admin.firestore.FieldValue.delete();
+      updates.photoMime   = admin.firestore.FieldValue.delete();
     }
+    updates.photoUrl = admin.firestore.FieldValue.delete();
   }
 
   await getDb().collection("therapy_patient_accounts").doc(uid).set(updates, { merge: true });
