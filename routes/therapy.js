@@ -5269,6 +5269,22 @@ router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
     if (name) updates.displayName = name;
   }
 
+  // photoUrl fica em therapy_patient_accounts, nunca em Firebase Auth
+  // photoURL — este projeto Firebase é compartilhado com O SextoLugar (jogo),
+  // e escrever no campo do Auth vazava avatar de jogador pro perfil do
+  // colaborador (e vice-versa) sempre que o mesmo e-mail existisse nos dois
+  // produtos. String vazia remove a foto.
+  if (typeof req.body?.photoUrl === "string") {
+    const url = req.body.photoUrl.trim();
+    if (url === "") {
+      updates.photoUrl = null;
+    } else if (/^https:\/\//.test(url) && url.length <= 2000) {
+      updates.photoUrl = url;
+    } else {
+      return sendError(res, 400, "PHOTO_URL_INVALIDA");
+    }
+  }
+
   await getDb().collection("therapy_patient_accounts").doc(uid).set(updates, { merge: true });
 
   await logAudit({
