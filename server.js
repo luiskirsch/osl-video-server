@@ -397,6 +397,9 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
     ["compatibility", compatibilitySvc],
     ["selectionAudit", selectionAudit],
   ].forEach(([name, service]) => initializeService(name, service));
+  // Base de geolocalização do card de clima leva ~15s; carregar logo após o
+  // boot evita que o primeiro colaborador de cada deploy fique sem clima.
+  setTimeout(() => require("./services/ambient-weather").warmUp(), 20_000).unref();
 });
 
 async function gracefullyStopAllEgress() {

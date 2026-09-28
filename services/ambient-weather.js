@@ -268,5 +268,6 @@ async function getAmbientWeather({ ip, connection, mobileDevice }) {
 
 module.exports = {
   getAmbientWeather,
+  warmUp: ensureGeoLoaded,
   _test: { parseIp, ipv6High64, parseCityLine, parseAsnLine, newTable, freeze, lookup, isLocationReliable, classifySymbol, candidateMonths }
 };
