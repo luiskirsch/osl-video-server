@@ -9712,10 +9712,13 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   const snap = await db.collection("therapists").limit(500).get();
 
   const items = [];
+  const availableEspecialidades = new Set();
   snap.forEach(d => {
     const t = d.data();
     if (t.verificationStatus !== "verified") return;
     if (!t.publicSchedulingEnabled && !t.listPublicly) return;
+
+    if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
 
     const c = t.consultorio || {};
     const esp = normSearch(t.especialidade);
@@ -9759,6 +9762,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   return res.json({
     ok: true,
     total: items.length,
+    especialidades: [...availableEspecialidades].sort((a, b) => a.localeCompare(b, "pt-BR")),
     items: items.slice(0, limit)
   });
 }));
