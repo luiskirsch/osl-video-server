@@ -31,7 +31,7 @@ const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
   THERAPY_PLAN_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_AMOUNT, THERAPY_PLAN_PROFISSIONAL_AMOUNT,
-  THERAPY_PLAN_EMPRESA_AMOUNT, THERAPY_PLAN_EMPRESA_TRIAL_DAYS,
+  THERAPY_PLAN_EMPRESA_AMOUNT,
   THERAPY_PLAN_ANNUAL_AMOUNT, THERAPY_PLAN_RECEM_FORMADO_ANNUAL_AMOUNT, THERAPY_PLAN_PROFISSIONAL_ANNUAL_AMOUNT,
   THERAPY_PLAN_NAME,
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
@@ -345,12 +345,11 @@ function evaluatePlanAccess(therapist) {
   if (plano === "pro") {
     return { ok: true, plano };
   }
-  // empresa: exige aprovação institucional e assinatura autorizada no MP.
+  // empresa: o acesso é custeado pelo programa contratante. Depois da
+  // aprovação do vínculo, o profissional não precisa assinar nem cadastrar
+  // meio de pagamento.
   if (plano === "empresa") {
-    if (String(therapist.mpPreapprovalStatus || "").toLowerCase() === "authorized") {
-      return { ok: true, plano };
-    }
-    return { ok: false, reason: "MEIO_PAGAMENTO_OBRIGATORIO", plano };
+    return { ok: true, plano };
   }
   // student-active: cron runStudentExpirationTick deveria baixar pra trial
   // quando studentVerifiedUntil <= now, mas se cron falhar/atrasar, defesa em
@@ -573,22 +572,6 @@ async function issueLivekitToken({ room, identity, name, ttlMs }) {
     canPublishData: true
   });
   return at.toJwt();
-}
-
-function institutionalTrialStartDate(therapist, nowMs = Date.now()) {
-  if (therapist?.empresaTrialUsedAt || THERAPY_PLAN_EMPRESA_TRIAL_DAYS <= 0) return null;
-  return new Date(nowMs + THERAPY_PLAN_EMPRESA_TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-}
-
-function canStartInstitutionalSubscription(therapist) {
-  // A aprovação coloca a conta em "empresa". Contas legadas ou ajustadas pelo
-  // admin podem não ter os campos de revisão usados no fluxo mais recente.
-  return therapist?.plano === "empresa";
-}
-
-function institutionalPayerEmail(accountEmail, alternateEmail) {
-  const email = normalizeClinicEmail(alternateEmail || accountEmail);
-  return email.length <= 254 && isValidClinicEmail(email) ? email : null;
 }
 
 function mpPreapprovalErrorInfo(response, data) {
@@ -7085,14 +7068,9 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
   const billingCycle = tier === "empresa" ? "month" : requestedBillingCycle;
   let amount, planTier, planLabel;
   if (tier === "empresa") {
-    if (!canStartInstitutionalSubscription(therapist)) {
-      return sendError(res, 403, "PROGRAMA_INSTITUCIONAL_NAO_APROVADO", {
-        detail: "A equipe precisa aprovar seu vínculo institucional antes do cadastro do meio de pagamento."
-      });
-    }
-    amount = THERAPY_PLAN_EMPRESA_AMOUNT;
-    planTier = "empresa";
-    planLabel = `${THERAPY_PLAN_NAME} — Programas institucionais`;
+    return sendError(res, 400, "PLANO_INSTITUCIONAL_SEM_COBRANCA", {
+      detail: "O acesso institucional é liberado pela aprovação do vínculo e não exige assinatura do profissional."
+    });
   } else if (tier === "recem-formado") {
     if (therapist.plano !== "recem-formado-eligible") {
       return sendError(res, 403, "RECEM_FORMADO_NAO_ELEGIVEL", {
@@ -7121,10 +7099,8 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     const fbUser = await admin.auth().getUser(uid);
     accountEmail = fbUser.email || "";
   } catch { /* ignore */ }
-  const payerEmail = tier === "empresa"
-    ? institutionalPayerEmail(accountEmail, req.body?.payerEmail)
-    : accountEmail;
-  if (!payerEmail) return sendError(res, 400, tier === "empresa" ? "EMAIL_PAGADOR_INVALIDO" : "EMAIL_INDISPONIVEL");
+  const payerEmail = accountEmail;
+  if (!payerEmail) return sendError(res, 400, "EMAIL_INDISPONIVEL");
 
   const externalRef = `EP_THERAPY_${uid}`;
 
@@ -7144,10 +7120,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
 
   // O checkout coleta o meio de pagamento agora, mas agenda a primeira
   // cobrança para depois do teste gratuito aplicável ao plano.
-  if (planTier === "empresa") {
-    const trialStartDate = institutionalTrialStartDate(therapist);
-    if (trialStartDate) body.auto_recurring.start_date = trialStartDate;
-  } else if (planTier === "profissional") {
+  if (planTier === "profissional") {
     const trialStartDate = professionalTrialStartDate(therapist);
     if (trialStartDate) body.auto_recurring.start_date = trialStartDate;
   }
@@ -7176,10 +7149,7 @@ router.post("/therapy/profissional/plano/iniciar", asyncHandler(async (req, res)
     proTier:             planTier,
     proPriceCents:       Math.round(amount * 100),
     proBillingCycle:     billingCycle,
-    ...(planTier === "empresa" ? {
-      empresaTrialDays: THERAPY_PLAN_EMPRESA_TRIAL_DAYS,
-      empresaPaymentRequired: true
-    } : planTier === "profissional" ? {
+    ...(planTier === "profissional" ? {
       professionalTrialDays: THERAPY_TRIAL_DAYS_PROFISSIONAL,
       professionalPaymentRequired: true
     } : {}),
@@ -8569,7 +8539,7 @@ router.post("/therapy/admin/empresa-pendentes/:uid/aprovar", asyncHandler(async 
 
   await ref.update({
     plano: "empresa",
-    empresaPaymentRequired: true,
+    empresaPaymentRequired: false,
     empresaReviewedAt: admin.firestore.FieldValue.serverTimestamp(),
     empresaReviewedBy: adminAuth.email || adminAuth.uid,
     empresaRejectReason: null,
@@ -8594,11 +8564,11 @@ router.post("/therapy/admin/empresa-pendentes/:uid/aprovar", asyncHandler(async 
     if (email) {
       await sendEmail({
         to: email,
-        subject: "Sua conta foi aprovada — cadastre o meio de pagamento",
+        subject: "Sua conta institucional foi aprovada",
         html: `<p>Olá, ${t.displayName || "profissional"}!</p>
           <p>Sua conta no plano <strong>Programas institucionais</strong> foi aprovada pela nossa equipe.</p>
-          <p>Para liberar as consultas, cadastre o meio de pagamento. O teste é gratuito por <strong>7 dias</strong>; depois, a assinatura custa <strong>R$ 10,00 por mês</strong>.</p>
-          <p><a href="${THERAPY_FRONTEND_BASE}/planos.html">Cadastrar meio de pagamento →</a></p>
+          <p>Seu acesso institucional está ativo e não exige mensalidade nem cadastro de meio de pagamento.</p>
+          <p><a href="${THERAPY_FRONTEND_BASE}/painel.html">Acessar o painel →</a></p>
           <p>Qualquer dúvida, responda este e-mail.</p>`
       });
     }
@@ -20802,5 +20772,5 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
 }));
 
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
-router._test = { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, institutionalPayerEmail, mpPreapprovalErrorInfo, professionalTrialStartDate };
+router._test = { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

@@ -5,47 +5,20 @@ const assert = require("node:assert/strict");
 
 const therapyRouter = require("../routes/therapy");
 const {
-  THERAPY_PLAN_EMPRESA_AMOUNT,
-  THERAPY_PLAN_EMPRESA_TRIAL_DAYS,
   THERAPY_TRIAL_DAYS_PROFISSIONAL
 } = require("../config");
 
-const { evaluatePlanAccess, institutionalTrialStartDate, canStartInstitutionalSubscription, institutionalPayerEmail, mpPreapprovalErrorInfo, professionalTrialStartDate } = therapyRouter._test;
+const { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate } = therapyRouter._test;
 
-test("plano institucional custa R$ 10 e oferece 7 dias", () => {
-  assert.equal(THERAPY_PLAN_EMPRESA_AMOUNT, 10);
-  assert.equal(THERAPY_PLAN_EMPRESA_TRIAL_DAYS, 7);
-});
-
-test("plano institucional exige meio de pagamento autorizado para consultas", () => {
+test("plano institucional libera consultas sem cobrar o profissional", () => {
   assert.deepEqual(evaluatePlanAccess({ plano: "empresa" }), {
-    ok: false,
-    reason: "MEIO_PAGAMENTO_OBRIGATORIO",
+    ok: true,
     plano: "empresa"
   });
   assert.deepEqual(evaluatePlanAccess({ plano: "empresa", mpPreapprovalStatus: "authorized" }), {
     ok: true,
     plano: "empresa"
   });
-});
-
-test("teste institucional agenda a primeira cobrança para 7 dias e não se repete", () => {
-  const now = Date.parse("2026-09-23T12:00:00.000Z");
-  assert.equal(institutionalTrialStartDate({}, now), "2026-09-30T12:00:00.000Z");
-  assert.equal(institutionalTrialStartDate({ empresaTrialUsedAt: now }, now), null);
-});
-
-test("checkout institucional aceita plano aprovado mesmo sem campos de revisão legados", () => {
-  assert.equal(canStartInstitutionalSubscription({ plano: "empresa" }), true);
-  assert.equal(canStartInstitutionalSubscription({ plano: "empresa", intendedTier: "profissional" }), true);
-  assert.equal(canStartInstitutionalSubscription({ plano: "empresa-pending-review", intendedTier: "empresa" }), false);
-  assert.equal(canStartInstitutionalSubscription({ plano: "trial", empresaRejectReason: "Vínculo não aprovado" }), false);
-});
-
-test("checkout institucional permite e-mail pagador alternativo sem alterar a conta", () => {
-  assert.equal(institutionalPayerEmail("profissional@example.com", ""), "profissional@example.com");
-  assert.equal(institutionalPayerEmail("profissional@example.com", " OUTRA@EXAMPLE.COM "), "outra@example.com");
-  assert.equal(institutionalPayerEmail("profissional@example.com", "invalido"), null);
 });
 
 test("falha do Mercado Pago preserva diagnóstico sem expor e-mail ou credencial", () => {
