@@ -350,6 +350,18 @@ const TWILIO_WHATSAPP_FROM  = process.env.TWILIO_WHATSAPP_FROM  || "";
 // verificarEmpresaToken (routes/therapy.js).
 const EMPRESA_JWT_SECRET = process.env.EMPRESA_JWT_SECRET || "";
 
+// Todo header customizado que o navegador envia precisa estar aqui: se faltar,
+// o preflight passa mas o browser bloqueia a request real em silêncio (foi o
+// que quebrou o upload do resumo IA e a emissão de NFS-e). Coberto por
+// test/cors-headers.test.js.
+const CORS_ALLOWED_HEADERS = [
+  "Authorization", "Content-Type", "X-Admin-Secret", "X-Host-Token",
+  "X-Locale", "X-Therapy-2FA", "X-Client-Key", "X-Security-Token",
+  "X-Signature", "X-Request-Id", "Stripe-Signature",
+  "X-AI-Result-Key", "X-AI-Wrapped-Key", "X-AI-Wrapped-Key-IV",
+  "X-Nfse-Token"
+];
+
 module.exports = {
   PORT,
   APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv,
@@ -363,6 +375,7 @@ module.exports = {
   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM,
   EMPRESA_JWT_SECRET,
+  CORS_ALLOWED_HEADERS,
   LICENSE_SECRET, ACCESS_TOKEN_SECRET,
   ANTHROPIC_API_KEY,
   BACKEND_BASE_URL, FRONTEND_BASE_URL,

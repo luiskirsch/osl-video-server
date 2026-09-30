@@ -52,7 +52,7 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT, APP_ENV, IS_PRODUCTION } = require("./config");
+const { PORT, APP_ENV, IS_PRODUCTION, CORS_ALLOWED_HEADERS } = require("./config");
 const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
@@ -221,11 +221,7 @@ app.use(cors({
   },
   credentials: false,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Authorization", "Content-Type", "X-Admin-Secret", "X-Host-Token",
-    "X-Locale", "X-Therapy-2FA", "X-Client-Key", "X-Security-Token",
-    "X-Signature", "X-Request-Id", "Stripe-Signature"
-  ],
+  allowedHeaders: CORS_ALLOWED_HEADERS,
   maxAge: 600
 }));
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
