@@ -9710,11 +9710,16 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   let visibilityMigrationCount = 0;
   snap.forEach(d => {
     const t = d.data();
-    if (typeof t.adminDirectoryVisible !== "boolean" && typeof t.adminDirectoryBlocked !== "boolean") {
+    const hasAdminVisibility = typeof t.adminDirectoryVisible === "boolean" || typeof t.adminDirectoryBlocked === "boolean";
+    const needsLegacyCorrection = t.adminDirectoryVisibilityUpdatedBy === "system:legacy-migration"
+      && t.adminDirectoryVisible === false
+      && (Boolean(t.listPublicly) || Boolean(t.publicSchedulingEnabled));
+    if (!hasAdminVisibility || needsLegacyCorrection) {
+      if (needsLegacyCorrection) t.adminDirectoryVisible = true;
       visibilityMigration.set(d.ref, {
         adminDirectoryVisible: getPublicDirectoryVisibility(t),
         adminDirectoryVisibilityUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        adminDirectoryVisibilityUpdatedBy: "system:legacy-migration"
+        adminDirectoryVisibilityUpdatedBy: "system:legacy-migration-v2"
       }, { merge: true });
       visibilityMigrationCount += 1;
     }

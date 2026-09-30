@@ -11,7 +11,7 @@ function getPublicDirectoryVisibility(therapist = {}) {
   if (typeof therapist.adminDirectoryBlocked === "boolean") {
     return !therapist.adminDirectoryBlocked;
   }
-  return therapist.listPublicly === true || therapist.publicSchedulingEnabled === true;
+  return Boolean(therapist.listPublicly) || Boolean(therapist.publicSchedulingEnabled);
 }
 
 function isPublicDirectoryEligible(therapist = {}) {
