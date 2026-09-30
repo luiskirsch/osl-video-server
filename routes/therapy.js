@@ -65,7 +65,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
-const { isPublicDirectoryEligible } = require("../services/public-directory");
+const { getPublicDirectoryVisibility, isPublicDirectoryEligible } = require("../services/public-directory");
 const {
   therapySessionDurationMinutes,
   therapyTimestampMillis,
@@ -1849,12 +1849,6 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       updates.publicSchedulingMaxAdvanceDays = n;
     }
   }
-  // Opt-in: aparecer no diretório público de profissionais.
-  // Exige verificationStatus=verified + publicSchedulingEnabled true pra ter efeito.
-  if (req.body?.listPublicly !== undefined) {
-    updates.listPublicly = Boolean(req.body.listPublicly);
-  }
-
   // Configuração de cobranças Asaas. apiKey é secret — nunca sai do servidor
   // depois de salva (filtrada no /me). Env aceita "sandbox" | "production".
   // Se apiKey é fornecida não-vazia, validamos contra /myAccount antes de
@@ -8905,6 +8899,7 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       adminGrantActive: !!(adminGrantedUntilMs && adminGrantedUntilMs > now),
       adminNote: t.adminNote || null,
       adminDirectoryBlocked: t.adminDirectoryBlocked === true,
+      adminDirectoryVisible: getPublicDirectoryVisibility(t),
       mpPreapprovalId: t.mpPreapprovalId || null,
       mpPreapprovalStatus: t.mpPreapprovalStatus || null,
       createdAt: t.createdAt?.toMillis?.() || null
@@ -9339,6 +9334,7 @@ router.delete("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res)
 //   setPlano: string         — novo valor de `plano` (allowlist).
 //   setAdminNote: string     — nota livre do admin (max 500).
 //   toggleVerificado: bool   — força verificado=true/false + verifiedAt.
+//   setAdminDirectoryVisible: bool — exibe/oculta no diretório público.
 const ALLOWED_PLANOS = new Set([
   "trial", "pro", "student-pending-review", "student-active",
   "recem-formado-eligible", "recem-formado-active",
@@ -9410,15 +9406,21 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
     auditDetail.push(`verificacao → ${body.toggleVerificado ? "verified" : "pending-review"}`);
   }
 
-  if (typeof body.setAdminDirectoryBlocked === "boolean") {
-    updates.adminDirectoryBlocked = body.setAdminDirectoryBlocked;
-    updates.adminDirectoryBlockedAt = body.setAdminDirectoryBlocked
+  const requestedDirectoryVisibility = typeof body.setAdminDirectoryVisible === "boolean"
+    ? body.setAdminDirectoryVisible
+    : (typeof body.setAdminDirectoryBlocked === "boolean" ? !body.setAdminDirectoryBlocked : null);
+  if (typeof requestedDirectoryVisibility === "boolean") {
+    updates.adminDirectoryVisible = requestedDirectoryVisibility;
+    updates.adminDirectoryBlocked = !requestedDirectoryVisibility;
+    updates.adminDirectoryBlockedAt = !requestedDirectoryVisibility
       ? admin.firestore.FieldValue.serverTimestamp()
       : null;
-    updates.adminDirectoryBlockedBy = body.setAdminDirectoryBlocked
+    updates.adminDirectoryBlockedBy = !requestedDirectoryVisibility
       ? adminAuth.email
       : null;
-    auditDetail.push(`diretorio publico -> ${body.setAdminDirectoryBlocked ? "bloqueado" : "liberado"}`);
+    updates.adminDirectoryVisibilityUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+    updates.adminDirectoryVisibilityUpdatedBy = adminAuth.email;
+    auditDetail.push(`diretorio publico -> ${requestedDirectoryVisibility ? "visivel" : "oculto"}`);
   }
 
   if (Object.keys(updates).length === 0) {
@@ -9446,6 +9448,7 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
       adminGrantedUntil: fresh.adminGrantedUntil?.toMillis?.() || (typeof fresh.adminGrantedUntil === "number" ? fresh.adminGrantedUntil : null),
       adminNote: fresh.adminNote || null,
       adminDirectoryBlocked: fresh.adminDirectoryBlocked === true,
+      adminDirectoryVisible: getPublicDirectoryVisibility(fresh),
       verificado: fresh.verificationStatus === "verified",
       verificationStatus: fresh.verificationStatus || null,
       verifiedAt: fresh.verifiedAt?.toMillis?.() || null
@@ -9654,9 +9657,9 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   return { slots, slotMinutes };
 }
 
-// GET /public/profissionais — diretório público de terapeutas. Lista todos
-// que: (a) verificationStatus=verified, (b) publicSchedulingEnabled=true,
-// (c) listPublicly=true (opt-in), (d) plano ativo. Filtros opcionais:
+// GET /public/profissionais — diretório público de terapeutas. A visibilidade
+// individual é controlada pelo admin e o cadastro precisa estar verificado.
+// Filtros opcionais:
 // especialidade, cidade, uf.
 router.get("/public/profissionais", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -9741,7 +9744,8 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
       cidade:         c.cidade || "",
       uf:             c.uf || "",
       valorConsulta:  t.valorConsulta || null,
-      bio:            (t.bio || "").slice(0, 180)
+      bio:            (t.bio || "").slice(0, 180),
+      publicSchedulingEnabled: t.publicSchedulingEnabled === true
     });
   });
 

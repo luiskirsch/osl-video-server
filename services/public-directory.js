@@ -1,14 +1,22 @@
 "use strict";
 
 /**
- * A restricao administrativa tem precedencia sobre o opt-in feito pelo
- * profissional. Ela afeta somente a listagem na rede publica; links diretos e
- * o acesso do profissional continuam sendo tratados pelas rotas especificas.
+ * A visibilidade e controlada pelo admin. Durante a migracao, preservamos o
+ * ultimo opt-in salvo, mas ele deixou de ser gravavel pelo profissional.
  */
-function isPublicDirectoryEligible(therapist = {}) {
-  return therapist.verificationStatus === "verified"
-    && (therapist.publicSchedulingEnabled === true || therapist.listPublicly === true)
-    && therapist.adminDirectoryBlocked !== true;
+function getPublicDirectoryVisibility(therapist = {}) {
+  if (typeof therapist.adminDirectoryVisible === "boolean") {
+    return therapist.adminDirectoryVisible;
+  }
+  if (typeof therapist.adminDirectoryBlocked === "boolean") {
+    return !therapist.adminDirectoryBlocked;
+  }
+  return therapist.listPublicly === true;
 }
 
-module.exports = { isPublicDirectoryEligible };
+function isPublicDirectoryEligible(therapist = {}) {
+  return therapist.verificationStatus === "verified"
+    && getPublicDirectoryVisibility(therapist);
+}
+
+module.exports = { getPublicDirectoryVisibility, isPublicDirectoryEligible };
