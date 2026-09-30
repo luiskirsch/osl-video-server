@@ -15,13 +15,67 @@ async function updateCurrentAttempt({ db, summaryRef, attemptId, data }) {
   });
 }
 
-async function processAiSummary({ audioBuffer, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
+const MAX_AUDIO_SEGMENTS = 100;
+
+// Cada recarga/reentrada na sala gera uma gravação WebM própria (não dá pra
+// concatenar os bytes). O cliente manda todas no mesmo body e informa o
+// tamanho de cada uma em X-AI-Segments; sem o header, é um arquivo único.
+function splitAudioSegments(buffer, header) {
+  if (header === undefined || header === null || String(header).trim() === "") return [buffer];
+  const sizes = String(header).split(",").map(value => Number(value.trim()));
+  if (sizes.length > MAX_AUDIO_SEGMENTS || sizes.some(size => !Number.isSafeInteger(size) || size <= 0)) return null;
+  if (sizes.reduce((sum, size) => sum + size, 0) !== buffer.length) return null;
+  const segments = [];
+  let offset = 0;
+  for (const size of sizes) {
+    segments.push(buffer.subarray(offset, offset + size));
+    offset += size;
+  }
+  return segments;
+}
+
+// Um trecho curto ou corrompido (ex.: a aba recarregou logo após começar) não
+// pode derrubar a transcrição dos demais.
+async function transcribeSegments(segments, transcribe = whisper.transcribe, context = {}) {
+  const texts = [];
+  let durationSec = 0;
+  let hallucinatedSegments = 0;
+  let failedSegments = 0;
+  let firstError = null;
+  for (const [index, segment] of segments.entries()) {
+    let result;
+    try {
+      result = await transcribe(segment, { language: "portuguese" });
+    } catch (error) {
+      failedSegments += 1;
+      firstError = firstError || error;
+      logWarn("ai_summary_segment_failed", { ...context, segment: index, bytes: segment.length, error: error.message });
+      continue;
+    }
+    durationSec += result.durationSec || 0;
+    if (result.hallucinated) {
+      hallucinatedSegments += 1;
+      continue;
+    }
+    if (result.text) texts.push(result.text);
+  }
+  if (failedSegments === segments.length) throw firstError;
+  const text = texts.join("\n\n").trim();
+  return { text, durationSec, hallucinated: !text && hallucinatedSegments > 0, failedSegments, hallucinatedSegments };
+}
+
+async function processAiSummary({ audioBuffer, audioSegments, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
   const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+  const segments = audioSegments || [audioBuffer];
 
   try {
-    logInfo("ai_summary_started", { sessionId, audioBytes: audioBuffer.length });
+    logInfo("ai_summary_started", {
+      sessionId,
+      audioBytes: segments.reduce((sum, segment) => sum + segment.length, 0),
+      segments: segments.length
+    });
     const transcribeStartedAt = Date.now();
-    const transcriptResult = await whisper.transcribe(audioBuffer, { language: "portuguese" });
+    const transcriptResult = await transcribeSegments(segments, whisper.transcribe, { sessionId });
     const transcribeMs = Date.now() - transcribeStartedAt;
     logInfo("ai_summary_transcribed", {
       sessionId,
@@ -29,6 +83,8 @@ async function processAiSummary({ audioBuffer, sessionId, attemptId, therapist, 
       transcribeMs,
       textChars: transcriptResult.text.length,
       hallucinated: transcriptResult.hallucinated || false,
+      failedSegments: transcriptResult.failedSegments,
+      hallucinatedSegments: transcriptResult.hallucinatedSegments,
     });
 
     if (transcriptResult.hallucinated) {
@@ -109,4 +165,4 @@ async function processAiSummary({ audioBuffer, sessionId, attemptId, therapist, 
   }
 }
 
-module.exports = { processAiSummary, updateCurrentAttempt };
+module.exports = { processAiSummary, updateCurrentAttempt, splitAudioSegments, transcribeSegments };

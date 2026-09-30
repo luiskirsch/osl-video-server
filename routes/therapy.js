@@ -76,7 +76,7 @@ const corporateDevelopment = require("../services/corporate-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
 const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
-const { processAiSummary } = require("../services/therapy-ai-summary");
+const { processAiSummary, splitAudioSegments } = require("../services/therapy-ai-summary");
 const clinicalTwinSvc = require("../services/clinical-twin");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -7436,7 +7436,9 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
 // navegador e embrulhada pela DEK do profissional.
 // ─────────────────────────────────────────────────────────────────────────
 
-const AI_SUMMARY_AUDIO_MAX_BYTES = 16 * 1024 * 1024;
+// Mesmo teto do whisper.js. Com o cliente atual (opus mono 24 kbps) cobre
+// ~3 h; clientes antigos (48 kbps estéreo) estouravam 16 MB em ~44 min.
+const AI_SUMMARY_AUDIO_MAX_BYTES = 32 * 1024 * 1024;
 const AI_SUMMARY_PROCESSING_LEASE_MS = 60 * 60 * 1000;
 const AI_SUMMARY_MAX_CONCURRENT = 2;
 let aiSummaryAdmissions = 0;
@@ -7526,6 +7528,8 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) {
       return sendError(res, 400, "AUDIO_OBRIGATORIO");
     }
+    const audioSegments = splitAudioSegments(audioBuffer, req.headers["x-ai-segments"]);
+    if (!audioSegments) return sendError(res, 400, "SEGMENTOS_AUDIO_INVALIDOS");
 
     let clientEncryption;
     try {
@@ -7563,6 +7567,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
           attemptId,
           processingLeaseUntil: Date.now() + AI_SUMMARY_PROCESSING_LEASE_MS,
           audioBytes: audioBuffer.length,
+          audioSegments: audioSegments.length,
           encryptionVersion: 1,
           encryptionAlgorithm: "AES-256-GCM",
           wrappedKey: clientEncryption.wrappedKey,
@@ -7595,7 +7600,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
 
     // Fire-and-forget processing. Erros vão pra log + Firestore status.
     processAiSummary({
-      audioBuffer,
+      audioSegments,
       sessionId,
       attemptId,
       therapist,
