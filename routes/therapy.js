@@ -65,6 +65,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
+const { isPublicDirectoryEligible } = require("../services/public-directory");
 const {
   therapySessionDurationMinutes,
   therapyTimestampMillis,
@@ -8903,6 +8904,7 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       adminGrantedUntil: adminGrantedUntilMs,
       adminGrantActive: !!(adminGrantedUntilMs && adminGrantedUntilMs > now),
       adminNote: t.adminNote || null,
+      adminDirectoryBlocked: t.adminDirectoryBlocked === true,
       mpPreapprovalId: t.mpPreapprovalId || null,
       mpPreapprovalStatus: t.mpPreapprovalStatus || null,
       createdAt: t.createdAt?.toMillis?.() || null
@@ -9408,6 +9410,17 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
     auditDetail.push(`verificacao → ${body.toggleVerificado ? "verified" : "pending-review"}`);
   }
 
+  if (typeof body.setAdminDirectoryBlocked === "boolean") {
+    updates.adminDirectoryBlocked = body.setAdminDirectoryBlocked;
+    updates.adminDirectoryBlockedAt = body.setAdminDirectoryBlocked
+      ? admin.firestore.FieldValue.serverTimestamp()
+      : null;
+    updates.adminDirectoryBlockedBy = body.setAdminDirectoryBlocked
+      ? adminAuth.email
+      : null;
+    auditDetail.push(`diretorio publico -> ${body.setAdminDirectoryBlocked ? "bloqueado" : "liberado"}`);
+  }
+
   if (Object.keys(updates).length === 0) {
     return sendError(res, 400, "NENHUMA_ACAO");
   }
@@ -9432,6 +9445,7 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
       trialUntil: fresh.trialUntil?.toMillis?.() || (typeof fresh.trialUntil === "number" ? fresh.trialUntil : null),
       adminGrantedUntil: fresh.adminGrantedUntil?.toMillis?.() || (typeof fresh.adminGrantedUntil === "number" ? fresh.adminGrantedUntil : null),
       adminNote: fresh.adminNote || null,
+      adminDirectoryBlocked: fresh.adminDirectoryBlocked === true,
       verificado: fresh.verificationStatus === "verified",
       verificationStatus: fresh.verificationStatus || null,
       verifiedAt: fresh.verifiedAt?.toMillis?.() || null
@@ -9691,8 +9705,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   const availableEspecialidades = new Set();
   snap.forEach(d => {
     const t = d.data();
-    if (t.verificationStatus !== "verified") return;
-    if (!t.publicSchedulingEnabled && !t.listPublicly) return;
+    if (!isPublicDirectoryEligible(t)) return;
 
     if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
 
