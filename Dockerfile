@@ -17,7 +17,8 @@ RUN npm ci --omit=dev --ignore-scripts \
 COPY --chown=node:node . .
 
 ENV NODE_ENV=production \
-    LOG_FILE=/tmp/server.log
+    LOG_FILE=/tmp/server.log \
+    TRANSFORMERS_CACHE_DIR=/tmp/huggingface-transformers
 
 USER node
 

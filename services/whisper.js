@@ -43,11 +43,28 @@ const FFMPEG_TIMEOUT_MS = boundedNumber(
 );
 const MAX_FFMPEG_ERROR_CHARS = 4_000;
 
+// Transformers.js usa, por padrão, uma pasta .cache dentro do próprio pacote
+// em node_modules. Em produção o container roda como usuário sem permissão de
+// escrita nessa árvore. Direcionamos o modelo para um cache gravável.
+function configureTransformersCache(transformersEnv, options = {}) {
+  const cacheDir = options.cacheDir
+    || process.env.TRANSFORMERS_CACHE_DIR
+    || path.join(os.tmpdir(), "huggingface-transformers");
+  const mkdirSync = options.mkdirSync || fs.mkdirSync;
+  const accessSync = options.accessSync || fs.accessSync;
+  mkdirSync(cacheDir, { recursive: true });
+  accessSync(cacheDir, fs.constants.W_OK);
+  transformersEnv.cacheDir = cacheDir;
+  transformersEnv.useFSCache = true;
+  return cacheDir;
+}
+
 // Lazy load — modelo grande (150MB) só carrega quando alguem chama transcribe()
 async function getPipeline() {
   if (_pipelineP) return _pipelineP;
   _pipelineP = (async () => {
-    const { pipeline } = await import("@huggingface/transformers");
+    const { pipeline, env } = await import("@huggingface/transformers");
+    configureTransformersCache(env);
     _pipelineFactory = pipeline;
     const wavefileMod = await import("wavefile");
     // wavefile exporta diferente dependendo da versao/ambiente (CJS vs ESM):
@@ -261,4 +278,4 @@ function isHallucinated(text) {
   return false;
 }
 
-module.exports = { transcribe, isHallucinated, normalizeAudioExtension };
+module.exports = { transcribe, isHallucinated, normalizeAudioExtension, _test: { configureTransformersCache } };
