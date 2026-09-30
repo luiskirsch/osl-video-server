@@ -9781,6 +9781,54 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   });
 }));
 
+// GET /public/profissionais/:uid — perfil público completo de um profissional
+// que foi liberado pelo admin para aparecer na Rede de Psicologia. Essa rota
+// não depende de o profissional aceitar agendamentos online.
+router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = String(req.params.uid || "").trim();
+  if (!/^[A-Za-z0-9_-]{6,128}$/.test(uid)) {
+    return sendError(res, 400, "PROFISSIONAL_INVALIDO");
+  }
+
+  const doc = await getDb().collection("therapists").doc(uid).get();
+  if (!doc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+
+  const therapist = doc.data();
+  if (!isPublicDirectoryEligible(therapist)) {
+    return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  }
+
+  const publicSchedulingSlug = String(therapist.publicSchedulingSlug || "").trim().toLowerCase();
+  const access = evaluatePlanAccess(therapist);
+  const publicSchedulingEnabled = Boolean(therapist.publicSchedulingEnabled)
+    && isValidPublicSlug(publicSchedulingSlug)
+    && access.ok;
+  const cfg = therapist.agendaConfig || {};
+
+  return res.json({
+    ok: true,
+    profissional: summarizeTherapistForPublicScheduling(therapist),
+    publicSchedulingEnabled,
+    publicSchedulingSlug: publicSchedulingEnabled ? publicSchedulingSlug : "",
+    ...(publicSchedulingEnabled ? {
+      agendaConfig: {
+        startHour:   Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8,
+        endHour:     Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21,
+        slotMinutes: Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50
+      },
+      schedulingRules: {
+        minNoticeHours: Number.isFinite(therapist.publicSchedulingMinNoticeHours)
+          ? therapist.publicSchedulingMinNoticeHours
+          : SCHEDULING_REQUEST_DEFAULT_MIN_NOTICE_HOURS,
+        maxAdvanceDays: Number.isFinite(therapist.publicSchedulingMaxAdvanceDays)
+          ? therapist.publicSchedulingMaxAdvanceDays
+          : SCHEDULING_REQUEST_DEFAULT_MAX_ADVANCE_DAYS
+      }
+    } : {})
+  });
+}));
+
 // GET /public/agendar/:slug — perfil público pra renderizar a página
 router.get("/public/agendar/:slug", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
