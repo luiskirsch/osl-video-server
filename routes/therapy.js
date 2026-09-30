@@ -53,6 +53,7 @@ const anamnese = require("../services/anamnese");
 const tiss     = require("../services/tiss");
 const smsService = require("../services/sms");
 const supportBot = require("../services/support-bot");
+const { createSupportTools } = require("../services/support-tools");
 const marketing = require("../services/marketing");
 const pushService = require("../services/push");
 const {
@@ -16902,6 +16903,7 @@ router.get("/therapy/pro-chat/buscar", asyncHandler(async (req, res) => {
 // ═════════════════════════════════════════════════════════════════════════
 
 const _supportQuota = new Map(); // uid -> { count, resetAt }
+const supportChangelogCache = { at: 0, value: null }; // novidades são as mesmas pra todos
 const SUPPORT_DAILY_QUOTA = 30;
 const SUPPORT_RESET_MS = 24 * 60 * 60 * 1000;
 
@@ -16947,7 +16949,17 @@ router.post("/therapy/support/chat", asyncHandler(async (req, res) => {
     userName = String(therapist?.displayName || "").trim();
   } catch (_) { /* no-op */ }
 
-  const result = await supportBot.askBot({ history, userMessage: message, userName });
+  // Tela atual (só caminho): a Aurora usa pra contextualizar a resposta.
+  const page = String(req.body?.page || "").slice(0, 120);
+  const tools = createSupportTools({ uid, db: getDb(), loadTherapist, evaluatePlanAccess, changelogCache: supportChangelogCache });
+
+  const result = await supportBot.askBot({
+    history,
+    userMessage: message,
+    userName,
+    page: /^\/[\w\-./]*$/.test(page) ? page : "",
+    tools
+  });
   if (!result.ok) {
     return sendError(res, 502, result.error || "BOT_FALHOU", { detail: result.detail || null });
   }
