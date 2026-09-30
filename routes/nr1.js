@@ -76,7 +76,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
     await ref.collection("audit").add({ actor, type, details, at: stamp() });
   }
 
-  async function employee(req, res) {
+  async function employee(req, res, { allowUnlinked = false } = {}) {
     if (!ensureDb(res)) return null;
     const uid = await verifyFirebaseToken(req, res);
     if (!uid) return null;
@@ -104,6 +104,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
         && (!doc.data().patientAccountUid || doc.data().patientAccountUid === uid))
         .map(doc => doc.data().empresaId)
     ])].filter(Boolean).filter(id => !revokedCompanyIds.has(id));
+    if (!companyIds.length && allowUnlinked) return { uid, companyIds: [] };
     if (!companyIds.length) {
       sendError(res, 403, "COLABORADOR_NAO_APROVADO"); return null;
     }
@@ -111,6 +112,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
       getDb().collection("therapy_empresas").doc(id).get()));
     const activeIds = companySnaps.filter(snap => snap.exists && snap.data().status === "ativa")
       .map(snap => snap.id);
+    if (!activeIds.length && allowUnlinked) return { uid, companyIds: [] };
     if (!activeIds.length) { sendError(res, 403, "EMPRESA_INATIVA"); return null; }
     return { uid, companyIds: activeIds };
   }
@@ -288,7 +290,11 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
   }));
 
   router.get("/therapy/paciente/nr1/campaigns", asyncHandler(async (req, res) => {
-    const participant = await employee(req, res);
+    // A aba de pesquisas faz parte do portal de todo usuário autenticado.
+    // Ausência de vínculo corporativo significa apenas que não há campanha
+    // disponível; não deve virar uma tela de erro. A submissão continua usando
+    // employee() no modo estrito e só aceita a empresa/campanha autorizada.
+    const participant = await employee(req, res, { allowUnlinked: true });
     if (!participant) return;
     const snaps = await Promise.all(participant.companyIds.map(companyId =>
       campaigns().where("companyId", "==", companyId).limit(100).get()));
