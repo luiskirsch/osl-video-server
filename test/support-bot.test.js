@@ -99,3 +99,13 @@ test("histórico que começa pela assistente é aparado", async () => {
   await askBot({ userMessage: "oi", history: [{ role: "assistant", content: "boas-vindas" }, { role: "user", content: "a" }, { role: "assistant", content: "b" }], client });
   assert.equal(client.requests[0].messages[0].role, "user");
 });
+
+test("prompt distingue proposta de consulta confirmada e informa onde obter o link", async () => {
+  const client = fakeClient([{ stop_reason: "end_turn", content: [{ type: "text", text: "ok" }] }]);
+  await askBot({ userMessage: "onde pego o link da consulta que você marcou?", client });
+  const prompt = client.requests[0].system[0].text;
+  assert.match(prompt, /Depois da confirmação, reconheça normalmente que a consulta foi agendada por meio do seu cartão/);
+  assert.match(prompt, /próprio cartão da Aurora mostra o link da consulta/);
+  assert.match(prompt, /\[\[Agenda\]\].*"Copiar link"/);
+  assert.match(prompt, /NÃO fica em Consultas/);
+});

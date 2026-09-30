@@ -224,7 +224,7 @@ function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchI
       quando: formatDateTime(at),
       duracaoMin,
       conflitos,
-      orientacao: "O cartão de confirmação já apareceu no chat. A consulta só é criada quando o profissional clicar em Confirmar; lá ele confirma qual paciente cadastrado é e o e-mail. Não diga que já está agendada. Se houver conflito, avise antes."
+      orientacao: "O cartão de confirmação já apareceu no chat. A consulta só é criada quando o profissional clicar em Confirmar; antes disso, não diga que já está agendada. Depois do clique, a consulta terá sido agendada por meio da Aurora e o próprio cartão exibirá o link do paciente. Se houver conflito, avise antes."
     };
   }
 

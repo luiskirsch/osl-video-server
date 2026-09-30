@@ -132,6 +132,7 @@ test("propor agendamento gera cartão para o widget sem criar nada", async () =>
   assert.equal(result.cartaoExibido, true);
   assert.equal(result.duracaoMin, 50, "duração vem da configuração da agenda");
   assert.match(result.orientacao, /só é criada quando o profissional clicar em Confirmar/);
+  assert.match(result.orientacao, /próprio cartão exibirá o link do paciente/);
   assert.deepEqual(t.actions, [{
     type: "agendar_consulta", paciente: "luis henrique", data: "2026-09-30", hora: "15:00", duracaoMin: 50,
     quando: result.quando, conflitos: []
