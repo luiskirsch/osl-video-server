@@ -10151,6 +10151,46 @@ async function resolveCorporateEmployee(db, uid) {
   return { employeeDoc, companyDoc, email };
 }
 
+// A jornada é conteúdo educativo e também pode ser usada por uma conta pessoal
+// do app. O vínculo corporativo enriquece o contexto, mas sua ausência não deve
+// apagar nem bloquear o progresso de uma conta de paciente válida.
+async function resolveLearningParticipant(db, uid) {
+  const corporate = await resolveCorporateEmployee(db, uid);
+  if (!corporate.reason) return { ...corporate, participantType: "corporate" };
+
+  const patientSnap = await db.collection("therapy_patient_accounts").doc(uid).get();
+  if (!patientSnap.exists) return corporate;
+  const patient = patientSnap.data();
+  if (patient.role && patient.role !== "patient") return corporate;
+
+  return {
+    participantType: "personal",
+    patient,
+    employeeDoc: null,
+    companyDoc: null,
+    fallbackReason: corporate.reason
+  };
+}
+
+function employeeDevelopmentProgressRef(db, uid) {
+  return db.collection("therapy_employee_development").doc(`account_${uid}`);
+}
+
+async function loadEmployeeDevelopmentProgress(db, uid, participant) {
+  const canonicalRef = employeeDevelopmentProgressRef(db, uid);
+  const canonicalSnap = await canonicalRef.get();
+  if (canonicalSnap.exists || !participant.companyDoc) {
+    return canonicalSnap.exists ? canonicalSnap.data() : {};
+  }
+
+  // Compatibilidade com o identificador usado antes de o progresso se tornar
+  // estável por conta. A escrita seguinte migra naturalmente para o documento
+  // canônico sem perder módulos já concluídos.
+  const legacySnap = await db.collection("therapy_employee_development")
+    .doc(`${participant.companyDoc.id}_${uid}`).get();
+  return legacySnap.exists ? legacySnap.data() : {};
+}
+
 // POST /public/agendar/:slug/solicitar — cria solicitação + e-mail pro terapeuta
 // Jornada educativa do colaborador. O progresso é operacional e separado de
 // prontuários, humor, consultas e respostas da NR-1. A conclusão é validada no
@@ -10160,19 +10200,17 @@ router.get("/therapy/paciente/colaborador/jornada", asyncHandler(async (req, res
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
   const db = getDb();
-  const corporate = await resolveCorporateEmployee(db, uid);
-  if (corporate.reason) return sendError(res, 403, corporate.reason);
-  const companyId = corporate.companyDoc.id;
-  const progressSnap = await db.collection("therapy_employee_development")
-    .doc(`${companyId}_${uid}`).get();
+  const participant = await resolveLearningParticipant(db, uid);
+  if (participant.reason) return sendError(res, 403, participant.reason);
+  const progress = await loadEmployeeDevelopmentProgress(db, uid, participant);
   return res.json({ ok: true,
     employee: {
-      name: corporate.employeeDoc.data().nome || null,
-      companyName: corporate.companyDoc.data().nome || null,
-      department: corporate.employeeDoc.data().departamento || null,
-      role: corporate.employeeDoc.data().cargo || null
+      name: participant.employeeDoc?.data().nome || participant.patient?.displayName || null,
+      companyName: participant.companyDoc?.data().nome || null,
+      department: participant.employeeDoc?.data().departamento || null,
+      role: participant.employeeDoc?.data().cargo || null
     },
-    ...corporateDevelopment.publicCatalog(progressSnap.exists ? progressSnap.data() : {})
+    ...corporateDevelopment.publicCatalog(progress)
   });
 }));
 
@@ -10187,16 +10225,17 @@ router.post("/therapy/paciente/colaborador/jornada/modules/:moduleId/complete",
         validation.error, validation.explanation ? { explanation: validation.explanation } : undefined);
     }
     const db = getDb();
-    const corporate = await resolveCorporateEmployee(db, uid);
-    if (corporate.reason) return sendError(res, 403, corporate.reason);
-    const companyId = corporate.companyDoc.id;
-    const progressRef = db.collection("therapy_employee_development").doc(`${companyId}_${uid}`);
+    const participant = await resolveLearningParticipant(db, uid);
+    if (participant.reason) return sendError(res, 403, participant.reason);
+    const companyId = participant.companyDoc?.id || null;
+    const progressRef = employeeDevelopmentProgressRef(db, uid);
+    const legacyProgress = await loadEmployeeDevelopmentProgress(db, uid, participant);
     const prerequisiteId = corporateDevelopment.prerequisiteFor(validation.item.module.id);
     let alreadyCompleted = false;
     try {
       await db.runTransaction(async tx => {
         const snapshot = await tx.get(progressRef);
-        const current = snapshot.exists ? snapshot.data() : {};
+        const current = snapshot.exists ? snapshot.data() : legacyProgress;
         const completedModules = corporateDevelopment.cleanCompleted(current.completedModules);
         if (prerequisiteId && !completedModules[prerequisiteId]) {
           const error = new Error("MODULO_ANTERIOR_PENDENTE");
@@ -10207,8 +10246,9 @@ router.post("/therapy/paciente/colaborador/jornada/modules/:moduleId/complete",
         if (!alreadyCompleted) completedModules[validation.item.module.id] = Date.now();
         tx.set(progressRef, {
           companyId,
-          employeeId: corporate.employeeDoc.id,
+          employeeId: participant.employeeDoc?.id || null,
           employeeUid: uid,
+          participantType: participant.participantType,
           catalogVersion: "2026.1",
           completedModules,
           createdAt: current.createdAt || admin.firestore.FieldValue.serverTimestamp(),

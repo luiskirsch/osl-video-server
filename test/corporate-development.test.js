@@ -2,6 +2,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { resolve } = require("node:path");
 const development = require("../services/corporate-development");
 
 test("corporate learning catalog has defined tracks, courses and server-side checks", () => {
@@ -38,5 +40,14 @@ test("progress ignores unknown modules and calculates the real learning journey"
   const firstCourse = progress.tracks[0].courses[0];
   assert.equal(firstCourse.completedCount, 2);
   assert.equal(firstCourse.progressPercent, 100);
+});
+
+test("jornada pessoal não depende de cadastro corporativo e mantém progresso por conta", () => {
+  const route = readFileSync(resolve(__dirname, "../routes/therapy.js"), "utf8");
+  assert.match(route, /resolveLearningParticipant\(db, uid\)/);
+  assert.match(route, /therapy_patient_accounts"\)\.doc\(uid\)/);
+  assert.match(route, /doc\(`account_\$\{uid\}`\)/);
+  assert.match(route, /participantType: "personal"/);
+  assert.match(route, /loadEmployeeDevelopmentProgress\(db, uid, participant\)/);
 });
 
