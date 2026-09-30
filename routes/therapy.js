@@ -10159,9 +10159,7 @@ async function resolveLearningParticipant(db, uid) {
   if (!corporate.reason) return { ...corporate, participantType: "corporate" };
 
   const patientSnap = await db.collection("therapy_patient_accounts").doc(uid).get();
-  if (!patientSnap.exists) return corporate;
-  const patient = patientSnap.data();
-  if (patient.role && patient.role !== "patient") return corporate;
+  const patient = patientSnap.exists ? patientSnap.data() : {};
 
   return {
     participantType: "personal",

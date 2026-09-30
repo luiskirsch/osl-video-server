@@ -46,6 +46,8 @@ test("jornada pessoal não depende de cadastro corporativo e mantém progresso p
   const route = readFileSync(resolve(__dirname, "../routes/therapy.js"), "utf8");
   assert.match(route, /resolveLearningParticipant\(db, uid\)/);
   assert.match(route, /therapy_patient_accounts"\)\.doc\(uid\)/);
+  assert.match(route, /patientSnap\.exists \? patientSnap\.data\(\) : \{\}/);
+  assert.doesNotMatch(route, /if \(!patientSnap\.exists\) return corporate/);
   assert.match(route, /doc\(`account_\$\{uid\}`\)/);
   assert.match(route, /participantType: "personal"/);
   assert.match(route, /loadEmployeeDevelopmentProgress\(db, uid, participant\)/);
