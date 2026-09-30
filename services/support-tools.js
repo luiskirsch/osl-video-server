@@ -9,8 +9,10 @@
 const { therapySessionDurationMinutes, therapyTimestampMillis } = require("./therapy-session-state");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const SAO_PAULO_OFFSET_MS = 3 * 60 * 60 * 1000; // America/Sao_Paulo, sem horário de verão desde 2019
+const DEFAULT_TIME_ZONE = "America/Sao_Paulo";
 const MAX_SESSIONS = 40;
+const MAX_PROPOSALS = 3;
+const INACTIVE_STATUSES = new Set(["canceled", "cancelled", "completed", "no_show"]);
 const CHANGELOG_TTL_MS = 30 * 60 * 1000;
 const CHANGELOG_URL = "https://api.github.com/repos/luiskirsch/espaco-preludio-web/commits?per_page=80";
 
@@ -33,6 +35,21 @@ const TOOL_DEFINITIONS = [
     name: "ver_status_da_conta",
     description: "Situação da conta do profissional logado: plano, se o acesso a consultas está liberado (e por quê não, se for o caso), fim do período de teste, selo de verificação, itens do perfil público que faltam preencher e integrações ativas (2FA, NFS-e, WhatsApp, Asaas, resumo por IA). Use para 'tenho alguma pendência?', 'qual meu plano?', 'por que não consigo criar consulta?'.",
     input_schema: { type: "object", properties: {}, required: [], additionalProperties: false },
+    strict: true
+  },
+  {
+    name: "propor_agendamento",
+    description: "Prepara uma nova consulta para o profissional confirmar. NÃO cria a consulta: mostra no chat um cartão com paciente, data e hora, e a consulta só é criada quando o profissional clicar em Confirmar no cartão (lá ele também escolhe o paciente certo se houver mais de um com esse nome). Use quando ele pedir para agendar/marcar uma consulta e você souber o paciente, a data e a hora. Se faltar algum desses, pergunte antes. A duração segue a configuração da Agenda.",
+    input_schema: {
+      type: "object",
+      properties: {
+        paciente: { type: "string", description: "Nome do paciente como o profissional escreveu." },
+        data: { type: "string", description: "Data no formato AAAA-MM-DD, resolvida a partir do 'Agora' do contexto (hoje, amanhã, sexta...)." },
+        hora: { type: "string", description: "Hora de início no formato HH:MM (24h), no horário local do profissional." }
+      },
+      required: ["paciente", "data", "hora"],
+      additionalProperties: false
+    },
     strict: true
   },
   {
@@ -83,17 +100,39 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.trunc(n)));
 }
 
-function startOfTodaySaoPaulo(now) {
-  return Math.floor((now - SAO_PAULO_OFFSET_MS) / DAY_MS) * DAY_MS + SAO_PAULO_OFFSET_MS;
+// Fuso do navegador do profissional (ex.: America/Manaus): "hoje às 12h"
+// precisa ser 12h dele, não de Brasília.
+function safeTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone });
+    return timeZone;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
 }
 
-const DATE_TIME = new Intl.DateTimeFormat("pt-BR", {
-  timeZone: "America/Sao_Paulo", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
-});
-const DATE_ONLY = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" });
+function zonedParts(ms, timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }).formatToParts(new Date(ms)).map(part => [part.type, part.value]));
+  return { y: +parts.year, m: +parts.month, d: +parts.day, h: +parts.hour, mi: +parts.minute, s: +parts.second };
+}
 
-function formatDateTime(ms) { return DATE_TIME.format(new Date(ms)); }
-function formatDate(ms) { return DATE_ONLY.format(new Date(ms)); }
+function zoneOffsetMs(ms, timeZone) {
+  const p = zonedParts(ms, timeZone);
+  return Date.UTC(p.y, p.m - 1, p.d, p.h, p.mi, p.s) - Math.floor(ms / 1000) * 1000;
+}
+
+// Horário de parede no fuso → epoch. Date.UTC normaliza estouros (dia 32 etc.).
+function zonedToEpoch(y, m, d, h, mi, timeZone) {
+  const guess = Date.UTC(y, m - 1, d, h, mi);
+  return guess - zoneOffsetMs(guess - zoneOffsetMs(guess, timeZone), timeZone);
+}
+
+function startOfDayInZone(ms, timeZone, addDays = 0) {
+  const p = zonedParts(ms, timeZone);
+  return zonedToEpoch(p.y, p.m, p.d + addDays, 0, 0, timeZone);
+}
 
 // Nome + inicial do sobrenome: suficiente pro profissional reconhecer, sem
 // mandar o nome completo do paciente pra fora.
@@ -103,21 +142,34 @@ function shortPatientName(name) {
   return parts.length === 1 ? parts[0] : `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.`;
 }
 
-function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchImpl = fetch, now = () => Date.now(), changelogCache = { at: 0, value: null } }) {
+function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchImpl = fetch, now = () => Date.now(), changelogCache = { at: 0, value: null }, timeZone: requestedTimeZone = DEFAULT_TIME_ZONE }) {
+  const timeZone = safeTimeZone(requestedTimeZone);
+  const dateTimeFormat = new Intl.DateTimeFormat("pt-BR", { timeZone, weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const dateFormat = new Intl.DateTimeFormat("pt-BR", { timeZone, day: "2-digit", month: "2-digit", year: "numeric" });
+  const formatDateTime = ms => dateTimeFormat.format(new Date(ms));
+  const formatDate = ms => dateFormat.format(new Date(ms));
+  // Propostas de agendamento desta pergunta: a rota devolve ao widget, que
+  // mostra o cartão de confirmação.
+  const actions = [];
+
+  async function sessionsOfUser() {
+    const snap = await db.collection("therapy_sessions").where("therapistUid", "==", uid).limit(500).get();
+    return snap.docs
+      .map(doc => doc.data())
+      .filter(s => s.syntheticData !== true)
+      .map(s => ({ s, at: therapyTimestampMillis(s.scheduledAt) }))
+      .filter(({ at }) => at);
+  }
+
   async function verAgenda(input) {
     const futuros = clampInt(input?.dias_futuros, 0, 60, 7);
     const passados = clampInt(input?.dias_passados, 0, 60, 0);
     const current = now();
-    const todayStart = startOfTodaySaoPaulo(current);
-    const from = todayStart - passados * DAY_MS;
-    const to = todayStart + (futuros + 1) * DAY_MS;
+    const from = startOfDayInZone(current, timeZone, -passados);
+    const to = startOfDayInZone(current, timeZone, futuros + 1);
 
-    const snap = await db.collection("therapy_sessions").where("therapistUid", "==", uid).limit(500).get();
-    const sessions = snap.docs
-      .map(doc => doc.data())
-      .filter(s => s.syntheticData !== true)
-      .map(s => ({ s, at: therapyTimestampMillis(s.scheduledAt) }))
-      .filter(({ at }) => at && at >= from && at < to)
+    const sessions = (await sessionsOfUser())
+      .filter(({ at }) => at >= from && at < to)
       .sort((a, b) => a.at - b.at);
 
     return {
@@ -131,6 +183,48 @@ function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchI
         duracaoMin: therapySessionDurationMinutes(s)
       })),
       truncado: sessions.length > MAX_SESSIONS
+    };
+  }
+
+  async function proporAgendamento(input) {
+    const paciente = String(input?.paciente || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    if (!paciente) return { erro: "Falta o nome do paciente. Pergunte ao profissional." };
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(input?.data || "").trim());
+    const timeMatch = /^(\d{1,2}):(\d{2})$/.exec(String(input?.hora || "").trim());
+    if (!dateMatch || !timeMatch) return { erro: "Data ou hora em formato inválido (use AAAA-MM-DD e HH:MM)." };
+    const [y, m, d] = dateMatch.slice(1).map(Number);
+    const [h, mi] = timeMatch.slice(1).map(Number);
+    if (h > 23 || mi > 59) return { erro: "Hora inválida." };
+    const at = zonedToEpoch(y, m, d, h, mi, timeZone);
+    const check = zonedParts(at, timeZone);
+    if (check.y !== y || check.m !== m || check.d !== d) return { erro: "Essa data não existe no calendário." };
+    const current = now();
+    if (at < current - 5 * 60 * 1000) return { erro: `Esse horário (${formatDateTime(at)}) já passou. Confirme a data e a hora com o profissional.` };
+    if (at > current + 366 * DAY_MS) return { erro: "Só consigo propor consultas para os próximos 12 meses." };
+
+    const therapist = await loadTherapist(uid);
+    const access = evaluatePlanAccess(therapist);
+    if (!access.ok) {
+      return { erro: `As consultas desta conta não estão liberadas: ${BLOCK_REASONS[access.reason] || access.reason || "plano inativo"}. Oriente o profissional a resolver no Perfil.` };
+    }
+    const duracaoMin = therapySessionDurationMinutes({ durationMinutes: therapist?.agendaConfig?.slotMinutes });
+    const end = at + duracaoMin * 60 * 1000;
+    const conflitos = (await sessionsOfUser())
+      .filter(({ s, at: other }) => !INACTIVE_STATUSES.has(s.status) && other < end && other + therapySessionDurationMinutes(s) * 60 * 1000 > at)
+      .sort((a, b) => a.at - b.at)
+      .map(({ s, at: other }) => ({ quando: formatDateTime(other), paciente: shortPatientName(s.patientName) }));
+
+    const hora = `${String(h).padStart(2, "0")}:${timeMatch[2]}`;
+    if (actions.length < MAX_PROPOSALS) {
+      actions.push({ type: "agendar_consulta", paciente, data: dateMatch[0], hora, duracaoMin, quando: formatDateTime(at), conflitos });
+    }
+    return {
+      cartaoExibido: true,
+      paciente,
+      quando: formatDateTime(at),
+      duracaoMin,
+      conflitos,
+      orientacao: "O cartão de confirmação já apareceu no chat. A consulta só é criada quando o profissional clicar em Confirmar; lá ele confirma qual paciente cadastrado é e o e-mail. Não diga que já está agendada. Se houver conflito, avise antes."
     };
   }
 
@@ -180,10 +274,12 @@ function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchI
     return value;
   }
 
-  const handlers = { ver_agenda: verAgenda, ver_status_da_conta: verStatusDaConta, ver_novidades: verNovidades };
+  const handlers = { ver_agenda: verAgenda, ver_status_da_conta: verStatusDaConta, propor_agendamento: proporAgendamento, ver_novidades: verNovidades };
 
   return {
     definitions: TOOL_DEFINITIONS,
+    actions,
+    timeZone,
     async run(name, input) {
       const handler = handlers[name];
       if (!handler) return { isError: true, content: `Ferramenta desconhecida: ${name}` };
@@ -196,4 +292,4 @@ function createSupportTools({ uid, db, loadTherapist, evaluatePlanAccess, fetchI
   };
 }
 
-module.exports = { createSupportTools, TOOL_DEFINITIONS, _test: { startOfTodaySaoPaulo, shortPatientName, CHANGELOG_SKIP } };
+module.exports = { createSupportTools, TOOL_DEFINITIONS, safeTimeZone, _test: { startOfDayInZone, zonedToEpoch, shortPatientName, CHANGELOG_SKIP } };

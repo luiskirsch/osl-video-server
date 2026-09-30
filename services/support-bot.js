@@ -46,6 +46,7 @@ LINKS CLICÁVEIS:
 FERRAMENTAS (dados reais da conta de quem está conversando):
 - ver_agenda — sessões do profissional por período (data, hora, paciente, status, duração).
 - ver_status_da_conta — plano, se as consultas estão liberadas, fim do teste, selo de verificação, itens do perfil faltando e integrações ativas.
+- propor_agendamento — prepara uma nova consulta e mostra um cartão de confirmação no chat.
 - ver_novidades — mudanças publicadas recentemente na plataforma.
 Regras:
 - Quando a pergunta depende de dados da conta ou de novidades, CONSULTE a ferramenta antes de responder. Nunca invente horários, pacientes, planos ou atualizações.
@@ -53,6 +54,13 @@ Regras:
 - Ao citar pacientes, use o nome exatamente como veio da ferramenta.
 - Em novidades, traduza as mensagens técnicas em benefícios práticos ("agora X funciona assim"), agrupe itens parecidos, destaque as 3 a 5 mais relevantes com a data e omita termos de programação.
 - Se uma ferramenta falhar, diga que não conseguiu consultar agora — não chute.
+
+AGENDAR CONSULTAS:
+- Quando pedirem para agendar/marcar, você precisa de paciente, data e hora. Se faltar algum, pergunte (uma pergunta curta) antes de chamar propor_agendamento.
+- Resolva datas relativas ("hoje", "amanhã", "sexta") a partir do "Agora" do contexto. Hora sem minutos = hora cheia ("12h" = 12:00). "Meio-dia" = 12:00.
+- Você NÃO cria a consulta: propor_agendamento só exibe o cartão. Depois de chamar, diga em 1-2 frases que o cartão está logo abaixo e que a consulta só é criada ao clicar em Confirmar. Nunca diga que já agendou.
+- Se a ferramenta apontar conflito de horário, avise qual é. Se devolver erro (horário passado, plano bloqueado), explique e não insista.
+- Para mudar algo, é só chamar de novo com os dados corrigidos. Remarcar ou cancelar consultas existentes você não faz: indique [[Consultas]].
 
 O Espaço Prelúdio oferece:
 - Telessaúde com vídeo cifrado ponta-a-ponta (E2EE via LiveKit)
@@ -119,9 +127,6 @@ const PAGE_LABELS = {
 
 const REFUSAL_REPLY = "Não consigo ajudar com esse pedido por aqui. Se for algo da plataforma, me conte de outro jeito ou escreva para contato@espacopreludio.com.br.";
 
-const NOW_FORMAT = new Intl.DateTimeFormat("pt-BR", {
-  timeZone: "America/Sao_Paulo", weekday: "long", day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit"
-});
 
 let _client = null;
 function getClient() {
@@ -138,11 +143,15 @@ function pageLabel(page) {
 
 // Contexto por pergunta fica num bloco separado, depois do prompt fixo em
 // cache — mudar nome/hora/tela não invalida o cache do prompt principal.
-function buildContext({ userName, isFirstMessage, page, now }) {
+function buildContext({ userName, isFirstMessage, page, now, timeZone = "America/Sao_Paulo" }) {
   const firstName = (String(userName || "").trim().split(/\s+/)[0] || "")
     .replace(/[^\p{L}'-]/gu, "")
     .slice(0, 40);
-  const lines = [`CONTEXTO DESTA PERGUNTA:`, `- Agora: ${NOW_FORMAT.format(new Date(now))} (horário de Brasília).`];
+  const nowText = new Intl.DateTimeFormat("pt-BR", {
+    timeZone, weekday: "long", day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit"
+  }).format(new Date(now));
+  const isoDate = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(now));
+  const lines = [`CONTEXTO DESTA PERGUNTA:`, `- Agora: ${nowText} (${isoDate}, fuso ${timeZone}).`];
   const label = pageLabel(page);
   if (label) lines.push(`- O profissional está na tela: ${label}.`);
   if (firstName) {
@@ -184,11 +193,12 @@ function extractText(content) {
  * @param {string} [params.userName] - Nome do profissional; bot usa o
  *   primeiro nome na saudação da 1ª mensagem.
  * @param {string} [params.page] - Caminho da tela atual (ex.: "/agenda.html").
+ * @param {string} [params.timeZone] - Fuso IANA do navegador (já validado).
  * @param {{definitions: object[], run: Function}} [params.tools] - Ferramentas
  *   já presas ao usuário autenticado (services/support-tools.js).
  * @returns {Promise<{ok: boolean, reply?: string, error?: string, usage?: object, toolsUsed?: string[]}>}
  */
-async function askBot({ history = [], userMessage, userName = "", page = "", tools = null, client = getClient(), now = Date.now() }) {
+async function askBot({ history = [], userMessage, userName = "", page = "", timeZone = "America/Sao_Paulo", tools = null, client = getClient(), now = Date.now() }) {
   if (!client) return { ok: false, error: "ANTHROPIC_NAO_CONFIGURADO" };
   if (!userMessage || typeof userMessage !== "string") return { ok: false, error: "MENSAGEM_INVALIDA" };
 
@@ -209,7 +219,7 @@ async function askBot({ history = [], userMessage, userName = "", page = "", too
   const isFirstMessage = !recentHistory.some(h => h.role === "assistant");
   const system = [
     { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
-    { type: "text", text: buildContext({ userName, isFirstMessage, page, now }) }
+    { type: "text", text: buildContext({ userName, isFirstMessage, page, now, timeZone }) }
   ];
   const messages = [...recentHistory, { role: "user", content: cleanMsg }];
   const usage = { input: 0, output: 0, cacheRead: 0 };

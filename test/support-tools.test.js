@@ -39,10 +39,14 @@ function tools(overrides = {}) {
   });
 }
 
-test("início do dia usa o fuso de São Paulo", () => {
-  assert.equal(_test.startOfTodaySaoPaulo(NOW), Date.UTC(2026, 8, 30, 3, 0));
+test("início do dia respeita o fuso do profissional", () => {
+  const sp = "America/Sao_Paulo";
+  assert.equal(_test.startOfDayInZone(NOW, sp), Date.UTC(2026, 8, 30, 3, 0));
   // 23:30 em SP ainda é o mesmo dia, embora já seja dia seguinte em UTC
-  assert.equal(_test.startOfTodaySaoPaulo(Date.UTC(2026, 9, 1, 2, 30)), Date.UTC(2026, 8, 30, 3, 0));
+  assert.equal(_test.startOfDayInZone(Date.UTC(2026, 9, 1, 2, 30), sp), Date.UTC(2026, 8, 30, 3, 0));
+  assert.equal(_test.startOfDayInZone(NOW, sp, 1), Date.UTC(2026, 9, 1, 3, 0));
+  assert.equal(_test.startOfDayInZone(NOW, "America/Manaus"), Date.UTC(2026, 8, 30, 4, 0));
+  assert.equal(_test.zonedToEpoch(2026, 9, 30, 12, 0, "America/Manaus"), Date.UTC(2026, 8, 30, 16, 0));
 });
 
 test("agenda traz só o período pedido, da própria conta, com nome abreviado", async () => {
@@ -109,4 +113,65 @@ test("falha de ferramenta volta como erro para o modelo, sem derrubar a conversa
   assert.equal(result.isError, true);
   assert.match(result.content, /não chute|sem inventar/i);
   assert.equal((await t.run("apagar_tudo", {})).isError, true);
+});
+
+function schedulingTools({ sessions = [], therapist = { agendaConfig: { slotMinutes: 50 } }, access = { ok: true, plano: "pro" }, timeZone } = {}) {
+  return createSupportTools({
+    uid: "prof_1",
+    db: fakeDb(sessions),
+    loadTherapist: async () => therapist,
+    evaluatePlanAccess: () => access,
+    now: () => NOW,
+    timeZone
+  });
+}
+
+test("propor agendamento gera cartão para o widget sem criar nada", async () => {
+  const t = schedulingTools();
+  const result = JSON.parse((await t.run("propor_agendamento", { paciente: "  luis   henrique ", data: "2026-09-30", hora: "15:00" })).content);
+  assert.equal(result.cartaoExibido, true);
+  assert.equal(result.duracaoMin, 50, "duração vem da configuração da agenda");
+  assert.match(result.orientacao, /só é criada quando o profissional clicar em Confirmar/);
+  assert.deepEqual(t.actions, [{
+    type: "agendar_consulta", paciente: "luis henrique", data: "2026-09-30", hora: "15:00", duracaoMin: 50,
+    quando: result.quando, conflitos: []
+  }]);
+});
+
+test("recusa horário passado, data inexistente e formato inválido", async () => {
+  const t = schedulingTools();
+  const passado = JSON.parse((await t.run("propor_agendamento", { paciente: "Ana", data: "2026-09-30", hora: "12:00" })).content);
+  assert.match(passado.erro, /já passou/);
+  const inexistente = JSON.parse((await t.run("propor_agendamento", { paciente: "Ana", data: "2027-02-30", hora: "10:00" })).content);
+  assert.match(inexistente.erro, /não existe/);
+  const invalido = JSON.parse((await t.run("propor_agendamento", { paciente: "Ana", data: "amanhã", hora: "10h" })).content);
+  assert.match(invalido.erro, /formato inválido/);
+  assert.equal(t.actions.length, 0, "nenhum cartão para pedidos inválidos");
+});
+
+test("12h em Manaus é 12h do profissional, não de Brasília", async () => {
+  // NOW = 13:00 em SP = 12:00 em Manaus: 12:30 local ainda está no futuro
+  const t = schedulingTools({ timeZone: "America/Manaus" });
+  const result = JSON.parse((await t.run("propor_agendamento", { paciente: "Ana", data: "2026-09-30", hora: "12:30" })).content);
+  assert.equal(result.cartaoExibido, true);
+  assert.match(result.quando, /12:30/);
+  assert.equal(schedulingTools({ timeZone: "Fuso/Inexistente" }).timeZone, "America/Sao_Paulo");
+});
+
+test("aponta conflito com sessão ativa e ignora canceladas", async () => {
+  const sessions = [
+    { therapistUid: "prof_1", patientName: "Maria Souza", status: "scheduled", scheduledAt: NOW + 2 * HOUR + 30 * 60000, durationMinutes: 50 },
+    { therapistUid: "prof_1", patientName: "Cancelada Silva", status: "canceled", scheduledAt: NOW + 2 * HOUR }
+  ];
+  const t = schedulingTools({ sessions });
+  const result = JSON.parse((await t.run("propor_agendamento", { paciente: "Luis", data: "2026-09-30", hora: "15:00" })).content);
+  assert.deepEqual(result.conflitos.map(c => c.paciente), ["Maria S."]);
+  assert.equal(t.actions[0].conflitos.length, 1);
+});
+
+test("plano bloqueado não gera cartão", async () => {
+  const t = schedulingTools({ access: { ok: false, plano: "trial", reason: "TRIAL_EXPIRADO" } });
+  const result = JSON.parse((await t.run("propor_agendamento", { paciente: "Ana", data: "2026-10-01", hora: "10:00" })).content);
+  assert.match(result.erro, /não estão liberadas/);
+  assert.equal(t.actions.length, 0);
 });

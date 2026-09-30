@@ -16951,19 +16951,29 @@ router.post("/therapy/support/chat", asyncHandler(async (req, res) => {
 
   // Tela atual (só caminho): a Aurora usa pra contextualizar a resposta.
   const page = String(req.body?.page || "").slice(0, 120);
-  const tools = createSupportTools({ uid, db: getDb(), loadTherapist, evaluatePlanAccess, changelogCache: supportChangelogCache });
+  const tools = createSupportTools({
+    uid,
+    db: getDb(),
+    loadTherapist,
+    evaluatePlanAccess,
+    changelogCache: supportChangelogCache,
+    timeZone: String(req.body?.timeZone || "").slice(0, 64)
+  });
 
   const result = await supportBot.askBot({
     history,
     userMessage: message,
     userName,
     page: /^\/[\w\-./]*$/.test(page) ? page : "",
+    timeZone: tools.timeZone,
     tools
   });
   if (!result.ok) {
     return sendError(res, 502, result.error || "BOT_FALHOU", { detail: result.detail || null });
   }
-  return res.json({ ok: true, reply: result.reply, remaining: quota.remaining, usage: result.usage });
+  // actions: propostas de agendamento — o widget mostra o cartão e só cria a
+  // consulta (POST /therapy/sessao/criar) quando o profissional confirma.
+  return res.json({ ok: true, reply: result.reply, actions: tools.actions, remaining: quota.remaining, usage: result.usage });
 }));
 
 // ═════════════════════════════════════════════════════════════════════════
