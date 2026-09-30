@@ -9706,8 +9706,18 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
 
   const items = [];
   const availableEspecialidades = new Set();
+  const visibilityMigration = db.batch();
+  let visibilityMigrationCount = 0;
   snap.forEach(d => {
     const t = d.data();
+    if (typeof t.adminDirectoryVisible !== "boolean" && typeof t.adminDirectoryBlocked !== "boolean") {
+      visibilityMigration.set(d.ref, {
+        adminDirectoryVisible: getPublicDirectoryVisibility(t),
+        adminDirectoryVisibilityUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        adminDirectoryVisibilityUpdatedBy: "system:legacy-migration"
+      }, { merge: true });
+      visibilityMigrationCount += 1;
+    }
     if (!isPublicDirectoryEligible(t)) return;
 
     if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
@@ -9750,6 +9760,12 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   });
 
   // Ordena alfabético (nome). Limit aplicado por último.
+  if (visibilityMigrationCount > 0) {
+    await visibilityMigration.commit().catch((err) => {
+      logWarn("public_directory_visibility_migration_failed", { error: err?.message || String(err) });
+    });
+  }
+
   items.sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
 
   return res.json({

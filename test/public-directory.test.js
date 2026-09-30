@@ -30,6 +30,7 @@ test("perfil continua exigindo verificacao para aparecer", () => {
 
 test("migracao preserva escolha antiga sem permitir novo auto-opt-in", () => {
   assert.equal(getPublicDirectoryVisibility({ listPublicly: true }), true);
+  assert.equal(getPublicDirectoryVisibility({ publicSchedulingEnabled: true }), true);
   assert.equal(getPublicDirectoryVisibility({ listPublicly: false }), false);
   assert.equal(getPublicDirectoryVisibility({ listPublicly: true, adminDirectoryBlocked: true }), false);
   assert.equal(getPublicDirectoryVisibility({ listPublicly: false, adminDirectoryBlocked: false }), true);
