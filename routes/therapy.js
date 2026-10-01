@@ -16959,15 +16959,18 @@ router.post("/therapy/pro-chat/threads/:id/files", asyncHandler(async (req, res)
   const thread = threadSnap.data();
   if (thread.participantA !== uid && thread.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  // Pedaços no Firestore (sem bucket de Storage no plano atual).
   const fileId = newId("prochatfile");
-  const storagePath = `therapy-pro-chat/${threadId}/${fileId}.bin`;
-  await getStorageBucket().file(storagePath).save(encrypted, {
-    resumable: false,
-    contentType: "application/octet-stream",
-    metadata: { cacheControl: "private, no-store, max-age=0" }
-  });
-  await db.collection("therapy_pro_chat_files").doc(fileId).set({
-    fileId, threadId, senderUid: uid, storagePath, fileIv,
+  const CHUNK = 700_000;
+  const chunks = Math.ceil(encrypted.length / CHUNK);
+  const fileRef = db.collection("therapy_pro_chat_files").doc(fileId);
+  for (let i = 0; i < chunks; i++) {
+    await fileRef.collection("chunks").doc(String(i).padStart(3, "0")).set({
+      i, data: encrypted.subarray(i * CHUNK, (i + 1) * CHUNK).toString("base64")
+    });
+  }
+  await fileRef.set({
+    fileId, threadId, senderUid: uid, fileIv, chunks,
     encryptedSize: encrypted.length,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
@@ -16991,7 +16994,13 @@ router.get("/therapy/pro-chat/threads/:id/files/:fileId", asyncHandler(async (re
   if (thread.participantA !== uid && thread.participantB !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (file.threadId !== threadId) return sendError(res, 403, "ACESSO_NEGADO");
 
-  const [encrypted] = await getStorageBucket().file(file.storagePath).download();
+  let encrypted;
+  if (file.chunks) {
+    const snap = await fileSnap.ref.collection("chunks").orderBy("i").get();
+    encrypted = Buffer.concat(snap.docs.map(d => Buffer.from(d.data().data, "base64")));
+  } else {
+    [encrypted] = await getStorageBucket().file(file.storagePath).download(); // anexos antigos
+  }
   res.setHeader("Cache-Control", "private, no-store");
   return res.json({ ok: true, fileBase64: encrypted.toString("base64"), fileIv: file.fileIv });
 }));
@@ -20573,7 +20582,13 @@ router.get("/therapy/chat/threads/:id/files/:fileId", asyncHandler(async (req, r
   if (thread.therapistUid !== uid && thread.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   if (file.threadId !== threadId) return sendError(res, 403, "ACESSO_NEGADO");
 
-  const [encrypted] = await getStorageBucket().file(file.storagePath).download();
+  let encrypted;
+  if (file.chunks) {
+    const snap = await fileSnap.ref.collection("chunks").orderBy("i").get();
+    encrypted = Buffer.concat(snap.docs.map(d => Buffer.from(d.data().data, "base64")));
+  } else {
+    [encrypted] = await getStorageBucket().file(file.storagePath).download(); // anexos antigos
+  }
   res.setHeader("Cache-Control", "private, no-store");
   return res.json({ ok: true, fileBase64: encrypted.toString("base64"), fileIv: file.fileIv });
 }));
