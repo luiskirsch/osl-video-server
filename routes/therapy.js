@@ -180,6 +180,25 @@ function sha256Hex(value) {
   return crypto.createHash("sha256").update(String(value)).digest("hex");
 }
 
+// Código do comprovante de comparecimento: EP-XXXX-XXXX-XXXX, alfabeto sem
+// caracteres ambíguos (0/O, 1/I/L). 12 símbolos de 31 ≈ 59 bits.
+const CERT_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+function newAttendanceCertCode() {
+  const chars = Array.from({ length: 12 }, () => CERT_CODE_ALPHABET[crypto.randomInt(CERT_CODE_ALPHABET.length)]).join("");
+  return `EP-${chars.slice(0, 4)}-${chars.slice(4, 8)}-${chars.slice(8, 12)}`;
+}
+function normalizeAttendanceCertCode(raw) {
+  const s = String(raw || "").toUpperCase().replace(/[^0-9A-Z]/g, "").replace(/^EP/, "");
+  if (s.length !== 12 || ![...s].every(ch => CERT_CODE_ALPHABET.includes(ch))) return null;
+  return `EP-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
+}
+// "Luis Henrique Teixeira Kirsch" → "Luis H*** T*** K***"
+function maskPersonName(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  return parts.map((p, i) => (i === 0 ? p : `${p[0]}***`)).join(" ");
+}
+
 function safeEqualHex(a, b) {
   if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
   try { return crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex")); } catch { return false; }
@@ -20666,21 +20685,108 @@ router.get("/therapy/sessao/:id/comparecimento", asyncHandler(async (req, res) =
   const entrada = ms(s.patientFirstJoinedAt) || ms(s.sessionStartedAt) || ms(s.patientJoinedAt);
   if (!entrada) return sendError(res, 409, "PRESENCA_NAO_REGISTRADA");
   const therapist = await loadTherapist(uid);
-  await logAudit({ type: "attendance_certificate_issued", therapistUid: uid, sessionId });
+  // SEM_CONSELHO (e qualquer conselho não regulamentado) não imprime sigla nem número.
+  const sigla = resolveSiglaFromTherapist(therapist || {});
+  const regulamentado = !!(sigla && isConselhoRegulamentado(sigla));
+  const comprovante = {
+    sessionId,
+    patientName: s.patientNameFinal || s.patientName || "",
+    scheduledAt: ms(s.scheduledAt),
+    entrada,
+    inicio: ms(s.sessionStartedAt),
+    termino: ms(s.completedAt),
+    profissional: {
+      nome: therapist?.displayName || "",
+      conselho: regulamentado ? sigla : null,
+      registro: regulamentado ? (therapist?.numeroConselho || therapist?.crp || therapist?.crm || null) : null,
+      especialidade: therapist?.especialidade || null
+    }
+  };
+
+  // Registro verificável: o PDF leva um código aleatório + QR para
+  // /verificar-comprovante. Reemitir reaproveita o código se os dados não
+  // mudaram; se mudaram, o anterior é revogado e um novo é emitido.
+  const certs = getDb().collection("attendance_certificates");
+  const fingerprint = sha256Hex(JSON.stringify([comprovante.patientName, entrada, comprovante.termino,
+    comprovante.profissional.nome, comprovante.profissional.conselho, comprovante.profissional.registro]));
+  let code = null;
+  if (s.attendanceCertCode) {
+    const prev = await certs.doc(s.attendanceCertCode).get();
+    if (prev.exists && !prev.data().revokedAt && prev.data().fingerprint === fingerprint) code = s.attendanceCertCode;
+    else if (prev.exists && !prev.data().revokedAt) {
+      await prev.ref.set({ revokedAt: admin.firestore.FieldValue.serverTimestamp(), revokedReason: "reemitido" }, { merge: true });
+    }
+  }
+  if (!code) {
+    code = newAttendanceCertCode();
+    await certs.doc(code).set({
+      sessionId,
+      therapistUid: uid,
+      fingerprint,
+      patientName: comprovante.patientName,
+      entrada,
+      termino: comprovante.termino,
+      profissional: comprovante.profissional,
+      issuedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    await getDb().collection("therapy_sessions").doc(sessionId).set({ attendanceCertCode: code }, { merge: true });
+  }
+
+  await logAudit({ type: "attendance_certificate_issued", therapistUid: uid, sessionId, code });
+  return res.json({ ok: true, comprovante: { ...comprovante, verificationCode: code } });
+}));
+
+// POST /therapy/sessao/:id/comparecimento/revogar — profissional invalida o
+// comprovante emitido (ex.: emitido por engano). A verificação pública passa a
+// mostrar "revogado".
+router.post("/therapy/sessao/:id/comparecimento/revogar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.id || "").trim();
+  const snap = await getDb().collection("therapy_sessions").doc(sessionId).get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const s = snap.data();
+  if (s.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (!s.attendanceCertCode) return sendError(res, 404, "COMPROVANTE_NAO_EMITIDO");
+  await getDb().collection("attendance_certificates").doc(s.attendanceCertCode)
+    .set({ revokedAt: admin.firestore.FieldValue.serverTimestamp(), revokedReason: "profissional" }, { merge: true });
+  await snap.ref.set({ attendanceCertCode: admin.firestore.FieldValue.delete() }, { merge: true });
+  await logAudit({ type: "attendance_certificate_revoked", therapistUid: uid, sessionId, code: s.attendanceCertCode });
+  return res.json({ ok: true });
+}));
+
+// GET /therapy/comparecimento/verificar/:code — público. Quem recebeu o PDF
+// confere os dados registrados pelo servidor. Mostra o mínimo (LGPD): nome do
+// paciente mascarado, data/horários e profissional. Nada clínico.
+const attendanceVerifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+router.get("/therapy/comparecimento/verificar/:code", attendanceVerifyLimiter, asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const code = normalizeAttendanceCertCode(req.params.code);
+  if (!code) return sendError(res, 404, "COMPROVANTE_NAO_ENCONTRADO");
+  const snap = await getDb().collection("attendance_certificates").doc(code).get();
+  if (!snap.exists) return sendError(res, 404, "COMPROVANTE_NAO_ENCONTRADO");
+  const c = snap.data();
   return res.json({
     ok: true,
     comprovante: {
-      sessionId,
-      patientName: s.patientNameFinal || s.patientName || "",
-      scheduledAt: ms(s.scheduledAt),
-      entrada,
-      inicio: ms(s.sessionStartedAt),
-      termino: ms(s.completedAt),
+      code,
+      status: c.revokedAt ? "revogado" : "valido",
+      revokedAt: therapyTimestampMillis(c.revokedAt) || null,
+      issuedAt: therapyTimestampMillis(c.issuedAt) || null,
+      patientNameMasked: maskPersonName(c.patientName),
+      entrada: c.entrada || null,
+      termino: c.termino || null,
       profissional: {
-        nome: therapist?.displayName || "",
-        conselho: therapist?.tipoConselho || null,
-        registro: therapist?.numeroConselho || therapist?.crp || therapist?.crm || null,
-        especialidade: therapist?.especialidade || null
+        nome: c.profissional?.nome || "",
+        conselho: c.profissional?.conselho || null,
+        registro: c.profissional?.registro || null
       }
     }
   });
