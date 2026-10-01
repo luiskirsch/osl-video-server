@@ -74,6 +74,7 @@ const {
   selectTherapyPanelSessions
 } = require("../services/therapy-session-state");
 const studentDevelopment = require("../services/student-development");
+const privateFiles = require("../services/private-files");
 const corporateDevelopment = require("../services/corporate-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
@@ -957,20 +958,21 @@ async function savePrivateVerificationDocument({ category, uid, uploadId, buffer
     error.code = "CONTEUDO_NAO_CORRESPONDE_AO_FORMATO";
     throw error;
   }
-  const storagePath = `therapy-verification-docs/${category}/${uid}/${uploadId}.${extension}`;
-  await getStorageBucket().file(storagePath).save(buffer, {
-    resumable: false,
-    contentType: mediaType,
-    metadata: {
-      cacheControl: "private, no-store, max-age=0",
-      contentDisposition: `attachment; filename="${uploadId}.${extension}"`
-    }
-  });
-  return storagePath;
+  // Firestore em pedaços (sem bucket de Storage no plano atual).
+  return privateFiles.savePrivateFile(`verif_${category}_${uid}_${uploadId}.${extension}`, buffer, { contentType: mediaType });
+}
+
+async function removeVerificationDocument(storagePath) {
+  if (!storagePath) return;
+  if (privateFiles.isFirestorePath(storagePath)) await privateFiles.deletePrivateFile(storagePath).catch(() => {});
+  else await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
 }
 
 async function readVerificationDocumentBase64(upload) {
   // Compatibilidade de leitura com registros antigos, anteriores a migracao.
+  if (privateFiles.isFirestorePath(upload?.storagePath)) {
+    return (await privateFiles.readPrivateFile(upload.storagePath)).toString("base64");
+  }
   if (upload?.storagePath) {
     const [buffer] = await getStorageBucket().file(upload.storagePath).download();
     return buffer.toString("base64");
@@ -1147,7 +1149,7 @@ router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (r
       uploadedAt: admin.firestore.FieldValue.serverTimestamp()
     });
   } catch (error) {
-    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    await removeVerificationDocument(storagePath);
     throw error;
   }
 
@@ -1342,7 +1344,7 @@ router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(asyn
       uploadedAt: admin.firestore.FieldValue.serverTimestamp()
     });
   } catch (error) {
-    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    await removeVerificationDocument(storagePath);
     throw error;
   }
 
@@ -1500,7 +1502,7 @@ router.post("/therapy/profissional/comprovante-formacao", asyncHandler(async (re
       uploadedAt: admin.firestore.FieldValue.serverTimestamp()
     });
   } catch (error) {
-    await getStorageBucket().file(storagePath).delete({ ignoreNotFound: true }).catch(() => {});
+    await removeVerificationDocument(storagePath);
     throw error;
   }
 
