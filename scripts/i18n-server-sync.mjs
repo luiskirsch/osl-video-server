@@ -33,12 +33,32 @@ function human(s) {
   return PT_HINT.test(bare) || /\s/.test(bare) || /^[A-ZÀ-Ý][a-zà-ÿ]+$/.test(bare);
 }
 function fragments(node) {
+  // Percorre o template caractere a caractere: tags podem conter ${} (ex.:
+  // <a href="${url}">Texto</a>), então o estado "dentro de tag" atravessa
+  // os pedaços. Texto entre tags vira fragmento; ${} no texto vira {N}.
   const parts = [];
-  let buf = "", idx = 0;
-  const flush = () => { if (buf) parts.push(buf); buf = ""; idx = 0; };
+  let buf = "", idx = 0, inTag = false;
+  const flush = () => {
+    if (buf.trim()) {
+      parts.push(buf);
+      // Texto puro com quebras de linha: cada linha também vira entrada.
+      if (buf.includes("\n")) {
+        let n = 0;
+        for (const line of buf.split("\n")) {
+          const renum = line.replace(/\{\d+\}/g, () => `{${n++}}`);
+          if (renum.trim()) parts.push(renum);
+        }
+      }
+    }
+    buf = ""; idx = 0;
+  };
   node.quasis.forEach((q, i) => {
-    (q.value.cooked ?? q.value.raw).split(/(<[^>]*>)/).forEach((p, j) => { if (j % 2) flush(); else buf += p; });
-    if (i < node.expressions.length) buf += `{${idx++}}`;
+    for (const ch of (q.value.cooked ?? q.value.raw)) {
+      if (inTag) { if (ch === ">") inTag = false; continue; }
+      if (ch === "<") { flush(); inTag = true; continue; }
+      buf += ch;
+    }
+    if (i < node.expressions.length && !inTag) buf += `{${idx++}}`;
   });
   flush();
   return parts.map(norm).filter(human);

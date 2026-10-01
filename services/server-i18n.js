@@ -43,7 +43,7 @@ function dictionary(locale) {
   return d;
 }
 
-function translateSegment(text, d) {
+function translateSegment(text, d, depth = 0) {
   const key = norm(text);
   if (key.length < 2 || !/[A-Za-zÀ-ÿ]/.test(key)) return null;
   const hit = d.exact.get(key);
@@ -54,9 +54,10 @@ function translateSegment(text, d) {
     const values = {};
     p.order.forEach((n, i) => { values[n] = m[i + 1]; });
     return p.tr.replace(/\{(\d+)\}/g, (_, n) => {
+      // Valor encaixado que também é texto conhecido (ex.: "Confirmar presença: …").
       const v = values[n] ?? "";
-      const inner = d.exact.get(norm(v));
-      return inner !== undefined ? inner : v;
+      const inner = depth < 2 ? translateSegment(v, d, depth + 1) : null;
+      return inner != null ? inner : v;
     });
   }
   return null;
@@ -66,16 +67,21 @@ function keepSpacing(original, translated) {
   return original.match(/^\s*/)[0] + translated + original.match(/\s*$/)[0];
 }
 
-// Texto simples: tenta o texto inteiro, depois linha a linha.
+// Texto simples: linha a linha (preserva as quebras); o texto inteiro só é
+// tentado quando nenhuma linha tem tradução própria.
 function translateText(text, locale) {
   if (!text || !INTL[locale] || locale === "pt-BR") return text;
   const d = dictionary(locale);
-  const whole = translateSegment(text, d);
-  if (whole != null) return keepSpacing(text, whole);
-  return String(text).split("\n").map(line => {
+  let hits = 0;
+  const lines = String(text).split("\n").map(line => {
     const t = translateSegment(line, d);
-    return t != null ? keepSpacing(line, t) : line;
-  }).join("\n");
+    if (t == null) return line;
+    hits++;
+    return keepSpacing(line, t);
+  });
+  if (hits) return lines.join("\n");
+  const whole = translateSegment(text, d);
+  return whole != null ? keepSpacing(text, whole) : text;
 }
 
 // HTML: traduz cada trecho de texto entre tags (conteúdo de <style> intacto).
