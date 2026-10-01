@@ -20711,15 +20711,20 @@ router.get("/therapy/sessao/:id/comparecimento", asyncHandler(async (req, res) =
   const fingerprint = sha256Hex(JSON.stringify([comprovante.patientName, entrada, comprovante.termino,
     comprovante.profissional.nome, comprovante.profissional.conselho, comprovante.profissional.registro]));
   let code = null;
+  let issuedAt = null;
   if (s.attendanceCertCode) {
     const prev = await certs.doc(s.attendanceCertCode).get();
-    if (prev.exists && !prev.data().revokedAt && prev.data().fingerprint === fingerprint) code = s.attendanceCertCode;
+    if (prev.exists && !prev.data().revokedAt && prev.data().fingerprint === fingerprint) {
+      code = s.attendanceCertCode;
+      issuedAt = therapyTimestampMillis(prev.data().issuedAt) || null;
+    }
     else if (prev.exists && !prev.data().revokedAt) {
       await prev.ref.set({ revokedAt: admin.firestore.FieldValue.serverTimestamp(), revokedReason: "reemitido" }, { merge: true });
     }
   }
   if (!code) {
     code = newAttendanceCertCode();
+    issuedAt = Date.now();
     await certs.doc(code).set({
       sessionId,
       therapistUid: uid,
@@ -20728,13 +20733,14 @@ router.get("/therapy/sessao/:id/comparecimento", asyncHandler(async (req, res) =
       entrada,
       termino: comprovante.termino,
       profissional: comprovante.profissional,
-      issuedAt: admin.firestore.FieldValue.serverTimestamp()
+      // Data/hora da assinatura eletrônica impressa no PDF (Lei 14.063/2020).
+      issuedAt: admin.firestore.Timestamp.fromMillis(issuedAt)
     });
     await getDb().collection("therapy_sessions").doc(sessionId).set({ attendanceCertCode: code }, { merge: true });
   }
 
   await logAudit({ type: "attendance_certificate_issued", therapistUid: uid, sessionId, code });
-  return res.json({ ok: true, comprovante: { ...comprovante, verificationCode: code } });
+  return res.json({ ok: true, comprovante: { ...comprovante, verificationCode: code, issuedAt } });
 }));
 
 // POST /therapy/sessao/:id/comparecimento/revogar — profissional invalida o
