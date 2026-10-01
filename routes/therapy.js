@@ -2652,6 +2652,8 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
 
   const sessionUpdate = {
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Primeira entrada (patientJoinedAt é sobrescrito a cada reconexão) — comprovante de comparecimento.
+    ...(session.patientFirstJoinedAt ? {} : { patientFirstJoinedAt: admin.firestore.FieldValue.serverTimestamp() }),
     patientNameFinal: finalName,
     patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
     // Marca o token como consumido — proxima tentativa cai no JOIN_TOKEN_JA_USADO.
@@ -20614,6 +20616,45 @@ router.get("/therapy/chat/threads/:id/files/:fileId", asyncHandler(async (req, r
   return res.json({ ok: true, fileBase64: encrypted.toString("base64"), fileIv: file.fileIv });
 }));
 
+// GET /therapy/sessao/:id/comparecimento — dados do comprovante de
+// comparecimento (declaração de presença, não documento clínico). Horários são
+// os registrados pela plataforma ao entrar na sala de vídeo. Só o profissional
+// dono da consulta acessa, e só para consultas concluídas com o paciente presente.
+router.get("/therapy/sessao/:id/comparecimento", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.id || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+  const snap = await getDb().collection("therapy_sessions").doc(sessionId).get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const s = snap.data();
+  if (s.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (s.status !== "completed") return sendError(res, 409, "SESSAO_NAO_CONCLUIDA");
+  const ms = v => therapyTimestampMillis(v) || null;
+  const entrada = ms(s.patientFirstJoinedAt) || ms(s.sessionStartedAt) || ms(s.patientJoinedAt);
+  if (!entrada) return sendError(res, 409, "PRESENCA_NAO_REGISTRADA");
+  const therapist = await loadTherapist(uid);
+  await logAudit({ type: "attendance_certificate_issued", therapistUid: uid, sessionId });
+  return res.json({
+    ok: true,
+    comprovante: {
+      sessionId,
+      patientName: s.patientNameFinal || s.patientName || "",
+      scheduledAt: ms(s.scheduledAt),
+      entrada,
+      inicio: ms(s.sessionStartedAt),
+      termino: ms(s.completedAt),
+      profissional: {
+        nome: therapist?.displayName || "",
+        conselho: therapist?.tipoConselho || null,
+        registro: therapist?.numeroConselho || therapist?.crp || therapist?.crm || null,
+        especialidade: therapist?.especialidade || null
+      }
+    }
+  });
+}));
+
 // Emite um token LiveKit para o paciente autenticado no app nativo.
 // Diferente do link público de convite, este fluxo pode ser refeito em caso de
 // queda de conexão: a própria conta Firebase é a credencial de acesso.
@@ -20700,6 +20741,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
   await sessionSnap.ref.set({
     patientAccountUid: uid,
     patientJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
+    ...(session.patientFirstJoinedAt ? {} : { patientFirstJoinedAt: admin.firestore.FieldValue.serverTimestamp() }),
     patientNameFinal: patientName,
     patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
     patientJoinSource: "native_app",
