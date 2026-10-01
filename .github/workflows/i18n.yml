@@ -5,7 +5,7 @@ name: Traduções dos e-mails
 on:
   push:
     branches: [luiskirsch.github.io]
-    paths: ["services/email.js", "services/scheduler.js", "routes/therapy.js", "routes/nr1.js", "scripts/i18n-server-sync.mjs"]
+    paths: ["services/email.js", "services/scheduler.js", "services/whatsapp.js", "routes/therapy.js", "routes/nr1.js", "scripts/i18n-server-sync.mjs"]
   schedule:
     - cron: "37 6 * * *"
   workflow_dispatch:

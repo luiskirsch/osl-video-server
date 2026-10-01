@@ -32,6 +32,8 @@
 // funções viram no-op com log silencioso. Não bloqueia outras features.
 
 const { httpFetch } = require("../utils");
+const { translateText } = require("./server-i18n");
+const { localeForEmail } = require("./user-locale");
 const { logInfo, logWarn, logError } = require("../logger");
 const {
   ZAPI_INSTANCE_ID, ZAPI_CLIENT_TOKEN, ZAPI_SECURITY_TOKEN, ZAPI_BASE_URL
@@ -169,25 +171,28 @@ async function getInstanceStatus() {
 
 // Resolve template efetivo: usa o customizado do profissional se houver,
 // senão cai no DEFAULT_TEMPLATES.
-function resolveTemplate(whatsappConfig, kind) {
+// Modelo padrão sai no idioma do paciente; o personalizado fica como o
+// profissional escreveu.
+function resolveTemplate(whatsappConfig, kind, locale = "pt-BR") {
   const custom = whatsappConfig?.templates?.[kind];
-  return (custom && custom.trim()) || DEFAULT_TEMPLATES[kind];
+  if (custom && custom.trim()) return custom;
+  return translateText(DEFAULT_TEMPLATES[kind], locale);
 }
 
 // Formata timestamp pra date+time pt-BR separadamente. Usado nos templates.
-function formatBR(ms) {
+function formatBR(ms, locale = "pt-BR") {
   const tz = { timeZone: "America/Sao_Paulo" };
   const d = new Date(ms);
-  const data = d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", ...tz });
-  const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", ...tz });
+  const data = d.toLocaleDateString(locale, { day: "2-digit", month: "2-digit", year: "numeric", ...tz });
+  const hora = d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", ...tz });
   return { data, hora };
 }
 
 // Constrói o set de variáveis padrão pra substituição em template.
-function buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
+function buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl, locale = "pt-BR" }) {
   const wa = therapist?.whatsappConfig || {};
   const { data, hora } = session?.scheduledAt
-    ? formatBR(session.scheduledAt)
+    ? formatBR(session.scheduledAt, locale)
     : { data: "—", hora: "—" };
   return {
     paciente: session?.patientName || "",
@@ -205,8 +210,9 @@ function buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
 async function sendConfirmation({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
   if (!therapist?.whatsappConfig?.enabled) return { ok: false, skipped: true, reason: "WA_DESATIVADO" };
   if (!session?.patientPhone) return { ok: false, skipped: true, reason: "SEM_TELEFONE" };
-  const tpl  = resolveTemplate(therapist.whatsappConfig, "confirmacao");
-  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl });
+  const locale = await localeForEmail(session.patientEmail);
+  const tpl  = resolveTemplate(therapist.whatsappConfig, "confirmacao", locale);
+  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl, locale });
   const message = applyTemplate(tpl, vars);
   return sendText({ to: session.patientPhone, message });
 }
@@ -214,8 +220,9 @@ async function sendConfirmation({ session, therapist, joinUrl, cancelUrl, confir
 async function sendReminder({ session, therapist, joinUrl, cancelUrl, confirmUrl }) {
   if (!therapist?.whatsappConfig?.enabled) return { ok: false, skipped: true, reason: "WA_DESATIVADO" };
   if (!session?.patientPhone) return { ok: false, skipped: true, reason: "SEM_TELEFONE" };
-  const tpl  = resolveTemplate(therapist.whatsappConfig, "lembrete");
-  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl });
+  const locale = await localeForEmail(session.patientEmail);
+  const tpl  = resolveTemplate(therapist.whatsappConfig, "lembrete", locale);
+  const vars = buildVars({ session, therapist, joinUrl, cancelUrl, confirmUrl, locale });
   const message = applyTemplate(tpl, vars);
   return sendText({ to: session.patientPhone, message });
 }
@@ -223,8 +230,9 @@ async function sendReminder({ session, therapist, joinUrl, cancelUrl, confirmUrl
 async function sendCancellation({ session, therapist }) {
   if (!therapist?.whatsappConfig?.enabled) return { ok: false, skipped: true, reason: "WA_DESATIVADO" };
   if (!session?.patientPhone) return { ok: false, skipped: true, reason: "SEM_TELEFONE" };
-  const tpl  = resolveTemplate(therapist.whatsappConfig, "cancelamento");
-  const vars = buildVars({ session, therapist, joinUrl: "", cancelUrl: "" });
+  const locale = await localeForEmail(session.patientEmail);
+  const tpl  = resolveTemplate(therapist.whatsappConfig, "cancelamento", locale);
+  const vars = buildVars({ session, therapist, joinUrl: "", cancelUrl: "", locale });
   const message = applyTemplate(tpl, vars);
   return sendText({ to: session.patientPhone, message });
 }

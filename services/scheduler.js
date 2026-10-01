@@ -13,6 +13,8 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
 const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
+const { localeForEmail } = require("./user-locale");
+const { translateText } = require("./server-i18n");
 const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, templateRecemFormadoEndingSoon, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { sendSms } = require("./sms");
@@ -171,13 +173,14 @@ async function runReminderTick() {
         const tsnap = await getDb().collection("therapists").doc(s.therapistUid).get();
         const therapist = tsnap.exists ? tsnap.data() : null;
         if (therapist?.smsConfig?.enabled) {
-          const horario = new Date(at).toLocaleString("pt-BR", {
+          const smsLocale = await localeForEmail(s.patientEmail);
+          const horario = new Date(at).toLocaleString(smsLocale, {
             day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
             timeZone: "America/Sao_Paulo"
           });
           const proNome = (therapist.displayName || "seu profissional").split(/\s+/).slice(0, 2).join(" ");
           // SMS curto, 1 segmento (≤160 chars). Inclui link encurtado de join.
-          const body = `Lembrete: consulta com ${proNome} em ${horario}. Link: ${joinUrl}`;
+          const body = translateText(`Lembrete: consulta com ${proNome} em ${horario}. Link: ${joinUrl}`, smsLocale);
           const r = await sendSms(therapist.smsConfig, { to: s.patientPhone, body });
           if (r.ok) {
             await doc.ref.set({ smsReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });

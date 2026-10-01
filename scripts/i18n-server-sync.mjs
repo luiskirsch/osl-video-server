@@ -18,7 +18,7 @@ const LANGS = ["en-US", "es-ES"];
 
 // Arquivos cujo texto inteiro vai para e-mails; em routes/therapy.js, só o
 // que está dentro de chamadas sendEmail(...).
-const WHOLE_FILES = ["services/email.js", "services/scheduler.js"];
+const WHOLE_FILES = ["services/email.js", "services/scheduler.js", "services/whatsapp.js"];
 const CALL_ONLY_FILES = ["routes/therapy.js", "routes/nr1.js"];
 
 const norm = s => s.replace(/\s+/g, " ").trim();
@@ -68,6 +68,8 @@ function collect(node, out) {
     Literal(n) {
       if (typeof n.value !== "string") return;
       for (const p of n.value.split(/<[^>]*>/)) if (human(p)) out.add(norm(p));
+      // Modelos multilinha (WhatsApp): cada linha também vira entrada.
+      if (n.value.includes("\n")) for (const line of n.value.split("\n")) if (human(line)) out.add(norm(line));
     },
     TemplateLiteral(n) { fragments(n).forEach(f => out.add(f)); }
   });
