@@ -20515,6 +20515,10 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
       sessions.push({
         sessionId:     d.id,
         scheduledAt,
+        // Horário real (paciente entrou na sala → consulta encerrada). O card
+        // do histórico usa isto em vez do agendado quando a consulta aconteceu.
+        startedAt:     therapyTimestampMillis(s.patientFirstJoinedAt) || therapyTimestampMillis(s.sessionStartedAt) || null,
+        endedAt:       therapyTimestampMillis(s.completedAt) || null,
         durationMinutes: therapySessionDurationMinutes(s),
         overdueAt,
         joinOpensAt,
