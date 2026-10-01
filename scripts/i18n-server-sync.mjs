@@ -29,7 +29,7 @@ function human(s) {
   if (bare.length < 2 || !/[A-Za-zÀ-ÿ]{2,}/.test(bare)) return false;
   if (/^(https?:|\/|#|mailto:)/.test(t) || /\{\d+\}\/|\/\{\d+\}/.test(t)) return false;
   if (/[;=]|=>|\bfunction\b|^[\w.-]+$/.test(bare) && !PT_HINT.test(bare)) return false;
-  if (/^[a-z-]+:\s?[^ ]+;?$/i.test(t) || /:\s*\d+px|#[0-9a-f]{3,6}\b|font-|border|padding|margin/i.test(t)) return false; // CSS inline
+  if (/^[a-z-]+:\s?[^ {]+;?$/.test(t) || /:\s*\d+px|#[0-9a-f]{3,6}\b|font-|border|padding|margin/i.test(t)) return false; // CSS inline
   return PT_HINT.test(bare) || /\s/.test(bare) || /^[A-ZÀ-Ý][a-zà-ÿ]+[:.!?]?$/.test(bare);
 }
 function fragments(node) {
