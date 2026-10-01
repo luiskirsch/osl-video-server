@@ -355,5 +355,18 @@
  "Telefone: {7}{8}": "Teléfono: {7}{8}",
  "Programa: {2}": "Programa: {2}",
  "Escola: {3}": "Escuela: {3}",
- "Abra: {1}": "Abre: {1}"
+ "Abra: {1}": "Abre: {1}",
+ "Olá, {{paciente}}! Sua consulta com {{profissional}} foi confirmada para {{data}} às {{hora}}. Confirmar presença: {{link_confirmar}} Não vou poder ir: {{link_cancelar}} Dúvidas? Envie uma mensagem: {{telefone_clinica}} — {{nome_clinica}}": "¡Hola, {{paciente}}! Tu consulta con {{profissional}} fue confirmada para el {{data}} a las {{hora}}. Confirmar asistencia: {{link_confirmar}} No podré asistir: {{link_cancelar}} ¿Dudas? Envía un mensaje: {{telefone_clinica}} — {{nome_clinica}}",
+ "Olá, {{paciente}}! Sua consulta com {{profissional}} foi confirmada para {{data}} às {{hora}}.": "¡Hola, {{paciente}}! Tu consulta con {{profissional}} fue confirmada para el {{data}} a las {{hora}}.",
+ "Confirmar presença: {{link_confirmar}}": "Confirmar asistencia: {{link_confirmar}}",
+ "Não vou poder ir: {{link_cancelar}}": "No podré asistir: {{link_cancelar}}",
+ "Dúvidas? Envie uma mensagem: {{telefone_clinica}}": "¿Dudas? Envía un mensaje: {{telefone_clinica}}",
+ "— {{nome_clinica}}": "— {{nome_clinica}}",
+ "Olá, {{paciente}}! Lembrete: sua consulta com {{profissional}} é amanhã, {{data}} às {{hora}}. Confirmar presença: {{link_confirmar}} Cancelar: {{link_cancelar}} Dúvidas? Envie uma mensagem: {{telefone_clinica}} — {{nome_clinica}}": "¡Hola, {{paciente}}! Recordatorio: tu consulta con {{profissional}} es mañana, {{data}} a las {{hora}}. Confirmar asistencia: {{link_confirmar}} Cancelar: {{link_cancelar}} ¿Dudas? Envía un mensaje: {{telefone_clinica}} — {{nome_clinica}}",
+ "Olá, {{paciente}}! Lembrete: sua consulta com {{profissional}} é amanhã, {{data}} às {{hora}}.": "¡Hola, {{paciente}}! Recordatorio: tu consulta con {{profissional}} es mañana, {{data}} a las {{hora}}.",
+ "Cancelar: {{link_cancelar}}": "Cancelar: {{link_cancelar}}",
+ "Olá, {{paciente}}. Sua consulta com {{profissional}} agendada para {{data}} foi cancelada. Pra reagendar, envie uma mensagem: {{telefone_clinica}} — {{nome_clinica}}": "Hola, {{paciente}}. Tu consulta con {{profissional}} programada para el {{data}} fue cancelada. Para reprogramar, envía un mensaje: {{telefone_clinica}} — {{nome_clinica}}",
+ "Olá, {{paciente}}. Sua consulta com {{profissional}} agendada para {{data}} foi cancelada.": "Hola, {{paciente}}. Tu consulta con {{profissional}} programada para el {{data}} fue cancelada.",
+ "Pra reagendar, envie uma mensagem: {{telefone_clinica}}": "Para reprogramar, envía un mensaje: {{telefone_clinica}}",
+ "Mensagem enviada por": "Mensaje enviado por"
 }
