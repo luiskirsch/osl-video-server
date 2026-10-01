@@ -175,6 +175,15 @@ const router = express.Router();
 const JOIN_TOKEN_VALIDITY_MS = 2 * 60 * 60 * 1000; // 2h
 const SESSION_TOKEN_VALIDITY_MS = 4 * 60 * 60 * 1000; // 4h
 const PATIENT_NAME_MAX = 80;
+
+function sha256Hex(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function safeEqualHex(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex")); } catch { return false; }
+}
 const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
 const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000;
 const TWOFA_HEADER = "x-therapy-2fa";
@@ -2295,6 +2304,8 @@ router.post("/therapy/sessao/:sessionId/regenerar-link", asyncHandler(async (req
     joinTokenExp: joinPayload.exp,
     // Limpa flag de consumo — link regenerado eh novo single-use.
     joinTokenConsumedAt: admin.firestore.FieldValue.delete(),
+    // Link novo invalida a credencial de reentrada do aparelho anterior.
+    patientRejoinHash: admin.firestore.FieldValue.delete(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
@@ -2619,11 +2630,6 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
   if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
   // Cancelamento revoga o joinToken — paciente nao entra em sala cancelada.
   if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
-  // Single-use enforcement — token nao pode ser reusado depois do consumo.
-  // joinTokenConsumedAt eh setado no primeiro join bem-sucedido (logo abaixo)
-  // e checado aqui via field path no doc da sessao.
-  if (session.joinTokenConsumedAt) return sendError(res, 410, "JOIN_TOKEN_JA_USADO");
-
   // Se paciente logado, vincula a sessão à conta dele para histórico futuro.
   // É opcional — convidado anônimo continua entrando sem conta.
   let patientAccountUid = null;
@@ -2636,12 +2642,31 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     }
   }
 
+  // Single-use enforcement — token nao pode ser reusado depois do consumo.
+  // joinTokenConsumedAt eh setado no primeiro join bem-sucedido (logo abaixo).
+  // Reentrada (queda de rede, aba recarregada) só para quem já entrou: o
+  // aparelho apresenta o rejoinSecret recebido no primeiro join, ou o
+  // paciente logado é a mesma conta vinculada à sessão.
+  const rejoinSecret = String(req.body?.rejoinSecret || "").trim();
+  let isRejoin = false;
+  if (session.joinTokenConsumedAt) {
+    const secretOk = !!(rejoinSecret && session.patientRejoinHash
+      && safeEqualHex(sha256Hex(rejoinSecret), session.patientRejoinHash));
+    const accountOk = !!(patientAccountUid && session.patientAccountUid === patientAccountUid);
+    if (!secretOk && !accountOk) return sendError(res, 410, "JOIN_TOKEN_JA_USADO");
+    isRejoin = true;
+  }
+
   const finalName = patientName
     || (patientAccount?.displayName)
     || session.patientName
     || payload.patientNameHint
     || "Paciente";
-  const identity = `pat_${crypto.randomBytes(6).toString("hex")}`;
+  // Reentrada reusa a identity: o LiveKit derruba a conexão "fantasma" antiga
+  // em vez de mostrar dois pacientes na sala.
+  const identity = (isRejoin && session.patientIdentity)
+    || `pat_${crypto.randomBytes(6).toString("hex")}`;
+  const newRejoinSecret = crypto.randomBytes(24).toString("base64url");
 
   const livekitToken = await issueLivekitToken({
     room: session.livekitRoom,
@@ -2655,19 +2680,24 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     // Primeira entrada (patientJoinedAt é sobrescrito a cada reconexão) — comprovante de comparecimento.
     ...(session.patientFirstJoinedAt ? {} : { patientFirstJoinedAt: admin.firestore.FieldValue.serverTimestamp() }),
     patientNameFinal: finalName,
-    patientConsentLgpdAt: admin.firestore.FieldValue.serverTimestamp(),
-    // Marca o token como consumido — proxima tentativa cai no JOIN_TOKEN_JA_USADO.
-    // Se paciente precisar reentrar, terapeuta gera novo link via /regenerar-link.
-    joinTokenConsumedAt: admin.firestore.FieldValue.serverTimestamp(),
+    patientIdentity: identity,
+    // Credencial rotaciona a cada entrada; só o hash fica no banco.
+    patientRejoinHash: sha256Hex(newRejoinSecret),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
+  if (!isRejoin) {
+    sessionUpdate.patientConsentLgpdAt = admin.firestore.FieldValue.serverTimestamp();
+    // Marca o token como consumido — outro aparelho cai no JOIN_TOKEN_JA_USADO.
+    // Este aparelho volta com o rejoinSecret; outro precisa de /regenerar-link.
+    sessionUpdate.joinTokenConsumedAt = admin.firestore.FieldValue.serverTimestamp();
+  }
   if (patientAccountUid) sessionUpdate.patientAccountUid = patientAccountUid;
 
   const sessionStartedAt = therapyTimestampMillis(session.sessionStartedAt);
   await sessionRef.set(sessionUpdate, { merge: true });
 
   await logAudit({
-    type: "patient_joined",
+    type: isRejoin ? "patient_rejoined" : "patient_joined",
     sessionId: payload.sessionId,
     patientName: finalName,
     patientAccountUid: patientAccountUid || null,
@@ -2687,6 +2717,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     serverNow: Date.now(),
     presenceToken: issueTherapyPresenceToken(payload.sessionId, "patient"),
     patientAccountUid: patientAccountUid || null,
+    rejoinSecret: newRejoinSecret,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
 }));
