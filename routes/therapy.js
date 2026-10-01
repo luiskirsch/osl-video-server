@@ -15798,6 +15798,17 @@ router.get("/therapy/escalas/tipos", asyncHandler(async (req, res) => {
 
 // Identifica role do user (therapist ou patient) pra autorização de endpoints
 // que servem ambas as roles. Retorna { role, uid, doc } ou null.
+// Papel do usuário numa conversa: o lado em que ele está. Se estiver nos dois
+// (conta de dupla função conversando consigo), vale o parâmetro "as".
+function chatRoleIn(thread, uid, req, me) {
+  const isTherapist = thread.therapistUid === uid;
+  const isPatient = thread.patientAccountUid === uid;
+  if (isTherapist && !isPatient) return "therapist";
+  if (isPatient && !isTherapist) return "patient";
+  const asked = String(req.query?.as || req.body?.as || "");
+  return asked === "patient" ? "patient" : (me?.role || "therapist");
+}
+
 async function identifyUser(uid) {
   if (!uid) return null;
   const db = getDb();
@@ -15978,26 +15989,28 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
   if (!me) return sendError(res, 404, "USUARIO_NAO_REGISTRADO");
 
   const db = getDb();
-  const field = me.role === "therapist" ? "therapistUid" : "patientAccountUid";
+  // Conta de dupla função: o portal do colaborador pede as conversas de paciente.
+  const role = String(req.query?.as || "") === "patient" ? "patient" : me.role;
+  const field = role === "therapist" ? "therapistUid" : "patientAccountUid";
   const snap = await db.collection("therapy_threads")
     .where(field, "==", uid)
     .get();
 
   const threads = snap.docs.map(d => {
     const t = d.data();
-    const lastReadField = me.role === "therapist" ? "lastReadByTherapist" : "lastReadByPatient";
+    const lastReadField = role === "therapist" ? "lastReadByTherapist" : "lastReadByPatient";
     const lastReadMs = Number(t[lastReadField]) || 0;
     const lastMsgMs  = t.lastMessageAt?.toMillis ? t.lastMessageAt.toMillis() : (Number(t.lastMessageAt) || 0);
     // Source of truth pro 'nao lida' eh unreadCount<Role>: incrementa
     // a cada msg do OUTRO lado, zera no PATCH /read. hasUnread mantido
     // pra compat com clientes antigos que ainda nao migraram.
-    const unreadField = me.role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
+    const unreadField = role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
     const unreadCount = Math.max(0, Number(t[unreadField]) || 0);
-    const senderWasMe = t.lastMessageSenderRole === me.role;
+    const senderWasMe = t.lastMessageSenderRole === role;
     // Thread key wrapper pro user atual — frontend decifra lastMessage*
     // localmente pra mostrar preview na sidebar sem precisar abrir cada thread.
-    const isCreator = (t.createdBy === me.role);
-    const myThreadKeyWrapper = me.role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
+    const isCreator = (t.createdBy === role);
+    const myThreadKeyWrapper = role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
     return {
       threadId: t.threadId,
       therapistUid: t.therapistUid,
@@ -16019,7 +16032,7 @@ router.get("/therapy/chat/threads", asyncHandler(async (req, res) => {
 
   // Mescla support threads (admin → profissional, plaintext) na lista.
   // Só para therapists; pacientes não recebem support threads aqui.
-  if (me.role === "therapist") {
+  if (role === "therapist") {
     const supSnap = await db.collection("therapy_support_threads")
       .where("therapistUid", "==", uid)
       .limit(50).get();
@@ -16208,12 +16221,14 @@ router.get("/therapy/chat/threads/:id", asyncHandler(async (req, res) => {
   if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
   const t = snap.data();
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  // Papel nesta conversa (contas de dupla função escolhem pelo parâmetro "as").
+  const role = chatRoleIn(t, uid, req, me);
 
   // Devolve o que o cliente precisa pra unwrap:
   //   - threadKey do próprio role (cifrada com DEK ou ECDH)
   //   - se eu sou o PEER (não-creator), creatorEcdhPublicJwkSnapshot pra ECDH
-  const isCreator = (t.createdBy === me.role);
-  const myThreadKeyWrapper = me.role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
+  const isCreator = (t.createdBy === role);
+  const myThreadKeyWrapper = role === "therapist" ? t.threadKeyForTherapist : t.threadKeyForPatient;
   return res.json({
     ok: true,
     thread: {
@@ -16225,7 +16240,7 @@ router.get("/therapy/chat/threads/:id", asyncHandler(async (req, res) => {
       myThreadKeyWrapper,
       myThreadKeyWrappedVia: isCreator ? "own-dek" : "ecdh",
       peerEcdhPublicJwk: isCreator ? null : t.creatorEcdhPublicJwkSnapshot,
-      myRole: me.role,
+      myRole: role,
       lastReadByTherapist: t.lastReadByTherapist || 0,
       lastReadByPatient:   t.lastReadByPatient   || 0,
       lastSeenByPatient:   t.lastSeenByPatient   || null,
@@ -16326,6 +16341,8 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
   if (!threadSnap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
   const t = threadSnap.data();
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  // Papel nesta conversa (contas de dupla função escolhem pelo parâmetro "as").
+  const role = chatRoleIn(t, uid, req, me);
 
   // Rate limit simples: 30 msgs/min por user.
   // (Pra produção pesada, mover pra Redis. V1 fica memory-only por ip.)
@@ -16337,7 +16354,7 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
     messageId,
     threadId,
     senderUid: uid,
-    senderRole: me.role,
+    senderRole: role,
     ciphertext,
     iv,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -16347,26 +16364,26 @@ router.post("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) 
 
   // Denormaliza unread count: incrementa pro OUTRO lado, zera pro proprio.
   // Frontend mostra circulo verde com numero (estilo WhatsApp).
-  const otherCountField = me.role === "therapist" ? "unreadCountForPatient" : "unreadCountForTherapist";
-  const myCountField    = me.role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
+  const otherCountField = role === "therapist" ? "unreadCountForPatient" : "unreadCountForTherapist";
+  const myCountField    = role === "therapist" ? "unreadCountForTherapist" : "unreadCountForPatient";
   await threadRef.set({
     lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
-    lastMessageSenderRole: me.role,
+    lastMessageSenderRole: role,
     // Denormaliza o ciphertext+iv da ultima msg pra que o frontend consiga
     // decifrar o preview na lista de threads SEM precisar abrir cada uma.
     // Antes, preview so aparecia depois do user abrir a thread (cache local).
     lastMessageCiphertext: ciphertext,
     lastMessageIv: iv,
     // Sender também marca como lido pro próprio role (não conta como unread pra si).
-    ...(me.role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now }),
+    ...(role === "therapist" ? { lastReadByTherapist: now } : { lastReadByPatient: now }),
     [otherCountField]: admin.firestore.FieldValue.increment(1),
     [myCountField]: 0
   }, { merge: true });
 
   // Push notification best-effort. pushToUser cobre therapist E paciente.
-  const senderName = me.role === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
-  const receiverUid = me.role === "therapist" ? t.patientAccountUid : t.therapistUid;
-  const receiverUrl = me.role === "therapist" ? "./paciente-mensagens.html" : "./mensagens.html#thread-" + threadId;
+  const senderName = role === "therapist" ? t.therapistDisplayName : t.patientDisplayName;
+  const receiverUid = role === "therapist" ? t.patientAccountUid : t.therapistUid;
+  const receiverUrl = role === "therapist" ? "./paciente-mensagens.html" : "./mensagens.html#thread-" + threadId;
   pushToUser(receiverUid, {
     title: `${senderName} enviou uma mensagem`,
     body: "Toque para abrir a conversa.",
@@ -16398,9 +16415,11 @@ router.patch("/therapy/chat/threads/:id/read", asyncHandler(async (req, res) => 
   if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
   const t = snap.data();
   if (t.therapistUid !== uid && t.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  // Papel nesta conversa (contas de dupla função escolhem pelo parâmetro "as").
+  const role = chatRoleIn(t, uid, req, me);
 
   await threadRef.set({
-    ...(me.role === "therapist" ? { lastReadByTherapist: until, unreadCountForTherapist: 0 } : { lastReadByPatient: until, unreadCountForPatient: 0 })
+    ...(role === "therapist" ? { lastReadByTherapist: until, unreadCountForTherapist: 0 } : { lastReadByPatient: until, unreadCountForPatient: 0 })
   }, { merge: true });
 
   return res.json({ ok: true });
