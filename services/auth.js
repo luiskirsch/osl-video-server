@@ -171,6 +171,8 @@ async function verifyFirebaseToken(req, res) {
     req.verifiedFirebaseToken = decoded;
     req.firebaseUid = decoded.uid;
     req.firebaseUser = decoded;
+    // Idioma escolhido no site (X-Locale) — usado nos e-mails para este usuário.
+    require("./user-locale").rememberLocale(decoded, req.headers?.["x-locale"]);
     return decoded.uid;
   } catch {
     sendError(res, 401, "TOKEN_INVALIDO");

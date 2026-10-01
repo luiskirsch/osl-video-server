@@ -14,6 +14,9 @@ const { logInfo, logWarn, logError } = require("../logger");
 const { httpFetch } = require("../utils");
 const { RESEND_API_KEY, EMAIL_FROM, THERAPY_FRONTEND_BASE } = require("../config");
 
+const { localizeMessage, dateMarker } = require("./server-i18n");
+const { localeForEmail } = require("./user-locale");
+
 const RESEND_API_URL = "https://api.resend.com/emails";
 
 function escHtml(s) {
@@ -25,12 +28,9 @@ function escHtml(s) {
     .replace(/'/g, "&#39;");
 }
 
+// Marca de data: sendEmail troca pela data formatada no idioma do destinatário.
 function fmtDateTimePtBR(ms) {
-  return new Date(ms).toLocaleString("pt-BR", {
-    weekday: "long", day: "2-digit", month: "long",
-    hour: "2-digit", minute: "2-digit",
-    timeZone: "America/Sao_Paulo"
-  });
+  return dateMarker(ms);
 }
 
 // "Hoje", "amanhã" ou "em N dias" no fuso brasileiro. Usado no subject e
@@ -56,7 +56,7 @@ function describeWhenPtBR(scheduledAt) {
   return `em ${days} dias`;
 }
 
-async function sendEmail({ to, subject, html, text, replyTo }) {
+async function sendEmail({ to, subject, html, text, replyTo, locale }) {
   if (!RESEND_API_KEY) {
     logWarn("email_skipped_no_api_key", { to, subject });
     return { ok: false, skipped: true };
@@ -69,6 +69,12 @@ async function sendEmail({ to, subject, html, text, replyTo }) {
   // Resend aceita reply_to como string ou array de strings. Quando paciente
   // aperta Reply, e-mail vai pra esse endereço (o do terapeuta dono da
   // sessão), não pro from (que não tem inbox).
+  // Idioma do destinatário (escolhido por ele no site); pt-BR quando desconhecido.
+  const recipient = Array.isArray(to) ? to[0] : to;
+  const lang = locale || await localeForEmail(recipient);
+  ({ subject, html, text } = localizeMessage({ subject, html, text }, lang));
+  if (lang !== "pt-BR" && html) html = html.replace(/<html lang="pt-BR"/i, `<html lang="${lang}"`);
+
   const payload = { from: EMAIL_FROM, to, subject, html, text };
   if (replyTo) payload.reply_to = replyTo;
 
@@ -347,7 +353,7 @@ function templateReminder({ patientName, therapistName, scheduledAt, joinUrl, ca
 // do tier estudante (caso o LLM tenha mandado pra fila de revisão).
 function templateStudentApproved({ therapistName, validUntilMs, painelUrl }) {
   const subject = "Tier Estudante liberado no Espaço Prelúdio";
-  const validUntilTxt = fmtDateTimePtBR(validUntilMs).split(",")[0]; // só a data
+  const validUntilTxt = dateMarker(validUntilMs, { dateOnly: true }); // só a data
   const html = renderShell({
     heading: "Tier Estudante ativo",
     bodyHtml: `

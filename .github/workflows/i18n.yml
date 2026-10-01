@@ -1,0 +1,42 @@
+name: Traduções dos e-mails
+
+# E-mails novos ou alterados já saem traduzidos (en-US / es-ES): textos em
+# português do código de e-mail viram dicionário via /i18n/translate.
+on:
+  push:
+    branches: [luiskirsch.github.io]
+    paths: ["services/email.js", "services/scheduler.js", "routes/therapy.js", "routes/nr1.js", "scripts/i18n-server-sync.mjs"]
+  schedule:
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: i18n-server-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-save --no-audit --no-fund acorn acorn-walk
+      - name: Traduzir textos de e-mail
+        env:
+          I18N_CI_TOKEN: ${{ secrets.I18N_CI_TOKEN }}
+        run: node scripts/i18n-server-sync.mjs
+      - name: Publicar dicionário
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add i18n/server
+          if git diff --cached --quiet; then echo "Nada novo."; exit 0; fi
+          git commit -m "chore(i18n): traduções automáticas dos e-mails"
+          git pull --rebase origin luiskirsch.github.io
+          git push origin HEAD:luiskirsch.github.io
