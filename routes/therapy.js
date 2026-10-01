@@ -5213,7 +5213,26 @@ router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const account = await loadPatientAccount(uid);
+  let account = await loadPatientAccount(uid);
+  // Conta de dupla função (profissional que também usa o portal com o mesmo
+  // e-mail): o UID é um só, e o par ECDH do chat em therapy_user_keypairs/{uid}
+  // já está cifrado com a DEK profissional. Reusar a mesma chave evita um
+  // segundo cofre que não abriria esse par — a senha de login abre os dois.
+  if (!account?.wrappedDEK) {
+    const tSnap = await getDb().collection("therapists").doc(uid).get();
+    const t = tSnap.exists ? tSnap.data() : null;
+    if (t?.e2eeSalt && t?.wrappedDEK && t?.wrappedDEKIv) {
+      account = {
+        ...(account || {}),
+        uid,
+        displayName: account?.displayName || t.displayName || "",
+        e2eeSalt: t.e2eeSalt,
+        wrappedDEK: t.wrappedDEK,
+        wrappedDEKIv: t.wrappedDEKIv,
+        sharedWithProfessional: true
+      };
+    }
+  }
   if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
   return res.json({ ok: true, account });
 }));
