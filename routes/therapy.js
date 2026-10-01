@@ -4792,6 +4792,40 @@ router.get("/therapy/pacientes", asyncHandler(async (req, res) => {
   return res.json({ ok: true, patients });
 }));
 
+// GET /therapy/pacientes/:patientId/foto — foto de perfil que o paciente pôs
+// na própria conta, para o avatar do prontuário. O cadastro é cifrado (o
+// servidor não casa por e-mail); o vínculo é a conta gravada nas sessões
+// desse profissional com esse paciente (entrada logada ou "Liberar chat").
+// Só o profissional dono do prontuário acessa.
+router.get("/therapy/pacientes/:patientId/foto", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const patientId = String(req.params.patientId || "").trim();
+  if (!patientId) return sendError(res, 400, "PACIENTE_OBRIGATORIO");
+
+  const db = getDb();
+  const patientSnap = await db.collection("therapy_patients").doc(patientId).get();
+  if (!patientSnap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
+  if (patientSnap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+
+  const sessions = await db.collection("therapy_sessions")
+    .where("therapistUid", "==", uid)
+    .where("patientId", "==", patientId)
+    .limit(500)
+    .get();
+  const linked = sessions.docs
+    .map(d => d.data())
+    .filter(s => s.patientAccountUid)
+    .sort((a, b) => (therapyTimestampMillis(b.updatedAt) || 0) - (therapyTimestampMillis(a.updatedAt) || 0));
+  const accountUid = linked[0]?.patientAccountUid;
+  if (!accountUid) return res.json({ ok: true, foto: null });
+
+  const profile = await db.collection("therapy_app_profiles").doc(accountUid).get();
+  return res.json({ ok: true, foto: (profile.exists && profile.data().foto) || null });
+}));
+
 // PATCH /therapy/pacientes/:patientId — atualiza ciphertext
 router.patch("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -4894,6 +4928,9 @@ router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res
         overdueAt: therapySessionOverdueAt(data),
         timingState: isTherapySessionOverdue(data) ? "overdue" : null,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
+        // Início real do atendimento (createdAt é quando a consulta foi criada,
+        // às vezes dias antes — usá-lo inflava "Tempo total" do prontuário).
+        startedAt: therapyTimestampMillis(data.sessionStartedAt) || therapyTimestampMillis(data.patientFirstJoinedAt) || null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null
       };
     })
