@@ -57,6 +57,7 @@ const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
 const healthRouter    = require("./routes/health");
+const i18nRouter      = require("./routes/i18n");
 const { router: stripeRouter, webhookRouter: stripeWebhookRouter } = require("./routes/stripe");
 const gameRouter      = require("./routes/game");
 const recordingRouter = require("./routes/recording");
@@ -255,6 +256,7 @@ app.get("/.well-known/security.txt", (req, res) => {
 
 // --- Montagem de rotas ---
 app.use(healthRouter);
+app.use(i18nRouter);
 app.use(gameRouter);
 app.use(auditLog("recording"), recordingRouter);
 app.use(streamingRouter);
