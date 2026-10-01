@@ -5218,9 +5218,15 @@ router.get("/therapy/paciente/me", asyncHandler(async (req, res) => {
   // e-mail): o UID é um só, e o par ECDH do chat em therapy_user_keypairs/{uid}
   // já está cifrado com a DEK profissional. Reusar a mesma chave evita um
   // segundo cofre que não abriria esse par — a senha de login abre os dois.
+  const tSnap = (!account?.wrappedDEK || !account?.photoBase64)
+    ? await getDb().collection("therapists").doc(uid).get()
+    : null;
+  const t = tSnap?.exists ? tSnap.data() : null;
+  // Sem foto própria no portal, mostra a do perfil profissional (mesma pessoa).
+  if (t?.photoBase64 && !account?.photoBase64) {
+    account = { ...(account || { uid, displayName: t.displayName || "" }), photoBase64: t.photoBase64, photoMime: t.photoMime || "image/jpeg" };
+  }
   if (!account?.wrappedDEK) {
-    const tSnap = await getDb().collection("therapists").doc(uid).get();
-    const t = tSnap.exists ? tSnap.data() : null;
     if (t?.e2eeSalt && t?.wrappedDEK && t?.wrappedDEKIv) {
       account = {
         ...(account || {}),
@@ -5288,10 +5294,19 @@ router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
   const uid = await verifyFirebaseToken(req, res);
   if (!uid) return;
 
-  const account = await loadPatientAccount(uid);
-  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+  let account = await loadPatientAccount(uid);
+  let createProfile = false;
+  if (!account) {
+    // Profissional usando o portal com o mesmo login: cria o perfil do portal
+    // sob demanda (só campos de perfil; a chave do chat segue a profissional).
+    const tSnap = await getDb().collection("therapists").doc(uid).get();
+    if (!tSnap.exists) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+    account = { uid, displayName: tSnap.data().displayName || "" };
+    createProfile = true;
+  }
 
   const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+  if (createProfile) Object.assign(updates, { uid, role: "patient", displayName: account.displayName, createdAt: admin.firestore.FieldValue.serverTimestamp() });
 
   if (req.body?.consentAiSummary !== undefined) {
     const accept = !!req.body.consentAiSummary;
