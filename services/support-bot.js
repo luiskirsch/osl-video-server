@@ -145,7 +145,9 @@ function pageLabel(page) {
 
 // Contexto por pergunta fica num bloco separado, depois do prompt fixo em
 // cache — mudar nome/hora/tela não invalida o cache do prompt principal.
-function buildContext({ userName, isFirstMessage, page, now, timeZone = "America/Sao_Paulo" }) {
+const LANGUAGE_NAMES = { "en-US": "inglês (English)", "es-ES": "espanhol (Español)" };
+
+function buildContext({ userName, isFirstMessage, page, now, timeZone = "America/Sao_Paulo", locale = "pt-BR" }) {
   const firstName = (String(userName || "").trim().split(/\s+/)[0] || "")
     .replace(/[^\p{L}'-]/gu, "")
     .slice(0, 40);
@@ -163,6 +165,10 @@ function buildContext({ userName, isFirstMessage, page, now, timeZone = "America
       : `- Use o primeiro nome ocasionalmente (não em toda mensagem) pra deixar o atendimento pessoal.`);
   } else if (isFirstMessage) {
     lines.push(`- Esta é a PRIMEIRA mensagem da conversa. Cumprimente brevemente ("Oi!" ou "Olá!") antes de responder. NÃO precisa se apresentar como Aurora — o widget já mostra seu nome no cabeçalho.`);
+  }
+  // Interface em outro idioma: a resposta segue o idioma da tela.
+  if (LANGUAGE_NAMES[locale]) {
+    lines.push(`- IDIOMA: a interface do profissional está em ${LANGUAGE_NAMES[locale]}. Responda SEMPRE nesse idioma, inclusive na saudação.`);
   }
   return lines.join("\n");
 }
@@ -200,7 +206,7 @@ function extractText(content) {
  *   já presas ao usuário autenticado (services/support-tools.js).
  * @returns {Promise<{ok: boolean, reply?: string, error?: string, usage?: object, toolsUsed?: string[]}>}
  */
-async function askBot({ history = [], userMessage, userName = "", page = "", timeZone = "America/Sao_Paulo", tools = null, client = getClient(), now = Date.now() }) {
+async function askBot({ history = [], userMessage, userName = "", page = "", timeZone = "America/Sao_Paulo", locale = "pt-BR", tools = null, client = getClient(), now = Date.now() }) {
   if (!client) return { ok: false, error: "ANTHROPIC_NAO_CONFIGURADO" };
   if (!userMessage || typeof userMessage !== "string") return { ok: false, error: "MENSAGEM_INVALIDA" };
 
@@ -221,7 +227,7 @@ async function askBot({ history = [], userMessage, userName = "", page = "", tim
   const isFirstMessage = !recentHistory.some(h => h.role === "assistant");
   const system = [
     { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
-    { type: "text", text: buildContext({ userName, isFirstMessage, page, now, timeZone }) }
+    { type: "text", text: buildContext({ userName, isFirstMessage, page, now, timeZone, locale }) }
   ];
   const messages = [...recentHistory, { role: "user", content: cleanMsg }];
   const usage = { input: 0, output: 0, cacheRead: 0 };

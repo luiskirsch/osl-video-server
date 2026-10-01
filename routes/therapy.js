@@ -17143,6 +17143,7 @@ router.post("/therapy/support/chat", asyncHandler(async (req, res) => {
     userName,
     page: /^\/[\w\-./]*$/.test(page) ? page : "",
     timeZone: tools.timeZone,
+    locale: ["en-US", "es-ES"].includes(req.body?.locale) ? req.body.locale : "pt-BR",
     tools
   });
   if (!result.ok) {
