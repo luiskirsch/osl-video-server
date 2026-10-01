@@ -20535,15 +20535,19 @@ router.post("/therapy/chat/threads/:id/files", asyncHandler(async (req, res) => 
   const thread = threadSnap.data();
   if (thread.therapistUid !== uid && thread.patientAccountUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
 
+  // Bytes cifrados em pedaços no Firestore (o projeto não tem bucket de
+  // Storage no plano atual). Cada documento fica bem abaixo do limite de 1 MiB.
   const fileId = newId("chatfile");
-  const storagePath = `therapy-chat/${threadId}/${fileId}.bin`;
-  await getStorageBucket().file(storagePath).save(encrypted, {
-    resumable: false,
-    contentType: "application/octet-stream",
-    metadata: { cacheControl: "private, no-store, max-age=0" }
-  });
-  await db.collection("therapy_chat_files").doc(fileId).set({
-    fileId, threadId, senderUid: uid, storagePath, fileIv,
+  const CHUNK = 700_000;
+  const chunks = Math.ceil(encrypted.length / CHUNK);
+  const fileRef = db.collection("therapy_chat_files").doc(fileId);
+  for (let i = 0; i < chunks; i++) {
+    await fileRef.collection("chunks").doc(String(i).padStart(3, "0")).set({
+      i, data: encrypted.subarray(i * CHUNK, (i + 1) * CHUNK).toString("base64")
+    });
+  }
+  await fileRef.set({
+    fileId, threadId, senderUid: uid, fileIv, chunks,
     encryptedSize: encrypted.length,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
