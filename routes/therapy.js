@@ -16226,7 +16226,8 @@ router.get("/therapy/chat/threads/:id", asyncHandler(async (req, res) => {
       myRole: me.role,
       lastReadByTherapist: t.lastReadByTherapist || 0,
       lastReadByPatient:   t.lastReadByPatient   || 0,
-      lastSeenByPatient:   t.lastSeenByPatient   || null
+      lastSeenByPatient:   t.lastSeenByPatient   || null,
+      lastSeenByTherapist: t.lastSeenByTherapist || null
     }
   });
 }));
@@ -16291,7 +16292,7 @@ router.get("/therapy/chat/threads/:id/messages", asyncHandler(async (req, res) =
     .slice(0, limit)
     .sort((a, b) => a.createdAt - b.createdAt);
 
-  return res.json({ ok: true, messages, lastSeenByPatient: t.lastSeenByPatient || null, lastReadByPatient: t.lastReadByPatient || 0 });
+  return res.json({ ok: true, messages, lastSeenByPatient: t.lastSeenByPatient || null, lastSeenByTherapist: t.lastSeenByTherapist || null, lastReadByPatient: t.lastReadByPatient || 0 });
 }));
 
 // POST /therapy/chat/threads/:id/messages — envia mensagem.
@@ -16419,6 +16420,24 @@ router.patch("/therapy/chat/threads/:id/patient-presence", asyncHandler(async (r
   await getDb().collection("therapy_threads").doc(threadId).update({
     lastSeenByPatient: offline ? 0 : Date.now()
   });
+  return res.json({ ok: true });
+}));
+
+// PATCH /therapy/chat/threads/:id/therapist-presence — espelho do anterior
+// para o profissional; alimenta o "visto por último" no portal do paciente.
+router.patch("/therapy/chat/threads/:id/therapist-presence", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const threadId = String(req.params.id || "").trim();
+  if (!threadId) return sendError(res, 400, "THREAD_ID_OBRIGATORIO");
+  const snap = await getDb().collection("therapy_threads").doc(threadId).get();
+  if (!snap.exists) return sendError(res, 404, "THREAD_NAO_ENCONTRADA");
+  const t = snap.data();
+  if (t.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  // Só carimba o instante; "online" no cliente = ping recente (< 30s). Ao
+  // sair, o mesmo carimbo vira o "visto por último".
+  await getDb().collection("therapy_threads").doc(threadId).update({ lastSeenByTherapist: Date.now() });
   return res.json({ ok: true });
 }));
 
