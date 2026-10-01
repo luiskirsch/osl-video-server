@@ -2435,6 +2435,7 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         demoTechnicalRoom: data.syntheticData === true && data.demoTechnicalRoom === true,
         fundingSource: data.fundingSource || null,
         careOrigin: therapySessionCareOrigin(data),
+        attendanceCertCode: data.attendanceCertCode || null,
         hiddenFromPainel: data.hiddenFromPainel === true
       };
     })
