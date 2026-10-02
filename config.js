@@ -359,6 +359,7 @@ const CORS_ALLOWED_HEADERS = [
   "X-Locale", "X-Therapy-2FA", "X-Client-Key", "X-Security-Token",
   "X-Signature", "X-Request-Id", "Stripe-Signature",
   "X-AI-Result-Key", "X-AI-Wrapped-Key", "X-AI-Wrapped-Key-IV", "X-AI-Segments",
+  "X-AI-Piece-Key", "X-AI-Piece-Keys",
   "X-Nfse-Token",
   "X-I18N-Token"
 ];

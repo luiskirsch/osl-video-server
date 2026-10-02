@@ -80,6 +80,8 @@ const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
 const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
 const { processAiSummary, splitAudioSegments, updateCurrentAttempt } = require("../services/therapy-ai-summary");
+const aiPieces = require("../services/ai-summary-pieces");
+const whisper = require("../services/whisper");
 const clinicalTwinSvc = require("../services/clinical-twin");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -7663,6 +7665,8 @@ router.sweepStaleAiSummaries = async function sweepStaleAiSummaries() {
       }
     }
     if (marked) logWarn("ai_summary_stale_swept", { marked });
+    const expiredPieces = await aiPieces.sweepOldPieces(db);
+    if (expiredPieces) logInfo("ai_pieces_expired", { count: expiredPieces });
   } catch (err) {
     logError("ai_summary_sweep_error", err);
   }
@@ -7710,6 +7714,101 @@ const express_raw_audio = express.raw({
   limit: AI_SUMMARY_AUDIO_MAX_BYTES
 });
 
+// Profissional dono da sessão + opt-in do profissional + consentimento do
+// paciente (por sessão ou flag global da conta-paciente vinculada).
+async function loadAiSummaryEligibility(db, uid, sessionId) {
+  const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
+  if (!sessSnap.exists) return { error: [404, "SESSAO_NAO_ENCONTRADA"] };
+  const sess = sessSnap.data();
+  if (sess.therapistUid !== uid) return { error: [403, "ACESSO_NEGADO"] };
+  const therapist = await loadTherapist(uid);
+  if (!therapist?.aiSummaryEnabled) {
+    return { error: [403, "AI_SUMMARY_NAO_HABILITADO", { detail: "Profissional não habilitou transcrição IA no perfil." }] };
+  }
+  let patientConsent = !!sess.consentAiSummary;
+  if (!patientConsent && sess.patientAccountUid) {
+    const pa = await loadPatientAccount(sess.patientAccountUid);
+    patientConsent = !!pa?.consentAiSummary;
+  }
+  if (!patientConsent) {
+    return { error: [403, "CONSENTIMENTO_PACIENTE_AUSENTE", { detail: "Paciente não consentiu com transcrição IA nesta sessão." }] };
+  }
+  return { sess, therapist };
+}
+
+// ─── Transcrição progressiva: um pedaço de ~90 s por vez, durante a consulta ──
+// Responde só depois de transcrever e guardar o TEXTO (cifrado com a chave da
+// sessão); o navegador apaga o áudio local ao receber ok. Reenvio da mesma
+// chave é idempotente. Áudio nunca é persistido aqui.
+const AI_PIECE_MAX_BYTES = 8 * 1024 * 1024; // 90 s de opus mono 24 kbps ≈ 270 KB
+const AI_PIECE_LOCAL_QUEUE_MAX = 2;
+const aiPieceLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 150, // 40 pedaços/h por sessão + reenvios, com folga para 2-3 sessões
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.aiSummaryUid || ipKeyGenerator(req) || "anon",
+  message: { ok: false, error: "AI_PIECE_RATE_LIMIT" }
+});
+const express_raw_piece = express.raw({ type: ["audio/*", "application/octet-stream"], limit: AI_PIECE_MAX_BYTES });
+
+router.post("/therapy/session/:sessionId/ai-piece",
+  authenticateAiSummary,
+  aiPieceLimiter,
+  express_raw_piece,
+  asyncHandler(async (req, res) => {
+    if (!ensureDb(res)) return;
+    const uid = req.aiSummaryUid;
+    const sessionId = String(req.params.sessionId || "").trim();
+    if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+    const key = String(req.get("x-ai-piece-key") || "").trim();
+    if (!aiPieces.isValidPieceKey(key)) return sendError(res, 400, "PEDACO_INVALIDO");
+
+    const db = getDb();
+    const eligibility = await loadAiSummaryEligibility(db, uid, sessionId);
+    if (eligibility.error) return sendError(res, ...eligibility.error);
+
+    const summarySnap = await db.collection("therapy_session_summaries").doc(sessionId).get();
+    if (summarySnap.exists && summarySnap.data().status === "completed") {
+      return sendError(res, 409, "AI_SUMMARY_JA_CONCLUIDO");
+    }
+    if (await aiPieces.hasPiece(db, sessionId, key)) return res.json({ ok: true, duplicate: true });
+
+    const audio = req.body;
+    if (!Buffer.isBuffer(audio) || audio.length === 0) return sendError(res, 400, "AUDIO_OBRIGATORIO");
+
+    let clientEncryption;
+    try {
+      clientEncryption = readClientEncryption(req);
+    } catch (error) {
+      return sendError(res, 428, "CRIPTOGRAFIA_CLIENTE_OBRIGATORIA", { detail: error.message });
+    }
+
+    try {
+      // Fila local cheia: o navegador guarda o pedaço e tenta de novo depois.
+      if (!whisper.groqEnabled() && whisper.localQueueDepth() >= AI_PIECE_LOCAL_QUEUE_MAX) {
+        return sendError(res, 503, "AI_PIECE_OCUPADO", { retryAfterSec: 45 });
+      }
+      let result = null;
+      let failed = false;
+      try {
+        result = await whisper.transcribe(audio, { language: "portuguese" });
+      } catch (error) {
+        // Pedaço ilegível (corte curto, arquivo corrompido): marca como
+        // presente para não ser reenviado para sempre; não entra no texto.
+        failed = true;
+        logWarn("ai_piece_transcribe_failed", { sessionId, key, bytes: audio.length, error: error.message });
+      }
+      await aiPieces.storePiece({
+        db, admin, sessionId, therapistUid: uid, key, result, failed, clientKey: clientEncryption.key
+      });
+      return res.json({ ok: true, failed, durationSec: Number(result?.durationSec) || 0 });
+    } finally {
+      clientEncryption.key.fill(0);
+    }
+  })
+);
+
 router.post("/therapy/session/:sessionId/ai-summarize",
   authenticateAiSummary,
   aiSummaryLimiter,
@@ -7723,38 +7822,38 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
 
     const db = getDb();
-    const sessSnap = await db.collection("therapy_sessions").doc(sessionId).get();
-    if (!sessSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
-    const sess = sessSnap.data();
-    if (sess.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+    const eligibility = await loadAiSummaryEligibility(db, uid, sessionId);
+    if (eligibility.error) return sendError(res, ...eligibility.error);
+    const { sess, therapist } = eligibility;
 
-    // Verifica opt-in do profissional
-    const therapist = await loadTherapist(uid);
-    if (!therapist?.aiSummaryEnabled) {
-      return sendError(res, 403, "AI_SUMMARY_NAO_HABILITADO",
-        { detail: "Profissional não habilitou transcrição IA no perfil." });
+    // Modo por pedaços (X-AI-Piece-Keys presente): o corpo traz só os pedaços
+    // ainda não confirmados — pode vir vazio quando tudo já foi transcrito
+    // durante a consulta. Sem o header: modo antigo, áudio inteiro.
+    const pieceKeysHeader = req.get("x-ai-piece-keys");
+    const pieceMode = pieceKeysHeader !== undefined;
+    let audioBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    let audioSegments;
+    let piecePlan = null;
+    if (pieceMode) {
+      const keys = String(pieceKeysHeader).split(",").map(k => k.trim()).filter(Boolean);
+      if (keys.length > 100 || !keys.every(aiPieces.isValidPieceKey) || new Set(keys).size !== keys.length) {
+        return sendError(res, 400, "PEDACOS_INVALIDOS");
+      }
+      if (keys.length === 0) {
+        if (audioBuffer.length !== 0) return sendError(res, 400, "PEDACOS_INVALIDOS");
+        audioSegments = [];
+      } else {
+        audioSegments = splitAudioSegments(audioBuffer, req.headers["x-ai-segments"]);
+        if (!audioSegments || audioSegments.length !== keys.length || audioSegments.some(seg => seg.length === 0)) {
+          return sendError(res, 400, "SEGMENTOS_AUDIO_INVALIDOS");
+        }
+      }
+      piecePlan = { pending: keys.map((key, index) => ({ key, buffer: audioSegments[index] })) };
+    } else {
+      if (audioBuffer.length === 0) return sendError(res, 400, "AUDIO_OBRIGATORIO");
+      audioSegments = splitAudioSegments(audioBuffer, req.headers["x-ai-segments"]);
+      if (!audioSegments) return sendError(res, 400, "SEGMENTOS_AUDIO_INVALIDOS");
     }
-
-    // Verifica consentimento do paciente. Aceita 2 fontes:
-    //   1. Flag explícita por sessão (sess.consentAiSummary)
-    //   2. Flag global da conta-paciente (patientAccount.consentAiSummary)
-    //      desde que a sessão tenha patientAccountUid
-    let patientConsent = !!sess.consentAiSummary;
-    if (!patientConsent && sess.patientAccountUid) {
-      const pa = await loadPatientAccount(sess.patientAccountUid);
-      patientConsent = !!pa?.consentAiSummary;
-    }
-    if (!patientConsent) {
-      return sendError(res, 403, "CONSENTIMENTO_PACIENTE_AUSENTE",
-        { detail: "Paciente não consentiu com transcrição IA nesta sessão." });
-    }
-
-    const audioBuffer = req.body;
-    if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) {
-      return sendError(res, 400, "AUDIO_OBRIGATORIO");
-    }
-    const audioSegments = splitAudioSegments(audioBuffer, req.headers["x-ai-segments"]);
-    if (!audioSegments) return sendError(res, 400, "SEGMENTOS_AUDIO_INVALIDOS");
 
     let clientEncryption;
     try {
@@ -7829,6 +7928,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     activeAiSummaryJobs.set(sessionId, attemptId);
     processAiSummary({
       audioSegments,
+      piecePlan,
       sessionId,
       attemptId,
       therapist,

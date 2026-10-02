@@ -41,6 +41,21 @@ function encryptJson(payload, key) {
   };
 }
 
+function decryptJson({ ciphertext, iv }, key) {
+  if (!Buffer.isBuffer(key) || key.length !== KEY_BYTES) throw new Error("AI_RESULT_KEY_INVALIDO");
+  const raw = Buffer.from(String(ciphertext || ""), "base64");
+  const ivBuf = Buffer.from(String(iv || ""), "base64");
+  if (ivBuf.length !== IV_BYTES || raw.length <= TAG_BYTES) throw new Error("CIFRADO_INVALIDO");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf);
+  decipher.setAuthTag(raw.subarray(raw.length - TAG_BYTES));
+  const plaintext = Buffer.concat([decipher.update(raw.subarray(0, raw.length - TAG_BYTES)), decipher.final()]);
+  try {
+    return JSON.parse(plaintext.toString("utf8"));
+  } finally {
+    plaintext.fill(0);
+  }
+}
+
 function encryptedPayloadResponse(data) {
   if (!data?.payloadCiphertext || !data?.payloadIv || !data?.wrappedKey || !data?.wrappedKeyIv) return null;
   return {
@@ -53,4 +68,4 @@ function encryptedPayloadResponse(data) {
   };
 }
 
-module.exports = { readClientEncryption, encryptJson, encryptedPayloadResponse };
+module.exports = { readClientEncryption, encryptJson, decryptJson, encryptedPayloadResponse };

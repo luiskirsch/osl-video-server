@@ -4,6 +4,7 @@ const { logError, logInfo, logWarn } = require("../logger");
 const whisper = require("./whisper");
 const sessionSummary = require("./session-summary");
 const { encryptJson } = require("./clinical-encryption");
+const pieces = require("./ai-summary-pieces");
 
 async function updateCurrentAttempt({ db, summaryRef, attemptId, data }) {
   return db.runTransaction(async tx => {
@@ -69,9 +70,36 @@ async function transcribeSegments(segments, transcribe = whisper.transcribe, con
 // vivo" de "morto" pelo heartbeat, não por um tempo fixo desde o início.
 const HEARTBEAT_MS = 60_000;
 
-async function processAiSummary({ audioBuffer, audioSegments, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
+// Modo por pedaços: o grosso já foi transcrito durante a consulta; aqui só
+// entram os pedaços ainda não confirmados (piecePlan.pending) e depois todos
+// os textos guardados são juntados em ordem.
+async function transcribePendingPieces({ piecePlan, sessionId, session, clientEncryption, db, admin }) {
+  for (const part of piecePlan.pending) {
+    if (await pieces.hasPiece(db, sessionId, part.key)) continue;
+    let result = null;
+    let failed = false;
+    try {
+      result = await whisper.transcribe(part.buffer, { language: "portuguese" });
+    } catch (error) {
+      failed = true;
+      logWarn("ai_summary_piece_failed", { sessionId, key: part.key, bytes: part.buffer.length, error: error.message });
+    }
+    await pieces.storePiece({
+      db, admin, sessionId, therapistUid: session.therapistUid, key: part.key, result, failed, clientKey: clientEncryption.key
+    });
+  }
+  const transcript = await pieces.loadSessionTranscript(db, sessionId, clientEncryption.key);
+  if (transcript.pieces === 0) throw new Error("SEM_AUDIO");
+  if (transcript.undecryptable) logWarn("ai_summary_pieces_undecryptable", { sessionId, count: transcript.undecryptable });
+  return transcript;
+}
+
+async function processAiSummary({ audioBuffer, audioSegments, piecePlan, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
   const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
-  const segments = audioSegments || [audioBuffer];
+  const segments = piecePlan ? piecePlan.pending.map(part => part.buffer) : (audioSegments || [audioBuffer]);
+  const cleanupPieces = () => (piecePlan
+    ? pieces.deleteSessionPieces(db, sessionId).catch(err => logWarn("ai_summary_pieces_cleanup_failed", { sessionId, error: err.message }))
+    : Promise.resolve());
   const beat = () => updateCurrentAttempt({ db, summaryRef, attemptId, data: { heartbeatAt: Date.now() } })
     .catch(err => logWarn("ai_summary_heartbeat_failed", { sessionId, error: err.message }));
   beat();
@@ -81,11 +109,14 @@ async function processAiSummary({ audioBuffer, audioSegments, sessionId, attempt
   try {
     logInfo("ai_summary_started", {
       sessionId,
+      mode: piecePlan ? "pieces" : "full",
       audioBytes: segments.reduce((sum, segment) => sum + segment.length, 0),
       segments: segments.length
     });
     const transcribeStartedAt = Date.now();
-    const transcriptResult = await transcribeSegments(segments, whisper.transcribe, { sessionId });
+    const transcriptResult = piecePlan
+      ? await transcribePendingPieces({ piecePlan, sessionId, session, clientEncryption, db, admin })
+      : await transcribeSegments(segments, whisper.transcribe, { sessionId });
     const transcribeMs = Date.now() - transcribeStartedAt;
     logInfo("ai_summary_transcribed", {
       sessionId,
@@ -108,7 +139,10 @@ async function processAiSummary({ audioBuffer, audioSegments, sessionId, attempt
         completedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       } });
-      if (stored) logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
+      if (stored) {
+        logWarn("ai_summary_hallucinated", { sessionId, durationSec: transcriptResult.durationSec });
+        await cleanupPieces();
+      }
       return;
     }
 
@@ -156,8 +190,10 @@ async function processAiSummary({ audioBuffer, audioSegments, sessionId, attempt
       return;
     }
 
+    await cleanupPieces();
     logInfo("ai_summary_completed", {
       sessionId,
+      pieces: transcriptResult.pieces || null,
       totalMs: transcribeMs + summarizeMs,
       inputTokens: summaryResult.usage?.input,
       outputTokens: summaryResult.usage?.output,

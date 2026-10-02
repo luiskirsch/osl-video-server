@@ -279,6 +279,22 @@ async function transcribe(audioBuffer, opts = {}) {
     }
   }
 
+  // A transcrição local já ocupa toda a CPU: uma por vez, em fila.
+  return runLocalExclusive(() => transcribeLocal(audioBuffer, { language, srcExt }));
+}
+
+let localChain = Promise.resolve();
+let localDepth = 0;
+function runLocalExclusive(task) {
+  localDepth += 1;
+  const run = localChain.then(task, task);
+  localChain = run.catch(() => {}).finally(() => { localDepth -= 1; });
+  return run;
+}
+/** Transcrições locais rodando ou esperando (0 = livre). */
+function localQueueDepth() { return localDepth; }
+
+async function transcribeLocal(audioBuffer, { language, srcExt }) {
   const pipeline = await getPipeline();
 
   const wavPath = await convertToWav(audioBuffer, srcExt);
@@ -318,7 +334,12 @@ async function transcribe(audioBuffer, opts = {}) {
 // Dois critérios independentes:
 //   1. Razão palavras-únicas / total < 8% (vocabulário muito restrito)
 //   2. Algum bigrama se repete em > 15% das posições do texto
+// Frases que o Whisper inventa em trechos de silêncio (comum em pedaços de
+// 90 s com pausa longa). Texto que é SÓ isso não é fala.
+const SILENCE_PHRASES = /^(?:legendas?\b.*|obrigad[oa]s?|tchau|inscreva-se.*|e aí|\.+|…)[\s.!…]*$/i;
+
 function isHallucinated(text) {
+  if (SILENCE_PHRASES.test(String(text || "").trim())) return true;
   const words = text.split(/\s+/).filter(Boolean);
   if (words.length < 20) return false; // texto curto — não analisa
 
@@ -338,4 +359,4 @@ function isHallucinated(text) {
   return false;
 }
 
-module.exports = { transcribe, isHallucinated, normalizeAudioExtension, _test: { configureTransformersCache, transcribeViaGroq, groqEnabled } };
+module.exports = { transcribe, isHallucinated, normalizeAudioExtension, localQueueDepth, groqEnabled, _test: { configureTransformersCache, transcribeViaGroq, groqEnabled } };
