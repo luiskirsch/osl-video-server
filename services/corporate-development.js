@@ -124,9 +124,9 @@ const TRACKS = [
               narrador: { name: "", tone: "muted" }
             },
             story: [
-              { type: "scene", title: "Terça, 10h — reunião de planejamento", lines: [
+              { type: "scene", title: "Terça, 10h — reunião de planejamento", visual: "meeting", lines: [
                 { who: "narrador", text: "Você começa a apresentar a proposta que levou a semana inteira para montar." },
-                { who: "voce", text: "A ideia é dividir a entrega em duas fases para…" },
+                { who: "voce", text: "A ideia é dividir a entrega em duas fases, para reduzir o risco e conseguir validar com o cliente antes de", interrupted: true },
                 { who: "carla", text: "Na verdade, isso não vai funcionar. Deixa eu explicar como eu faria.", mood: "firme" },
                 { who: "narrador", text: "É a terceira vez neste mês que isso acontece. A reunião segue no ritmo dela." }
               ] },
@@ -203,7 +203,7 @@ const TRACKS = [
               narrador: { name: "", tone: "muted" }
             },
             story: [
-              { type: "scene", title: "Quinta, 17h — chamada rápida", lines: [
+              { type: "scene", title: "Quinta, 17h — chamada rápida", visual: "call", lines: [
                 { who: "rafael", text: "O relatório chegou com dois números errados. O cliente percebeu antes da gente.", mood: "sério" },
                 { who: "narrador", text: "Você sente o rosto esquentar. Foi uma semana pesada." }
               ] },
@@ -224,7 +224,7 @@ const TRACKS = [
                     { who: "narrador", text: "Concordar com tudo encerra rápido, mas você sai sem saber exatamente o que mudar." }
                   ], note: "Uma pergunta de esclarecimento já é suficiente para a conversa render." } }
               ] },
-              { type: "scene", title: "No dia seguinte", lines: [
+              { type: "scene", title: "No dia seguinte", visual: "office", lines: [
                 { who: "narrador", text: "Agora é você quem precisa dar um feedback. O Bruno, que entrou há um mês, mandou ao cliente um e-mail em tom ríspido." }
               ] },
               { type: "build", prompt: "Monte um feedback para o Bruno. Toque nas partes na ordem certa.", pieces: [
