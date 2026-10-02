@@ -64,9 +64,19 @@ async function transcribeSegments(segments, transcribe = whisper.transcribe, con
   return { text, durationSec, hallucinated: !text && hallucinatedSegments > 0, failedSegments, hallucinatedSegments };
 }
 
+// Sinal de vida do job: a transcrição em CPU leva ~metade da duração da
+// sessão (50 min de áudio ≈ 25 min). Quem lê o status distingue "lento mas
+// vivo" de "morto" pelo heartbeat, não por um tempo fixo desde o início.
+const HEARTBEAT_MS = 60_000;
+
 async function processAiSummary({ audioBuffer, audioSegments, sessionId, attemptId, therapist, session, clientEncryption, db, admin }) {
   const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
   const segments = audioSegments || [audioBuffer];
+  const beat = () => updateCurrentAttempt({ db, summaryRef, attemptId, data: { heartbeatAt: Date.now() } })
+    .catch(err => logWarn("ai_summary_heartbeat_failed", { sessionId, error: err.message }));
+  beat();
+  const heartbeat = setInterval(beat, HEARTBEAT_MS);
+  heartbeat.unref?.();
 
   try {
     logInfo("ai_summary_started", {
@@ -161,6 +171,7 @@ async function processAiSummary({ audioBuffer, audioSegments, sessionId, attempt
     if (stored) logError("ai_summary_failed", error, { sessionId });
     else logWarn("ai_summary_stale_failure_discarded", { sessionId, attemptId });
   } finally {
+    clearInterval(heartbeat);
     clientEncryption?.key?.fill(0);
   }
 }

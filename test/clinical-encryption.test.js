@@ -100,8 +100,14 @@ test("AI pipeline persists no clinical plaintext and clears its transient key", 
     admin,
   });
 
-  assert.equal(writes.length, 1);
-  const stored = writes[0];
+  // Além do resultado, o job grava sinais de vida ({ heartbeatAt }) — nenhum
+  // deles pode carregar conteúdo clínico.
+  const heartbeats = writes.filter(w => Object.keys(w).length === 1 && "heartbeatAt" in w);
+  const results = writes.filter(w => !heartbeats.includes(w));
+  assert.equal(results.length, 1);
+  assert.ok(heartbeats.length >= 1);
+  assert.equal(JSON.stringify(writes).includes("conteúdo clínico"), false);
+  const stored = results[0];
   assert.equal(stored.summary, deleted);
   assert.equal(stored.signals, deleted);
   assert.equal(stored.transcript, deleted);

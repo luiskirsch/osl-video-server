@@ -7615,9 +7615,14 @@ const AI_SUMMARY_AUDIO_MAX_BYTES = 32 * 1024 * 1024;
 const AI_SUMMARY_PROCESSING_LEASE_MS = 60 * 60 * 1000;
 const AI_SUMMARY_MAX_CONCURRENT = 2;
 let aiSummaryAdmissions = 0;
-// Um resumo leva minutos; acima disto em "processing", o job morreu (queda
-// do processo) e a tela deve oferecer reenvio em vez de "sendo gerado".
-const AI_SUMMARY_STALE_MS = 30 * 60 * 1000;
+// O job grava heartbeatAt a cada minuto (services/therapy-ai-summary.js).
+// Sem sinal por mais que isto em "processing" = job morto (queda do processo):
+// a tela oferece reenvio. Não usar tempo desde o início — transcrição em CPU
+// leva ~metade da duração da sessão e sessões longas passariam por "mortas".
+const AI_SUMMARY_STALE_MS = 10 * 60 * 1000;
+function aiSummaryLastSign(d) {
+  return Number(d?.heartbeatAt) || therapyTimestampMillis(d?.startedAt) || 0;
+}
 // Jobs rodando NESTE processo (sessionId → attemptId). Cada deploy reinicia o
 // servidor: no SIGTERM eles são marcados "interrupted" na hora, para o
 // prontuário oferecer "Tentar de novo" com o áudio guardado no aparelho.
@@ -7652,8 +7657,8 @@ router.sweepStaleAiSummaries = async function sweepStaleAiSummaries() {
     let marked = 0;
     for (const doc of snap.docs) {
       const d = doc.data();
-      const started = therapyTimestampMillis(d.startedAt) || 0;
-      if (started && started < cutoff && d.attemptId) {
+      const lastSign = aiSummaryLastSign(d);
+      if (lastSign && lastSign < cutoff && d.attemptId) {
         if (await markAiSummaryInterrupted(db, doc.id, d.attemptId, "PROCESSAMENTO_INTERROMPIDO")) marked++;
       }
     }
@@ -7776,7 +7781,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
           current?.status === "processing" &&
           Number(current.processingLeaseUntil || 0) > Date.now() &&
           // Processando há mais que o limite = job morto: aceita o reenvio.
-          (therapyTimestampMillis(current.startedAt) || Date.now()) >= Date.now() - AI_SUMMARY_STALE_MS
+          (aiSummaryLastSign(current) || Date.now()) >= Date.now() - AI_SUMMARY_STALE_MS
         ) {
           const error = new Error("AI_SUMMARY_EM_PROCESSAMENTO");
           error.code = "AI_SUMMARY_EM_PROCESSAMENTO";
@@ -7913,7 +7918,7 @@ router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, re
   const encryptedPayload = encryptedPayloadResponse(data);
   // "processing" antigo demais = job morto que a varredura ainda não pegou.
   const stale = data.status === "processing"
-    && (therapyTimestampMillis(data.startedAt) || Date.now()) < Date.now() - AI_SUMMARY_STALE_MS;
+    && (aiSummaryLastSign(data) || Date.now()) < Date.now() - AI_SUMMARY_STALE_MS;
   return res.json({
     ok: true,
     exists: true,
