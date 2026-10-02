@@ -398,6 +398,8 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   // Base de geolocalização do card de clima leva ~15s; carregar logo após o
   // boot evita que o primeiro colaborador de cada deploy fique sem clima.
   setTimeout(() => require("./services/ambient-weather").warmUp(), 20_000).unref();
+  // Resumos IA presos em "processing" por queda brusca do processo anterior.
+  setTimeout(() => therapyRouter.sweepStaleAiSummaries?.(), 30_000).unref();
 });
 
 async function gracefullyStopAllEgress() {
@@ -424,6 +426,9 @@ async function shutdown(signal) {
   recurringGroups.stop();
 
   await gracefullyStopAllEgress();
+  // Resumos IA em andamento morrem com o processo: marca "interrompido" para
+  // o prontuário oferecer reenvio (o áudio fica guardado no aparelho).
+  await therapyRouter.interruptActiveAiSummaries?.().catch(e => logError("shutdown_ai_summary_error", e));
 
   server.close((err) => {
     if (err) { logError("shutdown_error", err, { signal }); process.exit(1); }

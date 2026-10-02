@@ -79,7 +79,7 @@ const corporateDevelopment = require("../services/corporate-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
 const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
-const { processAiSummary, splitAudioSegments } = require("../services/therapy-ai-summary");
+const { processAiSummary, splitAudioSegments, updateCurrentAttempt } = require("../services/therapy-ai-summary");
 const clinicalTwinSvc = require("../services/clinical-twin");
 const cid10 = require("../services/cid10");
 const nfseNfeio = require("../services/nfse-nfeio");
@@ -7615,6 +7615,53 @@ const AI_SUMMARY_AUDIO_MAX_BYTES = 32 * 1024 * 1024;
 const AI_SUMMARY_PROCESSING_LEASE_MS = 60 * 60 * 1000;
 const AI_SUMMARY_MAX_CONCURRENT = 2;
 let aiSummaryAdmissions = 0;
+// Um resumo leva minutos; acima disto em "processing", o job morreu (queda
+// do processo) e a tela deve oferecer reenvio em vez de "sendo gerado".
+const AI_SUMMARY_STALE_MS = 30 * 60 * 1000;
+// Jobs rodando NESTE processo (sessionId → attemptId). Cada deploy reinicia o
+// servidor: no SIGTERM eles são marcados "interrupted" na hora, para o
+// prontuário oferecer "Tentar de novo" com o áudio guardado no aparelho.
+const activeAiSummaryJobs = new Map();
+
+async function markAiSummaryInterrupted(db, sessionId, attemptId, reason) {
+  const summaryRef = db.collection("therapy_session_summaries").doc(sessionId);
+  return updateCurrentAttempt({ db, summaryRef, attemptId, data: {
+    status: "interrupted",
+    error: reason,
+    processingLeaseUntil: 0,
+    interruptedAt: admin.firestore.FieldValue.serverTimestamp()
+  } });
+}
+
+router.interruptActiveAiSummaries = async function interruptActiveAiSummaries() {
+  const db = getDb();
+  if (!db || activeAiSummaryJobs.size === 0) return;
+  logWarn("ai_summary_interrupting_on_shutdown", { count: activeAiSummaryJobs.size });
+  await Promise.allSettled([...activeAiSummaryJobs].map(([sessionId, attemptId]) =>
+    markAiSummaryInterrupted(db, sessionId, attemptId, "SERVIDOR_REINICIADO")));
+};
+
+// Queda brusca (sem SIGTERM): no boot, o que está "processing" há mais que o
+// limite é dado como morto. Recente fica — pode ser de outra instância viva.
+router.sweepStaleAiSummaries = async function sweepStaleAiSummaries() {
+  const db = getDb();
+  if (!db) return;
+  try {
+    const snap = await db.collection("therapy_session_summaries").where("status", "==", "processing").limit(200).get();
+    const cutoff = Date.now() - AI_SUMMARY_STALE_MS;
+    let marked = 0;
+    for (const doc of snap.docs) {
+      const d = doc.data();
+      const started = therapyTimestampMillis(d.startedAt) || 0;
+      if (started && started < cutoff && d.attemptId) {
+        if (await markAiSummaryInterrupted(db, doc.id, d.attemptId, "PROCESSAMENTO_INTERROMPIDO")) marked++;
+      }
+    }
+    if (marked) logWarn("ai_summary_stale_swept", { marked });
+  } catch (err) {
+    logError("ai_summary_sweep_error", err);
+  }
+};
 
 const aiSummaryLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
@@ -7727,7 +7774,9 @@ router.post("/therapy/session/:sessionId/ai-summarize",
         }
         if (
           current?.status === "processing" &&
-          Number(current.processingLeaseUntil || 0) > Date.now()
+          Number(current.processingLeaseUntil || 0) > Date.now() &&
+          // Processando há mais que o limite = job morto: aceita o reenvio.
+          (therapyTimestampMillis(current.startedAt) || Date.now()) >= Date.now() - AI_SUMMARY_STALE_MS
         ) {
           const error = new Error("AI_SUMMARY_EM_PROCESSAMENTO");
           error.code = "AI_SUMMARY_EM_PROCESSAMENTO";
@@ -7772,6 +7821,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     });
 
     // Fire-and-forget processing. Erros vão pra log + Firestore status.
+    activeAiSummaryJobs.set(sessionId, attemptId);
     processAiSummary({
       audioSegments,
       sessionId,
@@ -7784,6 +7834,7 @@ router.post("/therapy/session/:sessionId/ai-summarize",
     }).catch(err => {
       logError("ai_summary_unhandled", err, { sessionId });
     }).finally(() => {
+      if (activeAiSummaryJobs.get(sessionId) === attemptId) activeAiSummaryJobs.delete(sessionId);
       req.releaseAiSummaryAdmission();
     });
   })
@@ -7860,10 +7911,13 @@ router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, re
   }
   const data = summarySnap.data();
   const encryptedPayload = encryptedPayloadResponse(data);
+  // "processing" antigo demais = job morto que a varredura ainda não pegou.
+  const stale = data.status === "processing"
+    && (therapyTimestampMillis(data.startedAt) || Date.now()) < Date.now() - AI_SUMMARY_STALE_MS;
   return res.json({
     ok: true,
     exists: true,
-    status: data.status,
+    status: stale ? "interrupted" : data.status,
     summary: encryptedPayload ? null : (data.summary || null),
     signals: encryptedPayload ? null : (data.signals || null),
     transcript: encryptedPayload ? null : (data.transcript || null),
