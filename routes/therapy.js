@@ -8019,10 +8019,16 @@ router.get("/therapy/session/:sessionId/ai-summary", asyncHandler(async (req, re
   // "processing" antigo demais = job morto que a varredura ainda não pegou.
   const stale = data.status === "processing"
     && (aiSummaryLastSign(data) || Date.now()) < Date.now() - AI_SUMMARY_STALE_MS;
+  const effectiveStatus = stale ? "interrupted" : data.status;
+  // Texto parcial no servidor permite refazer sem áudio no computador.
+  const piecesStored = ["interrupted", "failed"].includes(effectiveStatus)
+    ? await aiPieces.hasAnyPiece(db, sessionId).catch(() => false)
+    : false;
   return res.json({
     ok: true,
     exists: true,
-    status: stale ? "interrupted" : data.status,
+    status: effectiveStatus,
+    piecesStored,
     summary: encryptedPayload ? null : (data.summary || null),
     signals: encryptedPayload ? null : (data.signals || null),
     transcript: encryptedPayload ? null : (data.transcript || null),

@@ -197,3 +197,17 @@ test("encerramento por pedaços sem nenhum áudio falha com SEM_AUDIO", async ()
 test("transcrição local roda uma por vez (fila)", async () => {
   assert.equal(whisper.localQueueDepth(), 0);
 });
+
+test("pedaços que não abrem com a chave do pedido geram erro explícito, não 'sem fala'", async () => {
+  const db = fakeFirestore();
+  await pieces.storePiece({ db, admin, sessionId: "s7", therapistUid: "t", key: "1790000000000-a", result: { text: "fala", durationSec: 90 }, clientKey: key() });
+  await db.collection("therapy_session_summaries").doc("s7").set({ status: "processing", attemptId: "att" });
+  await processAiSummary({
+    piecePlan: { pending: [] }, sessionId: "s7", attemptId: "att", therapist: {}, session: { therapistUid: "t" },
+    clientEncryption: { key: key(), wrappedKey: "w", wrappedKeyIv: "wi" }, db, admin
+  });
+  const summary = (await db.collection("therapy_session_summaries").doc("s7").get()).data();
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.error, "PEDACOS_CHAVE_DIVERGENTE");
+  assert.equal(await pieces.hasAnyPiece(db, "s7"), true, "pedaços mantidos para nova tentativa");
+});

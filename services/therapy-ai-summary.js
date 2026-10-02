@@ -91,6 +91,9 @@ async function transcribePendingPieces({ piecePlan, sessionId, session, clientEn
   const transcript = await pieces.loadSessionTranscript(db, sessionId, clientEncryption.key);
   if (transcript.pieces === 0) throw new Error("SEM_AUDIO");
   if (transcript.undecryptable) logWarn("ai_summary_pieces_undecryptable", { sessionId, count: transcript.undecryptable });
+  // Nenhum pedaço abriu com a chave do pedido: não é silêncio, é chave
+  // divergente (ex.: navegador com módulo antigo em cache). Erro explícito.
+  if (!transcript.text && transcript.undecryptable === transcript.pieces) throw new Error("PEDACOS_CHAVE_DIVERGENTE");
   return transcript;
 }
 

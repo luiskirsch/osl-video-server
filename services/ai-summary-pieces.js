@@ -35,6 +35,13 @@ async function hasPiece(db, sessionId, key) {
   return (await pieceRef(db, sessionId, key).get()).exists;
 }
 
+// Há texto parcial guardado para a sessão? (o prontuário oferece "Tentar de
+// novo" mesmo sem áudio no computador do profissional).
+async function hasAnyPiece(db, sessionId) {
+  const snap = await db.collection(PIECES_COLLECTION).where("sessionId", "==", sessionId).limit(1).get();
+  return snap.size > 0;
+}
+
 // Grava o texto de um pedaço (idempotente pela chave). `result` vem do
 // whisper.transcribe; `failed` marca pedaço ilegível — conta como presente
 // para o navegador não reenviar para sempre, mas não contribui com texto.
@@ -119,6 +126,7 @@ module.exports = {
   isValidPieceKey,
   pieceOrder,
   hasPiece,
+  hasAnyPiece,
   storePiece,
   loadSessionTranscript,
   deleteSessionPieces,
