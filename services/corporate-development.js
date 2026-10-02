@@ -124,11 +124,13 @@ const TRACKS = [
               narrador: { name: "", tone: "muted" }
             },
             story: [
-              { type: "scene", title: "Terça, 10h — reunião de planejamento", visual: "meeting", lines: [
-                { who: "narrador", text: "Você começa a apresentar a proposta que levou a semana inteira para montar." },
-                { who: "voce", text: "A ideia é dividir a entrega em duas fases, para reduzir o risco e conseguir validar com o cliente antes de", interrupted: true },
-                { who: "carla", text: "Na verdade, isso não vai funcionar. Deixa eu explicar como eu faria.", mood: "firme" },
-                { who: "narrador", text: "É a terceira vez neste mês que isso acontece. A reunião segue no ritmo dela." }
+              { type: "scene", title: "Terça, 10h — reunião de planejamento", chat: { title: "Planejamento Q4", subtitle: "Você, Carla, Diego e Ana · chat da reunião" }, lines: [
+                { who: "narrador", text: "A reunião é por vídeo e a discussão acontece no chat. Você abre a proposta que levou a semana inteira para montar." },
+                { who: "voce", text: "Pessoal, vou compartilhar a proposta de entrega para o Q4 🙂", typo: { at: 22, wrong: "propsota", right: "proposta" } },
+                { who: "voce", text: "A ideia é dividir em duas fases: assim reduzimos o risco e conseguimos validar com o cliente antes de", interrupted: true },
+                { who: "carla", text: "Na verdade isso não vai funcionar. Deixa eu explicar como eu faria.", mood: "firme" },
+                { who: "carla", text: "Faz uma fase só e pronto, a gente não tem tempo pra isso." },
+                { who: "narrador", text: "Sua mensagem fica no rascunho, sem ser enviada. É a terceira vez neste mês que isso acontece — e a reunião segue no ritmo dela." }
               ] },
               { type: "slider", prompt: "Agora, sinceramente: quanto isso mexeu com você?", min: "Nada", max: "Muito", tips: [
                 "Mesmo que tenha passado rápido, situações que se repetem costumam pesar com o tempo. Vale tratar enquanto é pequeno.",
