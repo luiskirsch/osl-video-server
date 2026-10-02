@@ -5471,6 +5471,20 @@ router.post("/therapy/paciente/notas", asyncHandler(async (req, res) => {
   if (!ciphertext || !iv) return sendError(res, 400, "CIPHERTEXT_IV_OBRIGATORIOS");
   if (ciphertext.length > PATIENT_NOTE_CIPHERTEXT_MAX) return sendError(res, 413, "NOTA_GRANDE_DEMAIS");
 
+  // Nota "selada": escrita na sala sem a chave desbloqueada (link aberto em
+  // outra aba). Cifrada com a chave pública ECDH do próprio paciente + chave
+  // efêmera; só a chave privada dele (embrulhada pela DEK) abre. Guardamos a
+  // chave pública efêmera — não é segredo.
+  let ephemeralPubJwk = null;
+  if (req.body?.ephemeralPubJwk) {
+    const e = req.body.ephemeralPubJwk;
+    if (typeof e !== "object" || e.kty !== "EC" || e.crv !== "P-256" || typeof e.x !== "string" || typeof e.y !== "string"
+        || e.x.length > 64 || e.y.length > 64) {
+      return sendError(res, 400, "CHAVE_EFEMERA_INVALIDA");
+    }
+    ephemeralPubJwk = { kty: "EC", crv: "P-256", x: e.x, y: e.y };
+  }
+
   // Snapshot do nome do profissional pra exibição offline (paciente não tem
   // perfil do profissional disponível pra consultar depois).
   const db = getDb();
@@ -5485,6 +5499,7 @@ router.post("/therapy/paciente/notas", asyncHandler(async (req, res) => {
     therapistDisplayName,
     ciphertext,
     iv,
+    ...(ephemeralPubJwk ? { ephemeralPubJwk } : {}),
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   });
@@ -5514,6 +5529,7 @@ router.get("/therapy/paciente/notas", asyncHandler(async (req, res) => {
         therapistDisplayName: data.therapistDisplayName || "",
         ciphertext: data.ciphertext,
         iv: data.iv,
+        ephemeralPubJwk: data.ephemeralPubJwk || null,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
       };
@@ -5545,6 +5561,8 @@ router.patch("/therapy/paciente/notas/:noteId", asyncHandler(async (req, res) =>
 
   await ref.set({
     ciphertext, iv,
+    // Edição regrava com a DEK — deixa de ser nota selada.
+    ephemeralPubJwk: admin.firestore.FieldValue.delete(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
