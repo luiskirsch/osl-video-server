@@ -5454,6 +5454,39 @@ router.patch("/therapy/paciente/perfil", asyncHandler(async (req, res) => {
 // está na seção "SESSÕES DO PACIENTE (app PWA)" abaixo, que busca por email/uid
 // e inclui scheduling_requests pendentes). Mantido como comentário pra rastreio.
 
+// POST /therapy/paciente/vincular-sessao — visitante que acabou de criar conta
+// (ou entrar) leva a consulta que fez para o próprio histórico.
+// Body: { sessionId, rejoinSecret }. A prova é o rejoinSecret que o aparelho
+// recebeu ao entrar na sala (só o hash fica no servidor) — quem não participou
+// da consulta não tem. Não sobrescreve sessão já vinculada a outra conta.
+router.post("/therapy/paciente/vincular-sessao", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+
+  const account = await loadPatientAccount(uid);
+  if (!account) return sendError(res, 404, "PACIENTE_NAO_REGISTRADO");
+
+  const sessionId    = String(req.body?.sessionId || "").trim();
+  const rejoinSecret = String(req.body?.rejoinSecret || "").trim();
+  if (!sessionId || !rejoinSecret) return sendError(res, 400, "DADOS_OBRIGATORIOS");
+
+  const ref = getDb().collection("therapy_sessions").doc(sessionId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const s = snap.data();
+  if (!s.patientRejoinHash || !safeEqualHex(sha256Hex(rejoinSecret), s.patientRejoinHash)) {
+    return sendError(res, 403, "PROVA_INVALIDA");
+  }
+  if (s.patientAccountUid && s.patientAccountUid !== uid) return sendError(res, 409, "SESSAO_JA_VINCULADA");
+
+  if (!s.patientAccountUid) {
+    await ref.set({ patientAccountUid: uid, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await logAudit({ type: "patient_session_linked_after_signup", sessionId, patientAccountUid: uid });
+  }
+  return res.json({ ok: true });
+}));
+
 // POST /therapy/paciente/notas — salva nota cifrada do paciente
 router.post("/therapy/paciente/notas", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
