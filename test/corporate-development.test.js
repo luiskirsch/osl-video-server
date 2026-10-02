@@ -53,3 +53,26 @@ test("jornada pessoal não depende de cadastro corporativo e mantém progresso p
   assert.match(route, /loadEmployeeDevelopmentProgress\(db, uid, participant\)/);
 });
 
+
+test("curso interativo 'Conversas difíceis' mantém ids (sem perder progresso) e expõe a história", () => {
+  const dev = require("../services/corporate-development");
+  const catalog = dev.publicCatalog({ completedModules: { conversas_dificeis: 1790000000000 } });
+  const course = catalog.tracks.flatMap(t => t.courses).find(c => c.id === "comunicacao_assertiva");
+  assert.equal(course.title, "Conversas difíceis");
+  assert.equal(course.interactive, true);
+  assert.deepEqual(course.modules.map(m => m.id), ["conversas_dificeis", "escuta_e_feedback"]);
+  assert.ok(course.modules[0].completedAt, "conclusão anterior preservada");
+  for (const module of course.modules) {
+    assert.ok(module.story.length >= 5, "história com várias etapas");
+    assert.ok(module.sections.length && module.quiz.options.length, "app nativo continua com texto + pergunta");
+    assert.equal(module.quiz.answer, undefined, "resposta certa não vai ao navegador");
+    for (const step of module.story) {
+      for (const line of [...(step.lines || []), ...(step.options || []).flatMap(o => o.outcome?.lines || [])]) {
+        assert.ok(module.cast[line.who], `personagem ${line.who} definido`);
+      }
+      if (step.type === "build") assert.deepEqual([...step.order].sort(), step.pieces.map(p => p.id).sort());
+    }
+  }
+  assert.equal(dev.validateCompletion("conversas_dificeis", 1).ok, true);
+  assert.equal(dev.validateCompletion("escuta_e_feedback", 0).ok, false);
+});
