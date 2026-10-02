@@ -87,7 +87,10 @@ function validateGovernance(raw) {
   const plannedCloseDate = cleanText(raw?.plannedCloseDate, 10);
   const retentionMonths = Number(raw?.retentionMonths);
   if (scope.length < 30 || workerParticipationPlan.length < 30
-      || privacyContact.length < 5 || !validIsoDate(plannedCloseDate)
+      // contato real: e-mail ou telefone com DDD (bloqueia texto aleatório)
+      || !(/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(privacyContact)
+        || /^\+?\d{10,13}$/.test(privacyContact.replace(/[\s().-]/g, "")))
+      || !validIsoDate(plannedCloseDate)
       || !Number.isInteger(retentionMonths) || retentionMonths < 12 || retentionMonths > 120
       || typeof raw?.remoteHybridCovered !== "boolean") return null;
   const today = new Date().toISOString().slice(0, 10);
