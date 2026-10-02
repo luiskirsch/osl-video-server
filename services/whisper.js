@@ -18,6 +18,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { logWarn } = require("../logger");
 
 let _pipelineP = null;
 let _WaveFile = null;
@@ -209,6 +210,55 @@ function loadWavAsFloat32(wavPath) {
  * @param {string} [opts.srcExt="webm"] - extensão pro tmp file (ffmpeg deduz)
  * @returns {Promise<{ text: string, chunks: Array<{timestamp: [number, number], text: string}>, durationSec: number }>}
  */
+// ─── Groq (Whisper Large v3 Turbo) ────────────────────────────────────────
+// Com GROQ_API_KEY configurada, a transcrição roda no Groq: ~15 s por hora de
+// áudio (contra ~metade da duração da sessão na CPU daqui), US$ 0,04/hora.
+// Contrato do Groq proíbe treino com os dados; ligar Zero Data Retention no
+// console. Falha do Groq (rede, limite, 5xx) cai na transcrição local.
+// WHISPER_PROVIDER=local força a local mesmo com a chave.
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_MODEL = process.env.GROQ_WHISPER_MODEL || "whisper-large-v3-turbo";
+const GROQ_MAX_BYTES = boundedNumber(process.env.GROQ_MAX_FILE_BYTES, 25 * 1024 * 1024, 1024 * 1024, 100 * 1024 * 1024);
+const GROQ_TIMEOUT_MS = boundedNumber(process.env.GROQ_TIMEOUT_MS, 5 * 60_000, 30_000, 20 * 60_000);
+const ISO_LANGUAGE = { portuguese: "pt", english: "en", spanish: "es" };
+
+function groqEnabled() {
+  return !!process.env.GROQ_API_KEY && process.env.WHISPER_PROVIDER !== "local";
+}
+
+async function transcribeViaGroq(audioBuffer, { language, srcExt, fetchImpl = fetch } = {}) {
+  if (audioBuffer.length > GROQ_MAX_BYTES) throw new Error("GROQ_ARQUIVO_GRANDE");
+  const form = new FormData();
+  form.append("file", new Blob([audioBuffer], { type: `audio/${srcExt}` }), `audio.${srcExt}`);
+  form.append("model", GROQ_MODEL);
+  form.append("language", ISO_LANGUAGE[language] || String(language || "pt").slice(0, 2));
+  form.append("response_format", "verbose_json");
+  form.append("temperature", "0");
+  const res = await fetchImpl(GROQ_ENDPOINT, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(GROQ_TIMEOUT_MS)
+  });
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 300);
+    const error = new Error(`GROQ_HTTP_${res.status}`);
+    error.detail = detail;
+    throw error;
+  }
+  const data = await res.json();
+  const segments = Array.isArray(data.segments) ? data.segments : [];
+  const durationSec = Number(data.duration) || (segments.length ? Number(segments[segments.length - 1].end) || 0 : 0);
+  const rawText = String(data.text || "").trim();
+  return {
+    text: isHallucinated(rawText) ? "" : rawText,
+    chunks: segments.map(seg => ({ timestamp: [Number(seg.start) || 0, Number(seg.end) || 0], text: String(seg.text || "") })),
+    durationSec,
+    hallucinated: isHallucinated(rawText),
+    provider: "groq"
+  };
+}
+
 async function transcribe(audioBuffer, opts = {}) {
   const language = opts.language || "portuguese";
   const srcExt = normalizeAudioExtension(opts.srcExt || "webm");
@@ -218,6 +268,15 @@ async function transcribe(audioBuffer, opts = {}) {
   }
   if (audioBuffer.length > MAX_AUDIO_BYTES) {
     throw new Error("AUDIO_MUITO_GRANDE");
+  }
+
+  if (groqEnabled()) {
+    try {
+      return await transcribeViaGroq(audioBuffer, { language, srcExt });
+    } catch (error) {
+      // Sem detalhes do conteúdo no log — só o motivo técnico.
+      logWarn("whisper_groq_fallback_local", { error: error.message, detail: error.detail || null });
+    }
   }
 
   const pipeline = await getPipeline();
@@ -249,7 +308,8 @@ async function transcribe(audioBuffer, opts = {}) {
     text: isHallucinated(rawText) ? "" : rawText,
     chunks: Array.isArray(result.chunks) ? result.chunks : [],
     durationSec,
-    hallucinated: isHallucinated(rawText)
+    hallucinated: isHallucinated(rawText),
+    provider: "local"
   };
 }
 
@@ -278,4 +338,4 @@ function isHallucinated(text) {
   return false;
 }
 
-module.exports = { transcribe, isHallucinated, normalizeAudioExtension, _test: { configureTransformersCache } };
+module.exports = { transcribe, isHallucinated, normalizeAudioExtension, _test: { configureTransformersCache, transcribeViaGroq, groqEnabled } };
