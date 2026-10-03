@@ -21349,7 +21349,34 @@ router.delete("/therapy/paciente/dependentes/:id", asyncHandler(async (req, res)
 // Coleção: therapy_humor  { uid, date (YYYY-MM-DD), mood (1-5), at }
 // ═════════════════════════════════════════════════════════════════════════
 
-// POST /therapy/paciente/humor  { mood: 1-5 }
+// Observação do dia: texto pessoal, cifrado em repouso (AES-256-GCM) com
+// chave derivada por usuário (HKDF, rótulo próprio). Só o titular lê.
+const MOOD_NOTE_MAX = 600;
+function moodNoteKey(uid) {
+  const { EMPRESA_JWT_SECRET: secret } = require("../config");
+  if (!secret || secret.length < 16) return null;
+  return Buffer.from(crypto.hkdfSync("sha256", secret, Buffer.from(String(uid)), "ep:humor-note:v1", 32));
+}
+function sealMoodNote(uid, text) {
+  const key = moodNoteKey(uid);
+  if (!key) throw new Error("NOTA_INDISPONIVEL");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const data = Buffer.concat([cipher.update(text, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  return { v: 1, iv: iv.toString("base64"), data: data.toString("base64") };
+}
+function openMoodNote(uid, sealed) {
+  try {
+    const key = moodNoteKey(uid);
+    if (!key || !sealed?.data) return null;
+    const buf = Buffer.from(sealed.data, "base64");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(sealed.iv, "base64"));
+    decipher.setAuthTag(buf.subarray(buf.length - 16));
+    return Buffer.concat([decipher.update(buf.subarray(0, buf.length - 16)), decipher.final()]).toString("utf8");
+  } catch { return null; }
+}
+
+// POST /therapy/paciente/humor  { mood: 1-5, note?: string }
 // A data é sempre definida pelo servidor em America/Sao_Paulo. Aceitar uma
 // data do cliente permitiria retroagir/antecipar registros e recriaria o bug
 // da virada UTC em aparelhos com relógio ou fuso incorretos.
@@ -21360,6 +21387,13 @@ router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
 
   const mood = Number(req.body?.mood);
   if (!Number.isInteger(mood) || mood < 1 || mood > 5) return sendError(res, 400, "MOOD_INVALIDO");
+  const noteText = String(req.body?.note ?? "").trim();
+  if (noteText.length > MOOD_NOTE_MAX) return sendError(res, 400, "NOTA_MUITO_LONGA");
+  let noteSealed = null;
+  if (noteText) {
+    try { noteSealed = sealMoodNote(uid, noteText); }
+    catch { return sendError(res, 503, "NOTA_INDISPONIVEL"); }
+  }
 
   const date = publicProgram.dateInSaoPaulo();
 
@@ -21370,6 +21404,7 @@ router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   const batch = db.batch();
   batch.set(currentRef, {
     uid, date, mood,
+    note: noteSealed || admin.firestore.FieldValue.delete(),
     at: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -21422,7 +21457,8 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
           sourceDate: x.date
         });
       }
-      return { date, mood: x.mood, at };
+      const note = x.note ? openMoodNote(uid, x.note) : null;
+      return note ? { date, mood: x.mood, at, note } : { date, mood: x.mood, at };
     })
     .filter(i => includeAll || i.date >= cutoffStr)
     .sort((a, b) => b.date.localeCompare(a.date) || (b.at || 0) - (a.at || 0));
