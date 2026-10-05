@@ -18,6 +18,7 @@ const { translateText } = require("./server-i18n");
 const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, templateRecemFormadoEndingSoon, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { sendSms } = require("./sms");
+const pushService = require("./push");
 const { processPendingReferrals } = require("./affiliate");
 const { createJoinCode } = require("./join-codes");
 
@@ -779,8 +780,80 @@ async function runRecemFormadoTransitionTick() {
   }
 }
 
+// ─── Sala aberta: push 15 min antes ──────────────────────────────────
+// Roda a cada minuto (fora do tick de 15 min, que seria impreciso demais).
+// Range em scheduledAt (número) mantém a leitura pequena: só as sessões dos
+// próximos ~16 min. joinPushSentAt garante um único aviso por sessão.
+const JOIN_PUSH_LEAD_MS = 15 * 60 * 1000;
+const JOIN_PUSH_INTERVAL_MS = 60 * 1000;
+let joinPushTimer = null;
+let joinPushRunning = false;
+
+async function patientPushTargets(db, s) {
+  const uids = new Set([s.patientAccountUid, s.patientUid].filter(Boolean));
+  if (s.studentId) {
+    const st = await db.collection("therapy_estudantes").doc(String(s.studentId)).get().catch(() => null);
+    if (st?.exists && st.data().portalAccountUid) uids.add(st.data().portalAccountUid);
+  }
+  return [...uids];
+}
+
+async function runJoinOpenPushTick() {
+  const db = getDb();
+  if (!db || !pushService.isConfigured()) return;
+  const now = Date.now();
+  const snap = await db.collection("therapy_sessions")
+    .where("scheduledAt", ">", now - 5 * 60 * 1000)
+    .where("scheduledAt", "<=", now + JOIN_PUSH_LEAD_MS)
+    .limit(200)
+    .get();
+  let sent = 0;
+  for (const doc of snap.docs) {
+    const s = doc.data();
+    if (!["scheduled", "in_progress"].includes(s.status || "scheduled")) continue;
+    if (s.joinPushSentAt) continue;
+    await doc.ref.set({ joinPushSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    const at = Number(s.scheduledAt);
+    const mins = Math.max(0, Math.round((at - now) / 60000));
+    const hh = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }).format(at);
+    const payload = {
+      title: "Sua consulta já pode começar",
+      body: mins > 0
+        ? `A sala com ${s.therapistDisplayName || "seu profissional"} abre agora — sessão às ${hh} (em ${mins} min).`
+        : `A sala com ${s.therapistDisplayName || "seu profissional"} está aberta. Toque para entrar.`,
+      url: "/app/consultas.html",
+      tag: `join-${doc.id}`
+    };
+    for (const uid of await patientPushTargets(db, s)) {
+      try {
+        const ref = db.collection("therapy_patient_accounts").doc(uid);
+        const acc = await ref.get();
+        const subs = acc.exists && Array.isArray(acc.data().pushSubscriptions) ? acc.data().pushSubscriptions : [];
+        if (!subs.length) continue;
+        const r = await pushService.sendPushToAll(subs, payload);
+        sent += r.sent;
+        if (r.expired.length) await ref.set({ pushSubscriptions: subs.filter(x => !r.expired.includes(x.endpoint)) }, { merge: true });
+      } catch (e) {
+        logError("join_push_failed", e, { sessionId: doc.id });
+      }
+    }
+  }
+  if (sent) logInfo("join_push_tick", { sent });
+}
+
+function startJoinPushLoop() {
+  if (joinPushTimer) return;
+  joinPushTimer = setInterval(() => {
+    if (joinPushRunning) return;
+    joinPushRunning = true;
+    runJoinOpenPushTick().catch(e => logError("join_push_tick_unhandled", e)).finally(() => { joinPushRunning = false; });
+  }, JOIN_PUSH_INTERVAL_MS);
+  joinPushTimer.unref?.();
+}
+
 function startSchedulerLoop() {
   if (timer || startupTimer) return;
+  startJoinPushLoop();
   // Primeiro tick depois de 1min (evita bater no startup do Firebase Admin).
   startupTimer = setTimeout(() => {
     startupTimer = null;
@@ -795,6 +868,7 @@ function startSchedulerLoop() {
 }
 
 function stopSchedulerLoop() {
+  if (joinPushTimer) { clearInterval(joinPushTimer); joinPushTimer = null; }
   if (startupTimer) {
     clearTimeout(startupTimer);
     startupTimer = null;
@@ -805,4 +879,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick, runStudentExpirationTick, runRecemFormadoTransitionTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runJoinOpenPushTick, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick, runStudentExpirationTick, runRecemFormadoTransitionTick };

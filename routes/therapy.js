@@ -21059,6 +21059,78 @@ router.get("/therapy/comparecimento/verificar/:code", attendanceVerifyLimiter, a
 // Emite um token LiveKit para o paciente autenticado no app nativo.
 // Diferente do link público de convite, este fluxo pode ser refeito em caso de
 // queda de conexão: a própria conta Firebase é a credencial de acesso.
+// Posse da sessão pelo paciente logado (conta própria, e-mail confirmado ou
+// portal do aluno vinculado). Usado pelo app nativo e pelo portal web.
+async function patientOwnsTherapySession(uid, userRecord, session) {
+  const email = String(userRecord.email || "").trim().toLowerCase();
+  const sessionEmail = String(session.patientEmail || "").trim().toLowerCase();
+  let ownsSession = session.patientAccountUid === uid
+    || session.patientUid === uid
+    || Boolean(userRecord.emailVerified && email && sessionEmail && email === sessionEmail);
+  if (!ownsSession && session.studentId) {
+    const studentSnap = await getDb().collection("therapy_estudantes").doc(String(session.studentId)).get();
+    if (studentSnap.exists) {
+      const student = studentSnap.data();
+      ownsSession = student.portalAccountUid === uid
+        && String(student.portalAccountEmail || "").trim().toLowerCase() === email
+        && publicProgram.studentPortalAccessEmail(student) === email
+        && publicProgram.studentPortalParticipationIsActive(student);
+    }
+  }
+  return ownsSession;
+}
+
+// Portal web: link de entrada (entrar.html?c=...) para a sessão do paciente
+// logado, liberado na mesma janela do app nativo (15 min antes até o fim).
+router.post("/therapy/paciente/sessoes/:sessionId/join-link", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+
+  const [userRecord, sessionSnap] = await Promise.all([
+    admin.auth().getUser(uid),
+    getDb().collection("therapy_sessions").doc(sessionId).get()
+  ]);
+  if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = sessionSnap.data();
+  if (!(await patientOwnsTherapySession(uid, userRecord, session))) return sendError(res, 403, "ACESSO_NEGADO");
+  if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
+  if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
+  if (!["scheduled", "in_progress"].includes(session.status || "scheduled")) {
+    return sendError(res, 409, "SESSAO_INDISPONIVEL");
+  }
+  if (!session.livekitRoom) return sendError(res, 409, "SALA_NAO_CONFIGURADA");
+
+  const scheduledAt = session.scheduledAt?.toMillis?.() || Number(session.scheduledAt) || null;
+  const now = Date.now();
+  const joinOpensAt = scheduledAt ? scheduledAt - 15 * 60 * 1000 : null;
+  const overdueAt = therapySessionOverdueAt({ ...session, scheduledAt });
+  if (joinOpensAt && now < joinOpensAt && session.status !== "in_progress") {
+    return sendError(res, 409, "SALA_AINDA_NAO_DISPONIVEL", { joinOpensAt });
+  }
+  if (overdueAt && now >= overdueAt) return sendError(res, 410, "SESSAO_EXPIRADA");
+
+  const exp = now + JOIN_TOKEN_VALIDITY_MS;
+  const joinToken = signPayload({
+    token_type: "therapy_join",
+    sessionId,
+    therapistUid: session.therapistUid,
+    livekitRoom: session.livekitRoom,
+    patientNameHint: session.patientName,
+    iat: now,
+    exp
+  }, ACCESS_TOKEN_SECRET);
+  let joinCode = null;
+  try {
+    joinCode = await createJoinCode({ joinToken, sessionId, expiresAt: exp });
+  } catch (e) {
+    logWarn("patient_join_link_code_failed", { sessionId, error: e.message });
+  }
+  return res.json({ ok: true, joinUrl: buildPatientJoinUrl(joinCode || joinToken) });
+}));
+
 router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   if (!ensureLivekit(res)) return;
@@ -21078,23 +21150,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
   if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
 
   const session = sessionSnap.data();
-  const email = String(userRecord.email || "").trim().toLowerCase();
-  const sessionEmail = String(session.patientEmail || "").trim().toLowerCase();
-  // Posse por e-mail só conta com e-mail confirmado — do contrário, cadastrar
-  // o e-mail de um paciente real bastaria pra entrar na consulta dele.
-  let ownsSession = session.patientAccountUid === uid
-    || session.patientUid === uid
-    || Boolean(userRecord.emailVerified && email && sessionEmail && email === sessionEmail);
-  if (!ownsSession && session.studentId) {
-    const studentSnap = await getDb().collection("therapy_estudantes").doc(String(session.studentId)).get();
-    if (studentSnap.exists) {
-      const student = studentSnap.data();
-      ownsSession = student.portalAccountUid === uid
-        && String(student.portalAccountEmail || "").trim().toLowerCase() === email
-        && publicProgram.studentPortalAccessEmail(student) === email
-        && publicProgram.studentPortalParticipationIsActive(student);
-    }
-  }
+  const ownsSession = await patientOwnsTherapySession(uid, userRecord, session);
   if (!ownsSession) return sendError(res, 403, "ACESSO_NEGADO");
   if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
   if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
