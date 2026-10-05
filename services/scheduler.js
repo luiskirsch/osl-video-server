@@ -818,7 +818,9 @@ async function runJoinOpenPushTick() {
     const hh = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }).format(at);
     const payload = {
       title: "Sua consulta já pode começar",
-      body: mins > 0
+      body: s.therapistPreparingAt
+        ? `${s.therapistDisplayName || "Seu profissional"} já está se preparando na sala. Sessão às ${hh}.`
+        : mins > 0
         ? `A sala com ${s.therapistDisplayName || "seu profissional"} abre agora — sessão às ${hh} (em ${mins} min).`
         : `A sala com ${s.therapistDisplayName || "seu profissional"} está aberta. Toque para entrar.`,
       url: "/app/consultas.html",

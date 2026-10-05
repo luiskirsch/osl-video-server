@@ -2526,13 +2526,25 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
 
   const sessionStartedAt = therapyTimestampMillis(session.sessionStartedAt);
 
-  await db.collection("therapy_sessions").doc(sessionId).set({
+  // Modo preparação: o profissional entra antes da janela do paciente
+  // (T-15min) para testar câmera/microfone sem liberar a sala. A sessão
+  // segue "scheduled"; o paciente só vê "Profissional se preparando" quando
+  // a janela abre, ou entra antes se o profissional liberar manualmente.
+  const scheduledAtMs = Number(session.scheduledAt) || therapyTimestampMillis(session.scheduledAt) || null;
+  const patientReleaseAt = scheduledAtMs ? scheduledAtMs - 15 * 60 * 1000 : null;
+  const preparing = Boolean(patientReleaseAt && Date.now() < patientReleaseAt
+    && session.status !== "in_progress" && !session.patientReleasedAt);
+
+  await db.collection("therapy_sessions").doc(sessionId).set(preparing ? {
+    therapistPreparingAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  } : {
     status: "in_progress",
     therapistJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
 
-  await logAudit({ type: "therapist_joined", sessionId, therapistUid: uid });
+  await logAudit({ type: preparing ? "therapist_preparing" : "therapist_joined", sessionId, therapistUid: uid });
 
   return res.json({
     ok: true,
@@ -2546,8 +2558,35 @@ router.post("/therapy/sessao/:sessionId/livekit-token", asyncHandler(async (req,
     sessionStartedAt,
     serverNow: Date.now(),
     presenceToken: issueTherapyPresenceToken(sessionId, "therapist"),
+    preparing,
+    patientReleaseAt: preparing ? patientReleaseAt : null,
     demoTechnicalRoom: session.syntheticData === true && session.demoTechnicalRoom === true
   });
+}));
+
+// POST /therapy/sessao/:sessionId/liberar-paciente — profissional em modo
+// preparação libera a entrada do paciente antes da janela de 15 min.
+router.post("/therapy/sessao/:sessionId/liberar-paciente", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) return sendError(res, 400, "SESSAO_OBRIGATORIA");
+  const ref = getDb().collection("therapy_sessions").doc(sessionId);
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  const session = snap.data();
+  if (session.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (session.status === "canceled") return sendError(res, 410, "SESSAO_CANCELADA");
+  if (session.status === "completed") return sendError(res, 410, "SESSAO_ENCERRADA");
+  await ref.set({
+    status: "in_progress",
+    patientReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+    therapistJoinedAt: admin.firestore.FieldValue.serverTimestamp(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "therapist_released_patient_early", sessionId, therapistUid: uid });
+  return res.json({ ok: true });
 }));
 
 // GET /therapy/sessao/pre-join?c=CODE&t=TOKEN
@@ -20784,6 +20823,8 @@ router.get("/therapy/paciente/sessoes", asyncHandler(async (req, res) => {
         therapistSlug: s.therapistSlug || s.publicSchedulingSlug || null,
         therapistUid:  s.therapistUid || null,
         demoTechnicalRoom: s.syntheticData === true && s.demoTechnicalRoom === true,
+        // Profissional entrou cedo (modo preparação) e ainda não liberou.
+        therapistPreparing: Boolean(s.therapistPreparingAt) && (s.status || "scheduled") === "scheduled",
       });
     });
   }
