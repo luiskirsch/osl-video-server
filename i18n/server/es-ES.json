@@ -371,5 +371,7 @@
  "Mensagem enviada por": "Mensaje enviado por",
  "Sua consulta já pode começar": "Tu consulta ya puede comenzar",
  "A sala com {0} abre agora — sessão às {1} (em {2} min).": "La sala con {0} abre ahora — sesión a las {1} (en {2} min).",
- "A sala com {0} está aberta. Toque para entrar.": "La sala con {0} está abierta. Toca para entrar."
+ "A sala com {0} está aberta. Toque para entrar.": "La sala con {0} está abierta. Toca para entrar.",
+ "Seu profissional": "Tu profesional",
+ "{0} já está se preparando na sala. Sessão às {1}.": "{0} ya se está preparando en la sala. Sesión a las {1}."
 }

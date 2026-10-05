@@ -371,5 +371,7 @@
  "Mensagem enviada por": "Message sent by",
  "Sua consulta já pode começar": "Your appointment can start now",
  "A sala com {0} abre agora — sessão às {1} (em {2} min).": "The room with {0} opens now — session at {1} (in {2} min).",
- "A sala com {0} está aberta. Toque para entrar.": "The room with {0} is open. Tap to join."
+ "A sala com {0} está aberta. Toque para entrar.": "The room with {0} is open. Tap to join.",
+ "Seu profissional": "Your professional",
+ "{0} já está se preparando na sala. Sessão às {1}.": "{0} is already getting ready in the room. Session at {1}."
 }
