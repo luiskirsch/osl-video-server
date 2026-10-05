@@ -368,5 +368,8 @@
  "Olá, {{paciente}}. Sua consulta com {{profissional}} agendada para {{data}} foi cancelada. Pra reagendar, envie uma mensagem: {{telefone_clinica}} — {{nome_clinica}}": "Hi, {{paciente}}. Your appointment with {{profissional}} scheduled for {{data}} has been canceled. To reschedule, send a message: {{telefone_clinica}} — {{nome_clinica}}",
  "Olá, {{paciente}}. Sua consulta com {{profissional}} agendada para {{data}} foi cancelada.": "Hi, {{paciente}}. Your appointment with {{profissional}} scheduled for {{data}} has been canceled.",
  "Pra reagendar, envie uma mensagem: {{telefone_clinica}}": "To reschedule, send a message: {{telefone_clinica}}",
- "Mensagem enviada por": "Message sent by"
+ "Mensagem enviada por": "Message sent by",
+ "Sua consulta já pode começar": "Your appointment can start now",
+ "A sala com {0} abre agora — sessão às {1} (em {2} min).": "The room with {0} opens now — session at {1} (in {2} min).",
+ "A sala com {0} está aberta. Toque para entrar.": "The room with {0} is open. Tap to join."
 }
