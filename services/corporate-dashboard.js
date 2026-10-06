@@ -1,5 +1,7 @@
 "use strict";
 
+const { benefitPolicy, poolUsageDocumentId, benefitMonth, activeCoveredEntries } = require("./corporate-benefit");
+
 const PAGE_SIZE = 250;
 const MIN_COHORT = 5;
 const REPORT_TIME_ZONE = "America/Sao_Paulo";
@@ -138,6 +140,21 @@ async function buildCorporateDashboard(db, empresaId, empresa, now = Date.now())
 
   const mascarado = cohortSize < MIN_COHORT || incomplete || publicTotal === null ||
     publicMonth === null || !visibleAdherence || !specialtiesSafe;
+
+  // Banco mensal da equipe: limite sempre visível; uso só quando o painel não
+  // está mascarado (mesma regra de grupo mínimo dos demais indicadores).
+  let banco = null;
+  const policy = benefitPolicy(empresa);
+  if (policy.model === "pool") {
+    const poolSnap = await db.collection("therapy_corporate_benefit_usage")
+      .doc(poolUsageDocumentId(empresaId, benefitMonth(now))).get().catch(() => null);
+    const usadas = Object.keys(activeCoveredEntries(poolSnap?.exists ? poolSnap.data().entries : {}, now)).length;
+    banco = {
+      limite: policy.poolSize,
+      usadas: mascarado ? null : usadas,
+      emAlerta: mascarado ? null : usadas >= Math.ceil(policy.poolSize * 0.8)
+    };
+  }
   return {
     ok: true,
     empresa: { nome: empresa.nome, segmento: empresa.segmento || null },
@@ -151,6 +168,7 @@ async function buildCorporateDashboard(db, empresaId, empresa, now = Date.now())
         : null
     },
     especialidades: mascarado ? {} : especialidades,
+    banco,
     mascarado,
     dadosIncompletos: incomplete,
     periodo: month.period,

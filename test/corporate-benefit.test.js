@@ -50,3 +50,45 @@ test("preço extra exige todos os parâmetros homologados; não embute CPP nem t
   assert.equal(calculateExtraQuote({ ...cfg, gatewayPercentRate: undefined }), null);
   assert.equal(validPricingConfig({ ...cfg, simplesEffectiveRate: 1 }), false);
 });
+
+const {
+  benefitPolicy, poolDecision, inContinuity, poolAlertDue, previousBenefitMonth, poolUsageDocumentId
+} = require("../services/corporate-benefit");
+
+const pool50 = benefitPolicy({ benefitModel: "pool", benefitPool: { monthlySessions: 50 } });
+const fill = (n, employeeId = e => `e${e}`) => Object.fromEntries(
+  Array.from({ length: n }, (_, i) => [`r${i}`, { status: "approved", employeeId: employeeId(i) }]));
+
+test("pool policy defaults to 4 per employee and reserves 20% for continuity", () => {
+  assert.deepEqual(pool50, { model: "pool", poolSize: 50, perEmployeeMax: 4, continuityReserve: 10 });
+  assert.equal(benefitPolicy({}).model, "per_employee");
+  assert.equal(benefitPolicy({ benefitModel: "pool", benefitPool: { monthlySessions: 0 } }).model, "per_employee");
+});
+
+test("new employees stop at the continuity reserve; ongoing ones use the full pool", () => {
+  const entries = fill(40);
+  assert.equal(poolDecision(pool50, entries, "new", false).reason, "BANCO_ESGOTADO");
+  const ok = poolDecision(pool50, entries, "ongoing", true);
+  assert.equal(ok.covered, true);
+  assert.equal(ok.remaining, 9);
+  assert.equal(poolDecision(pool50, fill(50), "ongoing", true).reason, "BANCO_ESGOTADO");
+});
+
+test("no employee takes more than the personal cap", () => {
+  const entries = fill(4, () => "same");
+  assert.equal(poolDecision(pool50, entries, "same", true).reason, "LIMITE_PESSOAL_DO_BANCO");
+  assert.equal(poolDecision(pool50, entries, "other", false).covered, true);
+});
+
+test("continuity comes from approved or completed sessions this or last month", () => {
+  assert.equal(inContinuity("a", {}, { x: { employeeId: "a", status: "completed" } }), true);
+  assert.equal(inContinuity("a", { x: { employeeId: "a", status: "pending" } }), false);
+});
+
+test("80% alert fires once and month helpers are stable", () => {
+  assert.equal(poolAlertDue(pool50, 40, false), true);
+  assert.equal(poolAlertDue(pool50, 40, true), false);
+  assert.equal(poolAlertDue(pool50, 39, false), false);
+  assert.equal(previousBenefitMonth("2026-01"), "2025-12");
+  assert.equal(poolUsageDocumentId("acme", "2026-10"), "acme_pool_2026-10");
+});

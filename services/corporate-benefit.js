@@ -25,6 +25,66 @@ function activeCoveredEntries(entries, now = Date.now()) {
   }));
 }
 
+// Modelo de cobertura por empresa. "per_employee" (padrão): franquia mensal
+// por colaborador. "pool": banco mensal compartilhado pela equipe, com teto
+// por pessoa e uma reserva para quem já está em acompanhamento.
+const POOL_DEFAULT_PER_EMPLOYEE_MAX = 4;
+const POOL_CONTINUITY_RESERVE_RATE = 0.2;
+const POOL_ALERT_RATE = 0.8;
+
+function benefitPolicy(company = {}) {
+  const poolSize = Number(company.benefitPool?.monthlySessions);
+  if (company.benefitModel === "pool" && Number.isInteger(poolSize) && poolSize > 0) {
+    const perEmployee = Number(company.benefitPool?.perEmployeeMax);
+    return {
+      model: "pool",
+      poolSize,
+      perEmployeeMax: Number.isInteger(perEmployee) && perEmployee > 0 ? perEmployee : POOL_DEFAULT_PER_EMPLOYEE_MAX,
+      continuityReserve: Math.ceil(poolSize * POOL_CONTINUITY_RESERVE_RATE)
+    };
+  }
+  return { model: "per_employee", perEmployeeMax: MONTHLY_INCLUDED_SESSIONS };
+}
+
+function poolUsageDocumentId(companyId, month) {
+  if (!/^[A-Za-z0-9_-]+$/.test(companyId) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    throw new Error("BENEFIT_KEY_INVALIDA");
+  }
+  return `${companyId}_pool_${month}`;
+}
+
+function previousBenefitMonth(month) {
+  const [y, m] = month.split("-").map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+}
+
+// Em acompanhamento = já teve sessão coberta aprovada/realizada neste mês
+// ou no anterior. Essas pessoas usam a reserva de continuidade do banco.
+function inContinuity(employeeId, ...entryMaps) {
+  return entryMaps.some(map => Object.values(map || {}).some(e =>
+    e?.employeeId === employeeId && ["approved", "completed"].includes(e.status)));
+}
+
+// Decide se uma nova sessão entra no banco. `entries` = entradas ativas do
+// mês (activeCoveredEntries); devolve { covered, remaining, used, reason }.
+function poolDecision(policy, entries, employeeId, continuity) {
+  const all = Object.values(entries || {});
+  const used = all.length;
+  const employeeUsed = all.filter(e => e?.employeeId === employeeId).length;
+  if (employeeUsed >= policy.perEmployeeMax) {
+    return { covered: false, used, remaining: Math.max(0, policy.poolSize - used), reason: "LIMITE_PESSOAL_DO_BANCO" };
+  }
+  const ceiling = continuity ? policy.poolSize : policy.poolSize - policy.continuityReserve;
+  if (used >= ceiling) {
+    return { covered: false, used, remaining: Math.max(0, policy.poolSize - used), reason: "BANCO_ESGOTADO" };
+  }
+  return { covered: true, used: used + 1, remaining: policy.poolSize - used - 1, reason: null };
+}
+
+function poolAlertDue(policy, usedAfter, alreadyAlerted) {
+  return !alreadyAlerted && usedAfter >= Math.ceil(policy.poolSize * POOL_ALERT_RATE);
+}
+
 function requiresActiveBenefitAtApproval(benefit) {
   // A cobertura é concedida pela empresa; a consulta extra já paga é uma
   // compra do paciente e deve continuar atendível após desativação do plano.
@@ -78,6 +138,12 @@ module.exports = {
   MONTHLY_INCLUDED_SESSIONS,
   benefitMonth,
   usageDocumentId,
+  benefitPolicy,
+  poolUsageDocumentId,
+  previousBenefitMonth,
+  inContinuity,
+  poolDecision,
+  poolAlertDue,
   activeCoveredEntries,
   requiresActiveBenefitAtApproval,
   calculateExtraQuote,

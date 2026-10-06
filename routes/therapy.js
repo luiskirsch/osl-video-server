@@ -45,6 +45,7 @@ const {
 const { mercadoPagoFetchTherapy } = require("../services/payments");
 const {
   MONTHLY_INCLUDED_SESSIONS, benefitMonth, usageDocumentId,
+  benefitPolicy, poolUsageDocumentId, previousBenefitMonth, inContinuity, poolDecision, poolAlertDue,
   activeCoveredEntries, requiresActiveBenefitAtApproval,
   calculateExtraQuote, validPricingConfig
 } = require("../services/corporate-benefit");
@@ -10762,16 +10763,21 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     const month = benefitMonth(requestedSlot);
     const employeeId = corporate.employeeDoc.id;
     const companyId = corporate.companyDoc.id;
+    const policy = benefitPolicy(corporate.companyDoc.data());
     const usageRef = getDb().collection("therapy_corporate_benefit_usage")
-      .doc(usageDocumentId(companyId, employeeId, month));
+      .doc(policy.model === "pool" ? poolUsageDocumentId(companyId, month) : usageDocumentId(companyId, employeeId, month));
+    const prevPoolRef = policy.model === "pool"
+      ? getDb().collection("therapy_corporate_benefit_usage").doc(poolUsageDocumentId(companyId, previousBenefitMonth(month)))
+      : null;
     const employeeRef = corporate.employeeDoc.ref;
     const companyRef = corporate.companyDoc.ref;
     const quote = calculateExtraQuote(corporate.companyDoc.data().extraPricing);
     const requestRef = getDb().collection("therapy_scheduling_requests").doc(requestId);
     let outcome = null;
     await getDb().runTransaction(async tx => {
-      const [usageSnap, freshEmployee, freshCompany] = await Promise.all([
-        tx.get(usageRef), tx.get(employeeRef), tx.get(companyRef)
+      const [usageSnap, freshEmployee, freshCompany, prevPoolSnap] = await Promise.all([
+        tx.get(usageRef), tx.get(employeeRef), tx.get(companyRef),
+        prevPoolRef ? tx.get(prevPoolRef) : Promise.resolve(null)
       ]);
       if (!freshEmployee.exists || freshEmployee.data().status !== "ativo"
           || !freshEmployee.data().eligibilityVerifiedAt
@@ -10783,11 +10789,34 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
       }
       const entries = activeCoveredEntries(usageSnap.exists ? usageSnap.data().entries : {}, Date.now());
       const used = Object.keys(entries).length;
-      if (used < MONTHLY_INCLUDED_SESSIONS) {
-        entries[requestId] = { status: "pending", expiresAt, scheduledAt: requestedSlot };
-        outcome = { mode: "covered", month, remaining: MONTHLY_INCLUDED_SESSIONS - used - 1 };
-        tx.set(usageRef, { companyId, employeeId, month, entries,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      let coveredNow = false;
+      let remaining = 0;
+      let poolMeta = null;
+      if (policy.model === "pool") {
+        const continuity = inContinuity(employeeId, entries, prevPoolSnap?.exists ? prevPoolSnap.data().entries : {});
+        const decision = poolDecision(policy, entries, employeeId, continuity);
+        coveredNow = decision.covered;
+        remaining = decision.remaining;
+        if (coveredNow) {
+          const alerted = Boolean(usageSnap.exists && usageSnap.data().alert80At);
+          poolMeta = { pool: true, poolSize: policy.poolSize, continuity,
+            alert: poolAlertDue(policy, decision.used, alerted) };
+        }
+      } else {
+        coveredNow = used < MONTHLY_INCLUDED_SESSIONS;
+        remaining = Math.max(0, MONTHLY_INCLUDED_SESSIONS - used - 1);
+      }
+      if (coveredNow) {
+        entries[requestId] = { status: "pending", expiresAt, scheduledAt: requestedSlot,
+          ...(poolMeta ? { employeeId } : {}) };
+        outcome = { mode: "covered", month, remaining, ...(poolMeta ? { pool: true } : {}) };
+        tx.set(usageRef, {
+          companyId, month, entries,
+          ...(poolMeta ? { model: "pool", poolSize: policy.poolSize } : { employeeId }),
+          ...(poolMeta?.alert ? { alert80At: admin.firestore.FieldValue.serverTimestamp() } : {}),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        if (poolMeta?.alert) outcome.poolAlert = true;
       } else {
         if (!quote) { outcome = { error: "PRECO_EXTRA_NAO_CONFIGURADO" }; return; }
         if (!MP_ACCESS_TOKEN_THERAPY || !MP_WEBHOOK_SECRET_THERAPY) {
@@ -10821,6 +10850,21 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
       ["PRECO_EXTRA_NAO_CONFIGURADO", "PAGAMENTO_INDISPONIVEL"].includes(outcome.error) ? 503 : 409,
       outcome.error, outcome.quote ? { quote: outcome.quote } : undefined);
     corporateBenefit = outcome;
+    // Banco chegou a 80%: avisa o contato da empresa uma vez no mês.
+    if (outcome.poolAlert) {
+      const company = corporate.companyDoc.data();
+      logAudit({ type: "corporate_pool_alert_80", empresaId: corporate.companyDoc.id, month: outcome.month }).catch(() => {});
+      if (company.contatoEmail) {
+        sendEmail({
+          to: company.contatoEmail,
+          subject: "Banco de sessões em 80% — Espaço Prelúdio",
+          html: `<p>Olá${company.contatoNome ? ", " + escHtmlSafe(company.contatoNome) : ""}.</p>
+<p>O banco de sessões da ${escHtmlSafe(company.nome || "sua empresa")} chegou a 80% do mês. Restam ${outcome.remaining} sessões.</p>
+<p>Se quiser ampliar o banco neste mês, responda este e-mail. Quem está em acompanhamento segue com as sessões reservadas.</p>`,
+          text: `O banco de sessões da ${company.nome || "sua empresa"} chegou a 80% do mês. Restam ${outcome.remaining} sessões. Para ampliar o banco neste mês, responda este e-mail.`
+        }).catch(e => logError("corporate_pool_alert_email_failed", e, { empresaId: corporate.companyDoc.id }));
+      }
+    }
     paymentRequired = outcome.mode === "extra";
   } else {
 
@@ -17824,6 +17868,22 @@ router.patch("/therapy/admin/empresas/:id", asyncHandler(async (req, res) => {
     }
     updates.benefitStatus = req.body.benefitStatus;
   }
+  // Modelo de cobertura: franquia por colaborador ou banco mensal da equipe.
+  if (req.body?.benefitModel !== undefined) {
+    if (!["per_employee", "pool"].includes(req.body.benefitModel)) {
+      return sendError(res, 400, "MODELO_BENEFICIO_INVALIDO");
+    }
+    updates.benefitModel = req.body.benefitModel;
+    if (req.body.benefitModel === "pool") {
+      const monthly = Number(req.body?.benefitPool?.monthlySessions);
+      const perEmployee = Number(req.body?.benefitPool?.perEmployeeMax ?? 4);
+      if (!Number.isInteger(monthly) || monthly < 1 || monthly > 10000
+          || !Number.isInteger(perEmployee) || perEmployee < 1 || perEmployee > 31) {
+        return sendError(res, 400, "BANCO_DE_SESSOES_INVALIDO");
+      }
+      updates.benefitPool = { monthlySessions: monthly, perEmployeeMax: perEmployee };
+    }
+  }
   if (req.body?.extraPricing !== undefined) {
     const pricing = req.body.extraPricing;
     if (!validPricingConfig(pricing) || Number(pricing.netPsychologistCents) !== 6000) {
@@ -18247,15 +18307,38 @@ router.get("/therapy/colaborador/beneficio", asyncHandler(async (req, res) => {
   const employee = await resolveCorporateEmployee(db, uid);
   if (employee.reason) return res.json({ ok: true, eligible: false, reason: employee.reason });
   const month = benefitMonth(scheduledAt);
+  const policy = benefitPolicy(employee.companyDoc.data());
+  const quote = calculateExtraQuote(employee.companyDoc.data().extraPricing);
+  const extraQuote = quote || { available: false, reason: "PRECO_EXTRA_NAO_CONFIGURADO" };
+  if (policy.model === "pool") {
+    // Banco da equipe: mostra só o saldo pessoal efetivo (teto pessoal limitado
+    // pelo que o banco ainda comporta), nunca o uso de outros colaboradores.
+    const companyId = employee.companyDoc.id;
+    const employeeId = employee.employeeDoc.id;
+    const [poolSnap, prevSnap] = await Promise.all([
+      db.collection("therapy_corporate_benefit_usage").doc(poolUsageDocumentId(companyId, month)).get(),
+      db.collection("therapy_corporate_benefit_usage").doc(poolUsageDocumentId(companyId, previousBenefitMonth(month))).get()
+    ]);
+    const entries = activeCoveredEntries(poolSnap.exists ? poolSnap.data().entries : {});
+    const continuity = inContinuity(employeeId, entries, prevSnap.exists ? prevSnap.data().entries : {});
+    const all = Object.values(entries);
+    const usedMine = all.filter(e => e?.employeeId === employeeId).length;
+    const ceiling = continuity ? policy.poolSize : policy.poolSize - policy.continuityReserve;
+    const remaining = Math.max(0, Math.min(policy.perEmployeeMax - usedMine, ceiling - all.length));
+    return res.json({
+      ok: true, eligible: true, empresaNome: employee.companyDoc.data().nome,
+      month, model: "pool", limit: policy.perEmployeeMax, used: usedMine, remaining,
+      continuity, extraQuote
+    });
+  }
   const usageId = usageDocumentId(employee.companyDoc.id, employee.employeeDoc.id, month);
   const usageSnap = await db.collection("therapy_corporate_benefit_usage").doc(usageId).get();
   const used = Object.keys(activeCoveredEntries(usageSnap.exists ? usageSnap.data().entries : {})).length;
-  const quote = calculateExtraQuote(employee.companyDoc.data().extraPricing);
   return res.json({
     ok: true, eligible: true, empresaNome: employee.companyDoc.data().nome,
-    month, limit: MONTHLY_INCLUDED_SESSIONS, used,
+    month, model: "per_employee", limit: MONTHLY_INCLUDED_SESSIONS, used,
     remaining: Math.max(0, MONTHLY_INCLUDED_SESSIONS - used),
-    extraQuote: quote || { available: false, reason: "PRECO_EXTRA_NAO_CONFIGURADO" }
+    extraQuote
   });
 }));
 
