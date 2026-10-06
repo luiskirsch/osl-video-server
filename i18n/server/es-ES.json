@@ -373,5 +373,11 @@
  "A sala com {0} abre agora — sessão às {1} (em {2} min).": "La sala con {0} abre ahora — sesión a las {1} (en {2} min).",
  "A sala com {0} está aberta. Toque para entrar.": "La sala con {0} está abierta. Toca para entrar.",
  "Seu profissional": "Tu profesional",
- "{0} já está se preparando na sala. Sessão às {1}.": "{0} ya se está preparando en la sala. Sesión a las {1}."
+ "{0} já está se preparando na sala. Sessão às {1}.": "{0} ya se está preparando en la sala. Sesión a las {1}.",
+ "Banco de sessões em 80% — Espaço Prelúdio": "Banco de sesiones al 80% — Espaço Prelúdio",
+ "sua empresa": "tu empresa",
+ "Olá{0}.": "Hola{0}.",
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões.": "El banco de sesiones de {0} llegó al 80% del mes. Quedan {1} sesiones.",
+ "Se quiser ampliar o banco neste mês, responda este e-mail. Quem está em acompanhamento segue com as sessões reservadas.": "Si quieres ampliar el banco este mes, responde a este correo. Quienes están en acompañamiento mantienen sus sesiones reservadas.",
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "El banco de sesiones de {0} llegó al 80% del mes. Quedan {1} sesiones. Para ampliar el banco este mes, responde a este correo."
 }

@@ -373,5 +373,11 @@
  "A sala com {0} abre agora — sessão às {1} (em {2} min).": "The room with {0} opens now — session at {1} (in {2} min).",
  "A sala com {0} está aberta. Toque para entrar.": "The room with {0} is open. Tap to join.",
  "Seu profissional": "Your professional",
- "{0} já está se preparando na sala. Sessão às {1}.": "{0} is already getting ready in the room. Session at {1}."
+ "{0} já está se preparando na sala. Sessão às {1}.": "{0} is already getting ready in the room. Session at {1}.",
+ "Banco de sessões em 80% — Espaço Prelúdio": "Session bank at 80% — Espaço Prelúdio",
+ "sua empresa": "your company",
+ "Olá{0}.": "Hello{0}.",
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões.": "{0}'s session bank has reached 80% for the month. {1} sessions remain.",
+ "Se quiser ampliar o banco neste mês, responda este e-mail. Quem está em acompanhamento segue com as sessões reservadas.": "If you'd like to expand the bank this month, reply to this email. Anyone currently in treatment will keep their reserved sessions.",
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "{0}'s session bank has reached 80% for the month. {1} sessions remain. To expand the bank this month, reply to this email."
 }
