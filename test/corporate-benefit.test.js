@@ -92,3 +92,17 @@ test("80% alert fires once and month helpers are stable", () => {
   assert.equal(previousBenefitMonth("2026-01"), "2025-12");
   assert.equal(poolUsageDocumentId("acme", "2026-10"), "acme_pool_2026-10");
 });
+
+const { urgentEntriesFor, URGENT_MAX_PER_EMPLOYEE_MONTH } = require("../services/corporate-benefit");
+
+test("urgent sessions never count against the franchise or the pool", () => {
+  const entries = {
+    a: { status: "approved", employeeId: "e1" },
+    u1: { status: "approved", employeeId: "e1", urgent: true },
+    u2: { status: "pending", employeeId: "e1", urgent: true, expiresAt: Date.now() + 60000 }
+  };
+  assert.deepEqual(Object.keys(activeCoveredEntries(entries)), ["a"]);
+  assert.equal(urgentEntriesFor(entries, "e1"), 2);
+  assert.equal(urgentEntriesFor(entries, "e1", "u2"), 1);
+  assert.equal(URGENT_MAX_PER_EMPLOYEE_MONTH, 2);
+});

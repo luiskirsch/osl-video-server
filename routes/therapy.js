@@ -46,6 +46,7 @@ const { mercadoPagoFetchTherapy } = require("../services/payments");
 const {
   MONTHLY_INCLUDED_SESSIONS, benefitMonth, usageDocumentId,
   benefitPolicy, poolUsageDocumentId, previousBenefitMonth, inContinuity, poolDecision, poolAlertDue,
+  URGENT_MAX_PER_EMPLOYEE_MONTH, urgentEntriesFor,
   activeCoveredEntries, requiresActiveBenefitAtApproval,
   calculateExtraQuote, validPricingConfig
 } = require("../services/corporate-benefit");
@@ -11773,7 +11774,11 @@ router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) =
     .get();
   const requestDocs = snap.docs.filter(d => {
     const request = d.data();
-    if (request.corporateBenefit?.mode === "extra" && request.paymentStatus !== "paid") return false;
+    // Extra de colaborador ainda sem pagamento: aparece só enquanto pendente,
+    // marcado como aguardando pagamento, para o profissional poder acolher
+    // como urgência. A aprovação continua bloqueada até o pagamento.
+    if (request.corporateBenefit?.mode === "extra" && request.paymentStatus !== "paid"
+        && request.status !== "pending") return false;
     return includeAll || request.status === "pending";
   });
   const items = await Promise.all(requestDocs.map(async d => {
@@ -11802,6 +11807,11 @@ router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) =
       status: data.status,
       sessionId: data.sessionId || null,
       requestSource: data.requestSource || "public_link",
+      corporate: data.corporateBenefit?.companyId ? {
+        mode: data.corporateBenefit.mode,
+        urgent: Boolean(data.corporateBenefit.urgent),
+        awaitingPayment: data.corporateBenefit.mode === "extra" && data.paymentStatus !== "paid"
+      } : null,
       patientAccountUid: data.patientAccountUid || null,
       studentId: data.studentId || null,
       studentName: data.studentName || null,
@@ -12020,6 +12030,65 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
 }));
 
 // POST /therapy/agendamentos/solicitacoes/:id/rejeitar — declina
+// POST /therapy/agendamentos/solicitacoes/:id/urgencia — o profissional marca
+// um pedido de colaborador como acolhimento de urgência: fica coberto pela
+// empresa sem descontar da franquia nem do banco. Limite mensal por pessoa e
+// auditoria registram o uso; o motivo fica só na solicitação.
+router.post("/therapy/agendamentos/solicitacoes/:id/urgencia", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const requestId = String(req.params.id || "").trim();
+  if (!requestId) return sendError(res, 400, "REQUEST_ID_OBRIGATORIO");
+  const reason = String(req.body?.reason || "").trim().slice(0, 300);
+  if (reason.length < 10) return sendError(res, 400, "MOTIVO_URGENCIA_OBRIGATORIO");
+
+  const db = getDb();
+  const reqDocRef = db.collection("therapy_scheduling_requests").doc(requestId);
+  let error = null;
+  let result = null;
+  await db.runTransaction(async tx => {
+    const fresh = await tx.get(reqDocRef);
+    if (!fresh.exists) { error = [404, "SOLICITACAO_NAO_ENCONTRADA"]; return; }
+    const r = fresh.data();
+    if (r.therapistUid !== uid) { error = [403, "ACESSO_NEGADO"]; return; }
+    if (r.status !== "pending") { error = [409, "SOLICITACAO_JA_RESPONDIDA"]; return; }
+    const benefit = r.corporateBenefit;
+    if (!benefit?.companyId || !benefit?.employeeId) { error = [409, "SOLICITACAO_NAO_CORPORATIVA"]; return; }
+    if (benefit.urgent) { error = [409, "JA_MARCADA_COMO_URGENCIA"]; return; }
+    if (r.paymentStatus === "paid") { error = [409, "EXTRA_JA_PAGO"]; return; }
+    const companySnap = await tx.get(db.collection("therapy_empresas").doc(benefit.companyId));
+    if (!companySnap.exists || companySnap.data().benefitStatus !== "active") { error = [409, "BENEFICIO_INATIVO"]; return; }
+    const policy = benefitPolicy(companySnap.data());
+    const month = benefit.month || benefitMonth(r.requestedSlot);
+    const usageId = benefit.usageId || (policy.model === "pool"
+      ? poolUsageDocumentId(benefit.companyId, month)
+      : usageDocumentId(benefit.companyId, benefit.employeeId, month));
+    const usageRef = db.collection("therapy_corporate_benefit_usage").doc(usageId);
+    const usageSnap = await tx.get(usageRef);
+    const entries = { ...(usageSnap.exists ? usageSnap.data().entries || {} : {}) };
+    if (urgentEntriesFor(entries, benefit.employeeId, requestId) >= URGENT_MAX_PER_EMPLOYEE_MONTH) {
+      error = [409, "LIMITE_URGENCIA_ATINGIDO"]; return;
+    }
+    entries[requestId] = { ...(entries[requestId] || {}), status: "pending", urgent: true,
+      employeeId: benefit.employeeId, scheduledAt: r.requestedSlot, expiresAt: r.expiresAt || null };
+    tx.set(usageRef, { companyId: benefit.companyId, month, entries,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    tx.update(reqDocRef, {
+      corporateBenefit: { ...benefit, mode: "covered", urgent: true, usageId, month },
+      paymentStatus: "not_applicable",
+      urgentReason: reason,
+      urgentMarkedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    result = { companyId: benefit.companyId, month };
+  });
+  if (error) return sendError(res, error[0], error[1]);
+  await logAudit({ type: "corporate_urgent_session_marked", requestId, therapistUid: uid,
+    empresaId: result.companyId, month: result.month });
+  return res.json({ ok: true, urgent: true });
+}));
+
 router.post("/therapy/agendamentos/solicitacoes/:id/rejeitar", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = await verifyFirebaseToken(req, res);

@@ -18,9 +18,20 @@ function usageDocumentId(companyId, employeeId, month) {
   return `${companyId}_${employeeId}_${month}`;
 }
 
+// Acolhimento de urgência fica registrado no mesmo documento, mas nunca
+// conta para a franquia nem para o banco.
+const URGENT_MAX_PER_EMPLOYEE_MONTH = 2;
+
+function urgentEntriesFor(entries, employeeId, requestIdToIgnore = null, now = Date.now()) {
+  return Object.entries(entries || {}).filter(([id, e]) => id !== requestIdToIgnore && e?.urgent
+    && (!employeeId || e.employeeId === employeeId)
+    && ["pending", "approved", "completed"].includes(e.status)
+    && (e.status !== "pending" || Number(e.expiresAt) > now)).length;
+}
+
 function activeCoveredEntries(entries, now = Date.now()) {
   return Object.fromEntries(Object.entries(entries || {}).filter(([, entry]) => {
-    if (!entry || !["pending", "approved", "completed"].includes(entry.status)) return false;
+    if (!entry || entry.urgent || !["pending", "approved", "completed"].includes(entry.status)) return false;
     return entry.status !== "pending" || Number(entry.expiresAt) > now;
   }));
 }
@@ -145,6 +156,8 @@ module.exports = {
   poolDecision,
   poolAlertDue,
   activeCoveredEntries,
+  URGENT_MAX_PER_EMPLOYEE_MONTH,
+  urgentEntriesFor,
   requiresActiveBenefitAtApproval,
   calculateExtraQuote,
   validPricingConfig
