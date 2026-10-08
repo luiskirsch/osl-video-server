@@ -46,7 +46,7 @@ test("rota de perfil nao permite que profissional altere a propria visibilidade"
 test("perfil público por UID expõe os dados gerais sem exigir agenda online", () => {
   const route = readFileSync(resolve(__dirname, "../routes/therapy.js"), "utf8");
   assert.match(route, /router\.get\("\/public\/profissionais\/:uid"/);
-  assert.match(route, /isPublicDirectoryEligible\(therapist\)/);
+  assert.match(route, /isDirectoryEligibleFor\(audience, therapist\)/);
   assert.match(route, /profissional:\s*summarizeTherapistForPublicScheduling\(therapist\)/);
   assert.match(route, /publicSchedulingEnabled,/);
   assert.match(route, /publicSchedulingSlug:\s*publicSchedulingEnabled/);

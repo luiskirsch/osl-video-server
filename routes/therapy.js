@@ -67,7 +67,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
-const { getPublicDirectoryVisibility, isPublicDirectoryEligible } = require("../services/public-directory");
+const { getPublicDirectoryVisibility, isPublicDirectoryEligible, isDirectoryEligibleFor } = require("../services/public-directory");
 const {
   therapySessionDurationMinutes,
   therapyTimestampMillis,
@@ -10046,8 +10046,27 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
 // individual é controlada pelo admin e o cadastro precisa estar verificado.
 // Filtros opcionais:
 // especialidade, cidade, uf.
+// Público do diretório pelo login: colaborador vinculado ou aluno com portal
+// ativo vê a rede dos programas; qualquer outro (paciente particular ou sem
+// login) vê só profissionais pagantes. Token inválido = paciente.
+async function resolveDirectoryAudience(req) {
+  const token = getBearerToken(req);
+  if (!token) return "pacientes";
+  try {
+    const { uid } = await admin.auth().verifyIdToken(token);
+    const db = getDb();
+    const corporate = await resolveCorporateEmployee(db, uid).catch(() => ({ reason: "ERRO" }));
+    if (!corporate.reason) return "programa";
+    const students = await db.collection("therapy_estudantes").where("portalAccountUid", "==", uid).limit(5).get();
+    if (students.docs.some(d => publicProgram.studentPortalParticipationIsActive(d.data()))) return "programa";
+  } catch { /* token inválido ou expirado: trata como paciente */ }
+  return "pacientes";
+}
+
 router.get("/public/profissionais", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
+  const audience = await resolveDirectoryAudience(req);
+  const directoryNow = Date.now();
 
   // Normalização agressiva pro filtro de cidade: lowercase + remove acentos +
   // colapsa espaços + remove "s" final de palavras com >3 chars (plural simples
@@ -10108,7 +10127,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
       }, { merge: true });
       visibilityMigrationCount += 1;
     }
-    if (!isPublicDirectoryEligible(t)) return;
+    if (!isDirectoryEligibleFor(audience, t, directoryNow)) return;
 
     if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
 
@@ -10158,8 +10177,10 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
 
   items.sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
 
+  res.set("Vary", "Authorization");
   return res.json({
     ok: true,
+    audience,
     total: items.length,
     especialidades: [...availableEspecialidades].sort((a, b) => a.localeCompare(b, "pt-BR")),
     items: items.slice(0, limit)
@@ -10180,7 +10201,8 @@ router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
   if (!doc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
 
   const therapist = doc.data();
-  if (!isPublicDirectoryEligible(therapist)) {
+  const audience = await resolveDirectoryAudience(req);
+  if (!isDirectoryEligibleFor(audience, therapist)) {
     return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   }
 

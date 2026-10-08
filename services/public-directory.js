@@ -19,4 +19,40 @@ function isPublicDirectoryEligible(therapist = {}) {
     && getPublicDirectoryVisibility(therapist);
 }
 
-module.exports = { getPublicDirectoryVisibility, isPublicDirectoryEligible };
+// Dois diretórios separados por público:
+//  - "programa": alunos e colaboradores. Só profissionais com acesso
+//    institucional liberado pelo admin (plano "empresa").
+//  - "pacientes": pacientes particulares. Só profissionais pagantes; quem
+//    atende os programas nunca aparece aqui.
+const PAYING_PREAPPROVAL_STATUSES = new Set(["authorized", "pending"]);
+
+function millis(value) {
+  if (!value) return 0;
+  if (typeof value.toMillis === "function") return value.toMillis();
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function isProgramProfessional(therapist = {}) {
+  return therapist.plano === "empresa";
+}
+
+function isPayingProfessional(therapist = {}, now = Date.now()) {
+  if (isProgramProfessional(therapist)) return false;
+  if (millis(therapist.adminGrantedUntil) > now) return true;
+  if (therapist.plano === "pro") return true;
+  // Trial do plano Profissional com cartão cadastrado: já é assinante.
+  return therapist.plano === "trial" && PAYING_PREAPPROVAL_STATUSES.has(therapist.mpPreapprovalStatus);
+}
+
+function isDirectoryEligibleFor(audience, therapist = {}, now = Date.now()) {
+  if (!isPublicDirectoryEligible(therapist)) return false;
+  return audience === "programa"
+    ? isProgramProfessional(therapist)
+    : isPayingProfessional(therapist, now);
+}
+
+module.exports = {
+  getPublicDirectoryVisibility, isPublicDirectoryEligible,
+  isProgramProfessional, isPayingProfessional, isDirectoryEligibleFor
+};
