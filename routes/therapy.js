@@ -67,7 +67,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
-const { getPublicDirectoryVisibility, isPublicDirectoryEligible, isDirectoryEligibleFor } = require("../services/public-directory");
+const { getPublicDirectoryVisibility, isPublicDirectoryEligible, isDirectoryEligibleFor, isPublicSchedulingOn } = require("../services/public-directory");
 const {
   therapySessionDurationMinutes,
   therapyTimestampMillis,
@@ -260,6 +260,34 @@ function isValidPublicSlug(s) {
   if (PUBLIC_SLUG_RESERVED.has(v)) return false;
   return true;
 }
+// Link público gerado pelo nome cadastrado ("Ana Paula Souza" → ana-paula-souza).
+// Colisão ganha sufixo numérico (-2, -3...). Só grava se ainda não houver slug.
+function slugFromName(name) {
+  const base = String(name || "")
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/-{2,}/g, "-")
+    .slice(0, 36).replace(/-+$/, "");
+  return base.length >= 3 ? base : `profissional-${base || "ep"}`.slice(0, 36);
+}
+async function ensurePublicSchedulingSlug(uid, therapist) {
+  const current = String(therapist?.publicSchedulingSlug || "").trim().toLowerCase();
+  if (isValidPublicSlug(current)) return current;
+  const db = getDb();
+  const base = slugFromName(therapist?.displayName);
+  for (let i = 1; i <= 50; i++) {
+    const candidate = i === 1 ? base : `${base}-${i}`;
+    if (!isValidPublicSlug(candidate)) continue;
+    const taken = await db.collection("therapists").where("publicSchedulingSlug", "==", candidate).limit(1).get();
+    if (!taken.empty && taken.docs[0].id !== uid) continue;
+    await db.collection("therapists").doc(uid).set({
+      publicSchedulingSlug: candidate,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return candidate;
+  }
+  return null;
+}
+
 async function findTherapistBySlug(slug) {
   const db = getDb();
   const snap = await db.collection("therapists")
@@ -2032,9 +2060,20 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
     };
   }
 
+  // Link público pronto pelo nome cadastrado, para quem já pode ser agendado.
+  if (isPublicSchedulingOn(therapist) && !isValidPublicSlug(String(therapist.publicSchedulingSlug || ""))) {
+    const autoSlug = await ensurePublicSchedulingSlug(uid, therapist).catch(e => {
+      logWarn("public_slug_auto_failed", { uid, error: e.message }); return null;
+    });
+    if (autoSlug) therapistPublic.publicSchedulingSlug = autoSlug;
+  }
   return res.json({
     ok: true,
-    therapist: { ...therapistPublic, programNetwork: isPublicDirectoryEligible(therapist) },
+    therapist: {
+      ...therapistPublic,
+      programNetwork: isPublicDirectoryEligible(therapist),
+      publicSchedulingActive: isPublicSchedulingOn(therapist)
+    },
     planAccess: {
       canUseFeatures: access.ok,
       reason: access.reason || null,
@@ -7622,6 +7661,12 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
     return sendError(res, 503, "FIRESTORE_INDISPONIVEL", { detail: "Falha ao gravar estado do plano; MP deve reentregar." });
   }
 
+  // Cartão confirmado: já entra no diretório com link pronto pelo nome.
+  if (["authorized", "pending"].includes(status)) {
+    await ensurePublicSchedulingSlug(uid, { ...savedTherapist, ...update }).catch(e =>
+      logWarn("public_slug_auto_failed", { uid, error: e.message }));
+  }
+
   await logAudit({
     type: "therapy_mp_webhook",
     therapistUid: uid,
@@ -10155,7 +10200,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
       uf:             c.uf || "",
       valorConsulta:  t.valorConsulta || null,
       bio:            (t.bio || "").slice(0, 180),
-      publicSchedulingEnabled: t.publicSchedulingEnabled === true
+      publicSchedulingEnabled: isPublicSchedulingOn(t) && isValidPublicSlug(String(t.publicSchedulingSlug || ""))
     });
   });
 
@@ -10193,7 +10238,7 @@ router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
 
   const publicSchedulingSlug = String(therapist.publicSchedulingSlug || "").trim().toLowerCase();
   const access = evaluatePlanAccess(therapist);
-  const publicSchedulingEnabled = Boolean(therapist.publicSchedulingEnabled)
+  const publicSchedulingEnabled = isPublicSchedulingOn(therapist)
     && isValidPublicSlug(publicSchedulingSlug)
     && access.ok;
   const cfg = therapist.agendaConfig || {};
@@ -10232,7 +10277,7 @@ router.get("/public/agendar/:slug", asyncHandler(async (req, res) => {
   if (therapist.verificationStatus !== "verified") {
     return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
   }
-  if (!therapist.publicSchedulingEnabled) {
+  if (!isPublicSchedulingOn(therapist)) {
     return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
   }
   const access = evaluatePlanAccess(therapist);
@@ -10280,7 +10325,7 @@ router.get("/public/agendar/:slug/slots", asyncHandler(async (req, res) => {
   if (therapist.verificationStatus !== "verified") {
     return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
   }
-  if (!therapist.publicSchedulingEnabled) {
+  if (!isPublicSchedulingOn(therapist)) {
     return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
   }
   const access = evaluatePlanAccess(therapist);
@@ -10310,7 +10355,7 @@ router.get("/public/agendar/:slug/disponibilidade", asyncHandler(async (req, res
 
   const therapist = await loadBySlug(slug);
   if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
-  if (!therapist.publicSchedulingEnabled) return sendError(res, 403, "AGENDAMENTO_DESABILITADO");
+  if (!isPublicSchedulingOn(therapist)) return sendError(res, 403, "AGENDAMENTO_DESABILITADO");
 
   const weeklyAvailability = therapist.weeklyAvailability || null;
   if (!weeklyAvailability) {
@@ -10723,7 +10768,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   if (therapist.verificationStatus !== "verified") {
     return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
   }
-  if (!therapist.publicSchedulingEnabled) {
+  if (!isPublicSchedulingOn(therapist)) {
     return sendError(res, 404, "AGENDAMENTO_PUBLICO_DESABILITADO");
   }
   const access = evaluatePlanAccess(therapist);

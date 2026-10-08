@@ -55,7 +55,13 @@ function isDirectoryEligibleFor(audience, therapist = {}, now = Date.now()) {
     && isPayingProfessional(therapist, now);
 }
 
+// Agendamento pelo link público: pagante tem automaticamente; quem marcou a
+// opção antiga continua ativo (compatibilidade com contas de programa).
+function isPublicSchedulingOn(therapist = {}, now = Date.now()) {
+  return therapist.publicSchedulingEnabled === true || isPayingProfessional(therapist, now);
+}
+
 module.exports = {
   getPublicDirectoryVisibility, isPublicDirectoryEligible,
-  isProgramNetworkMember, isPayingProfessional, isDirectoryEligibleFor
+  isProgramNetworkMember, isPayingProfessional, isDirectoryEligibleFor, isPublicSchedulingOn
 };
