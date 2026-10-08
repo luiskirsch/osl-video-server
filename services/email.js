@@ -373,18 +373,17 @@ function templateStudentApproved({ therapistName, validUntilMs, painelUrl }) {
 // no conselho (tier recém-formado). Aceita qualquer um dos 8 conselhos
 // suportados — copy genérica.
 function templateRecemFormadoApproved({ therapistName, painelUrl }) {
-  const subject = "Tier Recém-formado liberado no Espaço Prelúdio";
+  const subject = "Inscrição no conselho confirmada — Espaço Prelúdio";
   const html = renderShell({
-    heading: "Tier Recém-formado habilitado",
+    heading: "Inscrição confirmada",
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
-      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você está habilitado para contratar a assinatura do Espaço Prelúdio com o desconto do tier <strong>Recém-formado: R$ 99,50/mês</strong> (em vez de R$ 199/mês do plano Profissional).</p>
+      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você já pode contratar a assinatura do Espaço Prelúdio pelo plano <strong>Profissional: R$ 60/mês</strong>, com 30 dias grátis.</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Contratar agora</a></p>
-      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O desconto é válido enquanto sua inscrição estiver dentro dos primeiros 12 meses. Após esse período, a renovação migra automaticamente para o tier Profissional.</p>
     `,
     footer: "Notificação do Espaço Prelúdio sobre seu plano."
   });
-  const text = `Olá ${therapistName},\n\nSua inscrição no conselho foi confirmada. Você pode contratar a R$ 99,50/mês (tier Recém-formado).\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
+  const text = `Olá ${therapistName},\n\nSua inscrição no conselho foi confirmada. Você já pode contratar o plano Profissional (R$ 60/mês).\n\nAcesse: ${painelUrl}\n\nEspaço Prelúdio`;
   return { subject, html, text };
 }
 
@@ -394,9 +393,9 @@ function templateRecemFormadoRejected({ therapistName, reason, retryUrl }) {
     heading: "Comprovante não aprovado",
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
-      <p style="margin:0 0 16px;">Revisamos seu comprovante de inscrição no conselho e ele não atende aos critérios do tier Recém-formado. Motivo:</p>
+      <p style="margin:0 0 16px;">Revisamos seu comprovante de inscrição no conselho e ele não pôde ser aceito. Motivo:</p>
       <p style="margin:0 0 20px; padding:14px 16px; background:#f7f4ef; border-radius:6px; font-style: italic;">${escHtml(reason)}</p>
-      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 199/mês).</p>
+      <p style="margin:0 0 16px;">Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 60/mês).</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar outro comprovante</a></p>
       <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Em caso de dúvida, responda este e-mail.</p>
     `,
@@ -623,8 +622,7 @@ function templateStudentExpired({ therapistName, retryUrl, planosUrl }) {
       <p style="margin:0 0 16px;">Seu tier Estudante (gratuito) tinha validade de 1 ano e expirou. Sua conta foi movida pra modo trial — você tem <strong>7 dias</strong> pra decidir:</p>
       <ul style="margin:0 0 20px; padding-left:22px; line-height:1.7;">
         <li><strong>Continuar como estudante:</strong> envie um comprovante de matrícula atualizado (declaração ou atestado de matrícula vigente).</li>
-        <li><strong>Migrar pra Recém-formado (R$ 99,50/mês):</strong> se já se formou e tem inscrição no conselho com menos de 12 meses.</li>
-        <li><strong>Migrar pra Profissional (R$ 199/mês):</strong> se já é profissional inscrito.</li>
+        <li><strong>Assinar o plano Profissional (R$ 60/mês):</strong> se já se formou e tem inscrição no conselho.</li>
       </ul>
       <p style="margin:0 0 12px;"><a href="${escHtml(retryUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Enviar novo comprovante</a></p>
       <p style="margin:0 0 24px;"><a href="${escHtml(planosUrl)}" style="color:#2d8a52; text-decoration:underline;">Ou ver planos pagos →</a></p>
@@ -636,27 +634,6 @@ function templateStudentExpired({ therapistName, retryUrl, planosUrl }) {
   return { subject, html, text };
 }
 
-// E-mail enviado 30 dias antes do tier Recém-formado completar 12 meses.
-// Avisa o profissional que o desconto vai terminar e ele vai pagar R$ 199/mês
-// se não cancelar/migrar antes.
-function templateRecemFormadoEndingSoon({ therapistName, endingDateIso, planosUrl }) {
-  const endingDate = new Date(endingDateIso).toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" });
-  const subject = "Seu desconto Recém-formado termina em 30 dias";
-  const html = renderShell({
-    heading: "Desconto Recém-formado terminando",
-    bodyHtml: `
-      <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
-      <p style="margin:0 0 16px;">Seu tier <strong>Recém-formado</strong> (R$ 99,50/mês) completa 12 meses em <strong>${escHtml(endingDate)}</strong>. Depois dessa data, sua assinatura migra automaticamente pro plano <strong>Profissional</strong> (R$ 199/mês) — o desconto era válido pelo primeiro ano de inscrição no conselho.</p>
-      <p style="margin:0 0 16px;">Você não precisa fazer nada — a cobrança continua no mesmo cartão, só o valor muda na próxima fatura após ${escHtml(endingDate)}.</p>
-      <p style="margin:0 0 16px;"><strong>Se quiser cancelar antes</strong> da virada, gerencia em:</p>
-      <p style="margin:0 0 24px;"><a href="${escHtml(planosUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Gerenciar plano</a></p>
-      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">Aviso enviado uma vez por conta. Próximo aviso só na cobrança no valor novo.</p>
-    `,
-    footer: "Notificação do Espaço Prelúdio sobre seu plano."
-  });
-  const text = `Olá ${therapistName},\n\nSeu desconto Recém-formado (R$ 99,50/mês) termina em ${endingDate}. Após essa data, migra automaticamente pra Profissional (R$ 199/mês).\n\nGerenciar plano: ${planosUrl}\n\nEspaço Prelúdio`;
-  return { subject, html, text };
-}
 
 // Convite pra membro de clinica multidisciplinar. invitedEmail recebe email
 // com link pra criar conta (ou logar existente) + aceitar.
@@ -678,7 +655,7 @@ function templateClinicInvite({ ownerName, clinicName, invitedEmail, repasseRule
       <p style="margin:24px 0;"><a href="${escHtml(acceptUrl)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Ver convite e aceitar</a></p>
       <p style="margin:0 0 14px; font-size:13px; color:rgba(28,31,29,0.65);">
         Como funciona: você atende seus próprios pacientes normalmente. Quando emite recibo de uma consulta como membro da clínica, o sistema calcula o repasse automaticamente.
-        Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 199/mês).
+        Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 60/mês).
       </p>
       <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">
         Se você ainda não tem conta no Espaço Prelúdio, clique no botão acima e siga o cadastro com o email <strong>${escHtml(invitedEmail)}</strong> — o convite vincula automaticamente.
@@ -732,7 +709,6 @@ module.exports = {
   templateFormacaoApproved,
   templateFormacaoRejected,
   templateStudentExpired,
-  templateRecemFormadoEndingSoon,
   templateClinicInvite,
   templateStudentSessionRequest,
   templateStudentLeadReceived,

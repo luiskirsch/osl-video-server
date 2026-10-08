@@ -15,7 +15,7 @@ const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
 const { signPayload } = require("./auth");
 const { localeForEmail } = require("./user-locale");
 const { translateText } = require("./server-i18n");
-const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, templateRecemFormadoEndingSoon, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
+const { sendEmail, templateReminder, templateBirthday, templateNps, templateStudentExpired, buildJoinUrl, buildCancelUrl, buildConfirmUrl, buildNpsUrl, buildPlanosUrl, buildComprovanteEstudanteUrl } = require("./email");
 const { sendReminder: sendWaReminder } = require("./whatsapp");
 const { sendSms } = require("./sms");
 const pushService = require("./push");
@@ -342,7 +342,6 @@ async function runFullTick() {
     await runChatUnreadEmailTick().catch(e => logError("chat_unread_tick_unhandled", e));
     // Reverificação anual de tiers (estudante expira / recém-formado vira pro)
     await runStudentExpirationTick().catch(e => logError("student_expiration_tick_unhandled", e));
-    await runRecemFormadoTransitionTick().catch(e => logError("recem_formado_transition_tick_unhandled", e));
     return true;
   } finally {
     fullTickRunning = false;
@@ -717,68 +716,6 @@ async function runStudentExpirationTick() {
   }
 }
 
-async function runRecemFormadoTransitionTick() {
-  const db = getDb();
-  if (!db) return;
-
-  // Busca quem está em plano "pro" com tier recem-formado ATIVO (sem aviso
-  // enviado ainda). Não dá pra usar where em campo aninhado de timestamp
-  // direto — filtra em memória após query simples por plano+proTier.
-  const snap = await db.collection("therapists")
-    .where("plano", "==", "pro")
-    .where("proTier", "==", "recem-formado")
-    .limit(500)
-    .get();
-
-  if (snap.empty) return;
-
-  const now = Date.now();
-  let notified = 0, errors = 0;
-  for (const doc of snap.docs) {
-    const t = doc.data();
-    if (t.recemFormadoEndingNoticeSentAt) continue; // já avisado
-
-    // dataInscricao vive em recemFormadoDoc.extracted.dataInscricao
-    // (string ISO ou "YYYY-MM-DD"). Pode estar ausente em contas antigas.
-    const dataInscricaoStr = t.recemFormadoDoc?.extracted?.dataInscricao;
-    if (!dataInscricaoStr) continue;
-
-    const inscricaoMs = Date.parse(dataInscricaoStr);
-    if (!Number.isFinite(inscricaoMs)) continue;
-
-    const endingMs = inscricaoMs + RECEM_FORMADO_DURATION_MS;
-    const noticeAt = endingMs - RECEM_FORMADO_NOTICE_AHEAD_MS;
-
-    // Janela: avisar APENAS se cruzou a marca dos 30d-antes E ainda não
-    // cruzou a marca de expiração (caso contrário já passou da hora).
-    if (now < noticeAt) continue; // ainda cedo
-    if (now >= endingMs) continue; // já expirou — outra cron lida com isso
-
-    try {
-      if (t.email) {
-        const tpl = templateRecemFormadoEndingSoon({
-          therapistName: t.displayName || "profissional",
-          endingDateIso: new Date(endingMs).toISOString(),
-          planosUrl: buildPlanosUrl()
-        });
-        await sendEmail({ to: t.email, ...tpl });
-      }
-      await doc.ref.set({
-        recemFormadoEndingNoticeSentAt: admin.firestore.FieldValue.serverTimestamp(),
-        recemFormadoEndingDate: new Date(endingMs),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-      notified++;
-    } catch (e) {
-      logError("recem_formado_notice_failed", e, { uid: t.uid });
-      errors++;
-    }
-  }
-
-  if (notified > 0 || errors > 0) {
-    logInfo("recem_formado_transition_tick", { notified, errors });
-  }
-}
 
 // ─── Sala aberta: push 15 min antes ──────────────────────────────────
 // Roda a cada minuto (fora do tick de 15 min, que seria impreciso demais).
@@ -881,4 +818,4 @@ function stopSchedulerLoop() {
   }
 }
 
-module.exports = { startSchedulerLoop, stopSchedulerLoop, runJoinOpenPushTick, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick, runStudentExpirationTick, runRecemFormadoTransitionTick };
+module.exports = { startSchedulerLoop, stopSchedulerLoop, runJoinOpenPushTick, runReminderTick, runReminder1hTick, runStudentDocCleanup, runBirthdayTick, runNpsTick, runStudentExpirationTick };
