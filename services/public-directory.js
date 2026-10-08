@@ -20,10 +20,11 @@ function isPublicDirectoryEligible(therapist = {}) {
 }
 
 // Dois diretórios separados por público:
-//  - "programa": alunos e colaboradores. Só profissionais com acesso
-//    institucional liberado pelo admin (plano "empresa").
-//  - "pacientes": pacientes particulares. Só profissionais pagantes; quem
-//    atende os programas nunca aparece aqui.
+//  - "programa": alunos e colaboradores. É a rede curada pelo admin
+//    ("Exibir/Ocultar da rede"): verificado + visível.
+//  - "pacientes": pacientes particulares. Profissionais pagantes verificados
+//    que NÃO estão na rede dos programas. O admin pode ocultar alguém só deste
+//    diretório com adminPatientDirectoryHidden.
 const PAYING_PREAPPROVAL_STATUSES = new Set(["authorized", "pending"]);
 
 function millis(value) {
@@ -33,26 +34,28 @@ function millis(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function isProgramProfessional(therapist = {}) {
-  return therapist.plano === "empresa";
+// Quem paga é definido pela assinatura, não pelo nome do plano: contas
+// antigas do "Atendimento a Empresas" ficaram com plano "empresa" mas têm
+// cartão cadastrado e assinatura ativa.
+function isPayingProfessional(therapist = {}, now = Date.now()) {
+  if (PAYING_PREAPPROVAL_STATUSES.has(therapist.mpPreapprovalStatus)) return true;
+  if (therapist.plano === "pro") return true;
+  return millis(therapist.adminGrantedUntil) > now && therapist.plano !== "empresa";
 }
 
-function isPayingProfessional(therapist = {}, now = Date.now()) {
-  if (isProgramProfessional(therapist)) return false;
-  if (millis(therapist.adminGrantedUntil) > now) return true;
-  if (therapist.plano === "pro") return true;
-  // Trial do plano Profissional com cartão cadastrado: já é assinante.
-  return therapist.plano === "trial" && PAYING_PREAPPROVAL_STATUSES.has(therapist.mpPreapprovalStatus);
+function isProgramNetworkMember(therapist = {}) {
+  return isPublicDirectoryEligible(therapist);
 }
 
 function isDirectoryEligibleFor(audience, therapist = {}, now = Date.now()) {
-  if (!isPublicDirectoryEligible(therapist)) return false;
-  return audience === "programa"
-    ? isProgramProfessional(therapist)
-    : isPayingProfessional(therapist, now);
+  if (audience === "programa") return isProgramNetworkMember(therapist);
+  return therapist.verificationStatus === "verified"
+    && therapist.adminPatientDirectoryHidden !== true
+    && !isProgramNetworkMember(therapist)
+    && isPayingProfessional(therapist, now);
 }
 
 module.exports = {
   getPublicDirectoryVisibility, isPublicDirectoryEligible,
-  isProgramProfessional, isPayingProfessional, isDirectoryEligibleFor
+  isProgramNetworkMember, isPayingProfessional, isDirectoryEligibleFor
 };

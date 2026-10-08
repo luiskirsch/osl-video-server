@@ -9285,6 +9285,7 @@ router.get("/therapy/admin/profissionais", asyncHandler(async (req, res) => {
       adminNote: t.adminNote || null,
       adminDirectoryBlocked: t.adminDirectoryBlocked === true,
       adminDirectoryVisible: getPublicDirectoryVisibility(t),
+      adminPatientDirectoryHidden: t.adminPatientDirectoryHidden === true,
       mpPreapprovalId: t.mpPreapprovalId || null,
       mpPreapprovalStatus: t.mpPreapprovalStatus || null,
       createdAt: t.createdAt?.toMillis?.() || null
@@ -9807,6 +9808,10 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
     updates.adminDirectoryVisibilityUpdatedBy = adminAuth.email;
     auditDetail.push(`diretorio publico -> ${requestedDirectoryVisibility ? "visivel" : "oculto"}`);
   }
+  if (typeof body.setPatientDirectoryHidden === "boolean") {
+    updates.adminPatientDirectoryHidden = body.setPatientDirectoryHidden;
+    auditDetail.push(`diretorio de pacientes -> ${body.setPatientDirectoryHidden ? "oculto" : "visivel"}`);
+  }
 
   if (Object.keys(updates).length === 0) {
     return sendError(res, 400, "NENHUMA_ACAO");
@@ -9834,6 +9839,7 @@ router.patch("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res) 
       adminNote: fresh.adminNote || null,
       adminDirectoryBlocked: fresh.adminDirectoryBlocked === true,
       adminDirectoryVisible: getPublicDirectoryVisibility(fresh),
+      adminPatientDirectoryHidden: fresh.adminPatientDirectoryHidden === true,
       verificado: fresh.verificationStatus === "verified",
       verificationStatus: fresh.verificationStatus || null,
       verifiedAt: fresh.verifiedAt?.toMillis?.() || null
@@ -10110,23 +10116,8 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
 
   const items = [];
   const availableEspecialidades = new Set();
-  const visibilityMigration = db.batch();
-  let visibilityMigrationCount = 0;
   snap.forEach(d => {
     const t = d.data();
-    const hasAdminVisibility = typeof t.adminDirectoryVisible === "boolean" || typeof t.adminDirectoryBlocked === "boolean";
-    const needsLegacyCorrection = t.adminDirectoryVisibilityUpdatedBy === "system:legacy-migration"
-      && t.adminDirectoryVisible === false
-      && (Boolean(t.listPublicly) || Boolean(t.publicSchedulingEnabled));
-    if (!hasAdminVisibility || needsLegacyCorrection) {
-      if (needsLegacyCorrection) t.adminDirectoryVisible = true;
-      visibilityMigration.set(d.ref, {
-        adminDirectoryVisible: getPublicDirectoryVisibility(t),
-        adminDirectoryVisibilityUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        adminDirectoryVisibilityUpdatedBy: "system:legacy-migration-v2"
-      }, { merge: true });
-      visibilityMigrationCount += 1;
-    }
     if (!isDirectoryEligibleFor(audience, t, directoryNow)) return;
 
     if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
@@ -10169,12 +10160,6 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   });
 
   // Ordena alfabético (nome). Limit aplicado por último.
-  if (visibilityMigrationCount > 0) {
-    await visibilityMigration.commit().catch((err) => {
-      logWarn("public_directory_visibility_migration_failed", { error: err?.message || String(err) });
-    });
-  }
-
   items.sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
 
   res.set("Vary", "Authorization");

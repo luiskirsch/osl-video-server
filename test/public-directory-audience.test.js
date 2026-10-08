@@ -4,30 +4,29 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { isDirectoryEligibleFor, isPayingProfessional } = require("../services/public-directory");
 
-const base = { verificationStatus: "verified", adminDirectoryVisible: true };
-
-test("program professionals only appear for students and employees", () => {
-  const program = { ...base, plano: "empresa" };
-  assert.equal(isDirectoryEligibleFor("programa", program), true);
-  assert.equal(isDirectoryEligibleFor("pacientes", program), false);
+test("the curated program network is what students and employees see", () => {
+  const inNetwork = { verificationStatus: "verified", adminDirectoryVisible: true, plano: "empresa", mpPreapprovalStatus: "pending" };
+  assert.equal(isDirectoryEligibleFor("programa", inNetwork), true);
+  assert.equal(isDirectoryEligibleFor("pacientes", inNetwork), false);
 });
 
-test("paying professionals only appear for private patients", () => {
-  const pro = { ...base, plano: "pro" };
-  assert.equal(isDirectoryEligibleFor("pacientes", pro), true);
-  assert.equal(isDirectoryEligibleFor("programa", pro), false);
+test("paying professionals outside the network appear only for private patients", () => {
+  const paying = { verificationStatus: "verified", adminDirectoryBlocked: true, plano: "empresa", mpPreapprovalStatus: "pending" };
+  assert.equal(isDirectoryEligibleFor("pacientes", paying), true);
+  assert.equal(isDirectoryEligibleFor("programa", paying), false);
 });
 
-test("paying means pro, active admin courtesy, or trial with card registered", () => {
+test("patients never see unverified, non-paying or patient-hidden professionals", () => {
+  const base = { verificationStatus: "verified", adminDirectoryBlocked: true, mpPreapprovalStatus: "authorized" };
+  assert.equal(isDirectoryEligibleFor("pacientes", { ...base, verificationStatus: "pending-review" }), false);
+  assert.equal(isDirectoryEligibleFor("pacientes", { ...base, mpPreapprovalStatus: "cancelled", plano: "trial" }), false);
+  assert.equal(isDirectoryEligibleFor("pacientes", { ...base, adminPatientDirectoryHidden: true }), false);
+});
+
+test("paying is defined by an active subscription, pro plan or admin courtesy", () => {
   const now = Date.now();
   assert.equal(isPayingProfessional({ plano: "trial", mpPreapprovalStatus: "pending" }, now), true);
   assert.equal(isPayingProfessional({ plano: "trial" }, now), false);
   assert.equal(isPayingProfessional({ plano: "student-active" }, now), false);
   assert.equal(isPayingProfessional({ plano: "canceled", adminGrantedUntil: now + 1000 }, now), true);
-  assert.equal(isPayingProfessional({ plano: "empresa", adminGrantedUntil: now + 1000 }, now), false);
-});
-
-test("unverified or admin-hidden professionals stay out of both directories", () => {
-  assert.equal(isDirectoryEligibleFor("pacientes", { plano: "pro", verificationStatus: "pending-review", adminDirectoryVisible: true }), false);
-  assert.equal(isDirectoryEligibleFor("pacientes", { plano: "pro", verificationStatus: "verified", adminDirectoryVisible: false }), false);
 });
