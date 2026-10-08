@@ -2034,7 +2034,7 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
 
   return res.json({
     ok: true,
-    therapist: therapistPublic,
+    therapist: { ...therapistPublic, programNetwork: isPublicDirectoryEligible(therapist) },
     planAccess: {
       canUseFeatures: access.ok,
       reason: access.reason || null,
