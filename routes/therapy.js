@@ -760,7 +760,9 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
     intendedTierRaw === "estudante"      ? "estudante"     :
     intendedTierRaw === "recem"          ? "recem-formado" :
     intendedTierRaw === "recem-formado"  ? "recem-formado" :
-    intendedTierRaw === "empresa"        ? "empresa"       :
+    // "empresa" (programas institucionais) não é mais autosserviço: o acesso
+    // sem mensalidade é concedido só pelo admin. Quem pedir entra como
+    // profissional comum.
     "profissional";
 
   if (!displayName) return sendError(res, 400, "NOME_OBRIGATORIO");
