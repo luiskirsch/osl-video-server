@@ -61,7 +61,15 @@ function isPublicSchedulingOn(therapist = {}, now = Date.now()) {
   return therapist.publicSchedulingEnabled === true || isPayingProfessional(therapist, now);
 }
 
+// Institucional = plano liberado pelo admin, sem mensalidade. Só nesse caso o
+// paciente paga R$ 60 pela plataforma (PIX) e o profissional recebe repasse.
+// Pagantes da mensalidade definem e cobram o próprio valor.
+function isInstitutionalProfessional(therapist = {}, now = Date.now()) {
+  return therapist.plano === "empresa" && !isPayingProfessional(therapist, now);
+}
+
 module.exports = {
   getPublicDirectoryVisibility, isPublicDirectoryEligible,
-  isProgramNetworkMember, isPayingProfessional, isDirectoryEligibleFor, isPublicSchedulingOn
+  isProgramNetworkMember, isPayingProfessional, isDirectoryEligibleFor, isPublicSchedulingOn,
+  isInstitutionalProfessional
 };

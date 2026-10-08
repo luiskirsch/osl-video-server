@@ -67,7 +67,7 @@ const {
   escapeStudentEmailHtml
 } = require("../services/student-consent");
 const publicProgram = require("../services/public-program");
-const { getPublicDirectoryVisibility, isPublicDirectoryEligible, isDirectoryEligibleFor, isPublicSchedulingOn } = require("../services/public-directory");
+const { getPublicDirectoryVisibility, isPublicDirectoryEligible, isDirectoryEligibleFor, isPublicSchedulingOn, isInstitutionalProfessional } = require("../services/public-directory");
 const {
   therapySessionDurationMinutes,
   therapyTimestampMillis,
@@ -1993,7 +1993,8 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
         hint: "Valor em centavos. Mínimo R$10 (1000), máximo R$100.000 (10000000)."
       });
     }
-    updates.valorConsulta = val;
+    // Plano institucional: valor fixo da plataforma (R$ 60), não editável.
+    updates.valorConsulta = isInstitutionalProfessional(therapist) ? 6000 : val;
   }
 
   // Tópicos personalizados da sessão.
@@ -2072,7 +2073,8 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
     therapist: {
       ...therapistPublic,
       programNetwork: isPublicDirectoryEligible(therapist),
-      publicSchedulingActive: isPublicSchedulingOn(therapist)
+      publicSchedulingActive: isPublicSchedulingOn(therapist),
+      institutional: isInstitutionalProfessional(therapist)
     },
     planAccess: {
       canUseFeatures: access.ok,
@@ -2689,7 +2691,7 @@ router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
     requestId:       session.schedulingRequestId,
     therapistSlug:   reqData.therapistSlug || "",
     valor:           reqData.valorConsulta || 6000,
-    pixConfigured:   !!(therapist?.pixKey),
+    pixConfigured:   !!(therapist?.pixKey) && isInstitutionalProfessional(therapist || {}),
     demoTechnicalRoom
   });
 }));
@@ -9980,8 +9982,10 @@ function summarizeTherapistForPublicScheduling(therapist) {
     orgaoRegistro:  therapist.orgaoRegistro || "",
     cidade:         c.cidade || "",
     uf:             c.uf || "",
-    pixConfigured:  !!(therapist.pixKey),
-    valorConsulta:  6000
+    // Pagamento pela plataforma só no plano institucional (R$ 60 fixo);
+    // pagantes da mensalidade mostram o próprio valor e cobram por fora.
+    pixConfigured:  isInstitutionalProfessional(therapist) && !!(therapist.pixKey),
+    valorConsulta:  isInstitutionalProfessional(therapist) ? 6000 : (therapist.valorConsulta || null)
   };
 }
 
@@ -11056,6 +11060,9 @@ router.post("/public/agendar/:slug/criar-pix", createPixLimiter, asyncHandler(as
   const therapistDoc = await getDb().collection("therapists").doc(reqData.therapistUid).get();
   if (!therapistDoc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   const therapist = therapistDoc.data();
+  if (!isCorporateExtra && !isInstitutionalProfessional(therapist)) {
+    return sendError(res, 409, "PAGAMENTO_COM_O_PROFISSIONAL");
+  }
   if (!isCorporateExtra && !therapist.pixKey) return sendError(res, 400, "PROFISSIONAL_SEM_PIX");
 
   const valorCentavos = isCorporateExtra ? reqData.valorConsulta : 6000;
