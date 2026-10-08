@@ -43,6 +43,8 @@ const {
   IS_PRODUCTION
 } = require("../config");
 const { mercadoPagoFetchTherapy } = require("../services/payments");
+const { buildPixPayload } = require("../services/pix-brcode");
+const mpConnect = require("../services/mp-connect");
 const {
   MONTHLY_INCLUDED_SESSIONS, benefitMonth, usageDocumentId,
   benefitPolicy, poolUsageDocumentId, previousBenefitMonth, inContinuity, poolDecision, poolAlertDue,
@@ -2038,7 +2040,7 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
 
   // Remove secrets do payload — twoFactorSecret/twoFactorPendingSecret e
   // asaasApiKey nunca saem do servidor. Mantém só flags públicas (enabled).
-  const { twoFactorSecret, twoFactorPendingSecret, asaasApiKey, ...therapistPublic } = therapist;
+  const { twoFactorSecret, twoFactorPendingSecret, asaasApiKey, mpConnect: mpConnectRecord, ...therapistPublic } = therapist;
   therapistPublic.twoFactorEnabled = !!therapist.twoFactorEnabled;
   therapistPublic.asaasConfigured  = !!asaasApiKey;
 
@@ -2074,7 +2076,11 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
       ...therapistPublic,
       programNetwork: isPublicDirectoryEligible(therapist),
       publicSchedulingActive: isPublicSchedulingOn(therapist),
-      institutional: isInstitutionalProfessional(therapist)
+      institutional: isInstitutionalProfessional(therapist),
+      mpConnected: mpConnectRecord?.accessToken
+        ? { userId: mpConnectRecord.userId || null, nickname: mpConnectRecord.nickname || null, connectedAt: mpConnectRecord.connectedAt || null }
+        : null,
+      mpConnectAvailable: mpConnect.isConfigured()
     },
     planAccess: {
       canUseFeatures: access.ok,
@@ -2169,6 +2175,18 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
 
   // Snapshot do e-mail do terapeuta pra Reply-To em e-mails automáticos.
   // Usa o snapshot do doc; se ausente, lookup lazy via Firebase Auth.
+  // Valor a cobrar do paciente (opcional): PIX gerado com a chave do próprio
+  // profissional, mostrado no link da consulta. Plano institucional cobra
+  // pela plataforma (R$ 60) e não usa isto.
+  let chargeAmountCents = null;
+  const chargeRaw = req.body?.chargeAmountCents;
+  if (chargeRaw !== undefined && chargeRaw !== null && chargeRaw !== "") {
+    const cents = Math.round(Number(chargeRaw));
+    if (!Number.isInteger(cents) || cents < 1000 || cents > 10000000) return sendError(res, 400, "VALOR_COBRANCA_INVALIDO");
+    if (isInstitutionalProfessional(therapist)) return sendError(res, 409, "COBRANCA_PELA_PLATAFORMA");
+    if (!therapist.pixKey && !therapist.mpConnect?.accessToken) return sendError(res, 409, "RECEBIMENTO_NAO_CONFIGURADO");
+    chargeAmountCents = cents;
+  }
   const therapistEmail = await resolveTherapistEmail(uid, therapist);
 
   // Cria todas as sessões em batch. firstSession recebe joinToken; demais
@@ -2218,6 +2236,7 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
       scheduledAt: at,
       durationMinutes,
       status: "scheduled",
+      ...(chargeAmountCents ? { patientCharge: { amountCents: chargeAmountCents, status: "pending", createdAt: Date.now() } } : {}),
       joinTokenExp,
       recurrenceGroupId,
       recurrenceIndex: isRecurring ? i : null,
@@ -2466,6 +2485,13 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         overdueAt: therapySessionOverdueAt(data),
         timingState: isTherapySessionOverdue(data) ? "overdue" : null,
         livekitRoom: data.livekitRoom,
+        patientCharge: data.patientCharge?.amountCents ? {
+          amountCents: data.patientCharge.amountCents,
+          status: data.patientCharge.status === "paid" ? "paid" : "pending",
+          provider: data.patientCharge.provider || null,
+          paidAt: data.patientCharge.paidAt || null,
+          patientReportedAt: data.patientCharge.patientReportedAt || null
+        } : null,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         completedAt: data.completedAt?.toMillis ? data.completedAt.toMillis() : null,
         canceledAt: data.canceledAt?.toMillis ? data.canceledAt.toMillis() : null,
@@ -2661,21 +2687,24 @@ router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
   if (!sessionSnap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
   const session = sessionSnap.data();
   const demoTechnicalRoom = session.syntheticData === true && session.demoTechnicalRoom === true;
+  const patientCharge = session.patientCharge?.amountCents
+    ? await buildPatientChargeView(db, payload.sessionId, session).catch(() => null)
+    : null;
 
   // Sem scheduling request vinculado → sem cobrança (sessão criada manualmente)
   if (!session.schedulingRequestId) {
-    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom, patientCharge });
   }
 
   const reqSnap = await db.collection("therapy_scheduling_requests").doc(session.schedulingRequestId).get();
   if (!reqSnap.exists) {
-    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom, patientCharge });
   }
   const reqData = reqSnap.data();
 
   // Sem paymentId → profissional não tem PIX configurado (fluxo legado)
   if (!reqData.paymentId && reqData.paymentStatus !== "pending") {
-    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom });
+    return res.json({ ok: true, paymentRequired: false, demoTechnicalRoom, patientCharge });
   }
 
   const paid = reqData.paymentStatus === "paid";
@@ -2692,8 +2721,225 @@ router.get("/therapy/sessao/pre-join", asyncHandler(async (req, res) => {
     therapistSlug:   reqData.therapistSlug || "",
     valor:           reqData.valorConsulta || 6000,
     pixConfigured:   !!(therapist?.pixKey) && isInstitutionalProfessional(therapist || {}),
-    demoTechnicalRoom
+    demoTechnicalRoom,
+    patientCharge
   });
+}));
+
+// ─── Cobrança do paciente por PIX do profissional ─────────────────────────
+// Visão mostrada no link do paciente: QR/copia-e-cola gerados na hora a partir
+// da chave PIX do profissional (sem intermediário, não expira).
+const PATIENT_CHARGE_TTL_MS = 3 * 24 * 60 * 60 * 1000; // PIX do Mercado Pago vale 3 dias
+
+function mpTokenSaver(db, uid, record) {
+  return fresh => db.collection("therapists").doc(uid).set({
+    mpConnect: { ...record, ...fresh }
+  }, { merge: true });
+}
+
+// Cobrança na conta Mercado Pago do profissional: cria (ou reaproveita) o PIX
+// e atualiza o status consultando o Mercado Pago. Confirmação automática.
+async function ensureMpPatientCharge(db, sessionId, session, therapist) {
+  const record = therapist.mpConnect;
+  const token = await mpConnect.validAccessToken(record, mpTokenSaver(db, session.therapistUid, record));
+  if (!token) return null;
+  const ref = db.collection("therapy_sessions").doc(sessionId);
+  let charge = { ...(session.patientCharge || {}) };
+  if (charge.mpPaymentId && charge.status !== "paid") {
+    const p = await mpConnect.getPayment(token, charge.mpPaymentId).catch(() => null);
+    if (p?.status === "approved" && p.external_reference === `sess:${sessionId}`) {
+      charge = { ...charge, status: "paid", paidAt: Date.now(), provider: "mercadopago" };
+      await ref.set({ patientCharge: { status: "paid", paidAt: charge.paidAt } }, { merge: true });
+    }
+  }
+  const expired = !charge.mpExpiresAt || Number(charge.mpExpiresAt) - Date.now() < 10 * 60 * 1000;
+  if (charge.status !== "paid" && (!charge.mpPaymentId || expired)) {
+    const expiresAt = Date.now() + PATIENT_CHARGE_TTL_MS;
+    const attempt = (Number(charge.mpAttempts) || 0) + 1;
+    const created = await mpConnect.createPixPayment(token, {
+      amountCents: charge.amountCents,
+      description: `Consulta com ${therapist.displayName || "profissional"}`,
+      payerEmail: session.patientEmail || `paciente+${sessionId.replace(/[^A-Za-z0-9]/g, "").slice(-12)}@espacopreludio.com.br`,
+      externalReference: `sess:${sessionId}`,
+      notificationUrl: `${BACKEND_BASE_URL.replace(/\/+$/, "")}/webhooks/mp/pro-pix?sid=${encodeURIComponent(sessionId)}`,
+      expiresAt,
+      idempotencyKey: `sess-${sessionId}-${attempt}`
+    });
+    const tx = created?.point_of_interaction?.transaction_data || {};
+    charge = {
+      ...charge, provider: "mercadopago", mpPaymentId: String(created.id),
+      mpQrCode: tx.qr_code || null, mpQrBase64: tx.qr_code_base64 || null,
+      mpExpiresAt: expiresAt, mpAttempts: attempt, status: "pending"
+    };
+    await ref.set({ patientCharge: {
+      provider: "mercadopago", mpPaymentId: charge.mpPaymentId, mpQrCode: charge.mpQrCode,
+      mpQrBase64: charge.mpQrBase64, mpExpiresAt: expiresAt, mpAttempts: attempt
+    } }, { merge: true });
+  }
+  return charge;
+}
+
+// Visão mostrada no link do paciente. Com Mercado Pago conectado: PIX na conta
+// do profissional, confirmação automática. Sem conexão: PIX estático da chave
+// do profissional, confirmação pelo profissional.
+async function buildPatientChargeView(db, sessionId, session) {
+  const tSnap = await db.collection("therapists").doc(session.therapistUid).get();
+  const t = tSnap.exists ? tSnap.data() : {};
+  const base = session.patientCharge || {};
+  if (t.mpConnect?.accessToken) {
+    try {
+      const charge = await ensureMpPatientCharge(db, sessionId, session, t);
+      if (charge) {
+        return {
+          provider: "mercadopago", automatic: true,
+          amountCents: charge.amountCents,
+          status: charge.status === "paid" ? "paid" : "pending",
+          paidAt: charge.paidAt || null,
+          receiverName: t.displayName || "",
+          pixPayload: charge.mpQrCode || null,
+          qrBase64: charge.mpQrBase64 || null,
+          expiresAt: charge.mpExpiresAt || null
+        };
+      }
+    } catch (e) {
+      logWarn("patient_charge_mp_failed", { sessionId, error: e.message });
+    }
+  }
+  let pixPayload = null;
+  try {
+    pixPayload = buildPixPayload({
+      key: t.pixKey, keyType: t.pixKeyType, amountCents: base.amountCents,
+      merchantName: t.displayName, merchantCity: t.consultorio?.cidade, txid: sessionId
+    });
+  } catch (e) {
+    logWarn("patient_charge_payload_failed", { sessionId, error: e.message });
+  }
+  return {
+    provider: "pix_estatico", automatic: false,
+    amountCents: base.amountCents,
+    status: base.status === "paid" ? "paid" : "pending",
+    paidAt: base.paidAt || null,
+    patientReportedAt: base.patientReportedAt || null,
+    receiverName: t.displayName || "",
+    pixKey: t.pixKey || "",
+    pixKeyType: t.pixKeyType || "",
+    pixPayload
+  };
+}
+
+async function sessionFromJoinRequest(req) {
+  let joinToken = String(req.body?.t || req.query?.t || "").trim();
+  const joinCode = String(req.body?.c || req.query?.c || "").trim();
+  if (!joinToken && joinCode) joinToken = (await resolveJoinCode(joinCode)) || "";
+  if (!joinToken) return null;
+  const v = verifySignedToken(joinToken, ACCESS_TOKEN_SECRET);
+  if (!v.valid || v.payload.token_type !== "therapy_join") return null;
+  return v.payload.sessionId;
+}
+
+// Paciente avisa que já pagou (o profissional confirma no painel).
+router.post("/therapy/sessao/cobranca/informar-pago", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const sessionId = await sessionFromJoinRequest(req);
+  if (!sessionId) return sendError(res, 401, "JOIN_TOKEN_INVALIDO");
+  const ref = getDb().collection("therapy_sessions").doc(sessionId);
+  const snap = await ref.get();
+  if (!snap.exists || !snap.data().patientCharge?.amountCents) return sendError(res, 404, "COBRANCA_NAO_ENCONTRADA");
+  if (snap.data().patientCharge.status !== "paid") {
+    await ref.set({ patientCharge: { patientReportedAt: Date.now() } }, { merge: true });
+  }
+  return res.json({ ok: true });
+}));
+
+// ─── Conectar Mercado Pago (OAuth) ────────────────────────────────────────
+router.post("/therapy/profissional/mp/conectar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  if (!mpConnect.isConfigured()) return sendError(res, 503, "MP_CONNECT_INDISPONIVEL");
+  const state = signPayload({ token_type: "mp_connect", uid, iat: Date.now(), exp: Date.now() + 15 * 60 * 1000 }, ACCESS_TOKEN_SECRET);
+  return res.json({ ok: true, url: mpConnect.buildAuthUrl(state) });
+}));
+
+router.get("/therapy/mp/oauth/callback", asyncHandler(async (req, res) => {
+  const front = `${THERAPY_FRONTEND_BASE.replace(/\/+$/, "")}/perfil.html`;
+  const v = verifySignedToken(String(req.query?.state || ""), ACCESS_TOKEN_SECRET);
+  if (!v.valid || v.payload.token_type !== "mp_connect" || !req.query?.code) {
+    return res.redirect(`${front}?mp=erro`);
+  }
+  try {
+    const record = await mpConnect.exchangeCode(String(req.query.code));
+    const nickname = await mpConnect.accountNickname(record.accessToken);
+    await getDb().collection("therapists").doc(v.payload.uid).set({
+      mpConnect: { ...record, nickname, connectedAt: Date.now() },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    await logAudit({ type: "mp_connect_linked", therapistUid: v.payload.uid, mpUserId: record.userId });
+    return res.redirect(`${front}?mp=conectado`);
+  } catch (e) {
+    logError("mp_connect_callback_failed", e, { uid: v.payload.uid });
+    return res.redirect(`${front}?mp=erro`);
+  }
+}));
+
+router.post("/therapy/profissional/mp/desconectar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  await getDb().collection("therapists").doc(uid).set({
+    mpConnect: admin.firestore.FieldValue.delete(),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+  await logAudit({ type: "mp_connect_unlinked", therapistUid: uid });
+  return res.json({ ok: true });
+}));
+
+// Aviso do Mercado Pago sobre o PIX do paciente. Não confia no corpo: consulta
+// o pagamento com o token do profissional e confere referência e valor.
+router.post("/webhooks/mp/pro-pix", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const sessionId = String(req.query?.sid || "").trim();
+  const paymentId = String(req.body?.data?.id || req.query?.["data.id"] || req.query?.id || "").trim();
+  if (!sessionId || !paymentId) return res.status(200).json({ ok: true, ignored: true });
+  const db = getDb();
+  const ref = db.collection("therapy_sessions").doc(sessionId);
+  const snap = await ref.get();
+  if (!snap.exists) return res.status(200).json({ ok: true, ignored: true });
+  const session = snap.data();
+  const charge = session.patientCharge || {};
+  if (charge.status === "paid") return res.status(200).json({ ok: true });
+  const tSnap = await db.collection("therapists").doc(session.therapistUid).get();
+  const record = tSnap.exists ? tSnap.data().mpConnect : null;
+  try {
+    const token = await mpConnect.validAccessToken(record, mpTokenSaver(db, session.therapistUid, record));
+    if (!token) return res.status(200).json({ ok: true, ignored: true });
+    const p = await mpConnect.getPayment(token, paymentId);
+    const amountOk = Math.round(Number(p.transaction_amount) * 100) === Number(charge.amountCents);
+    if (p.status === "approved" && p.external_reference === `sess:${sessionId}` && amountOk) {
+      await ref.set({ patientCharge: { status: "paid", paidAt: Date.now(), provider: "mercadopago", mpPaymentId: String(p.id) } }, { merge: true });
+      await logAudit({ type: "patient_charge_paid_mp", sessionId, therapistUid: session.therapistUid });
+    }
+  } catch (e) {
+    logError("mp_pro_pix_webhook_failed", e, { sessionId });
+    return res.status(500).json({ ok: false });
+  }
+  return res.status(200).json({ ok: true });
+}));
+
+// Profissional confirma (ou desfaz) o recebimento.
+router.post("/therapy/sessao/:sessionId/cobranca/confirmar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const ref = getDb().collection("therapy_sessions").doc(String(req.params.sessionId || ""));
+  const snap = await ref.get();
+  if (!snap.exists) return sendError(res, 404, "SESSAO_NAO_ENCONTRADA");
+  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
+  if (!snap.data().patientCharge?.amountCents) return sendError(res, 404, "COBRANCA_NAO_ENCONTRADA");
+  const paid = req.body?.paid !== false;
+  await ref.set({ patientCharge: { status: paid ? "paid" : "pending", paidAt: paid ? Date.now() : null } }, { merge: true });
+  await logAudit({ type: paid ? "patient_charge_marked_paid" : "patient_charge_unmarked", sessionId: snap.id, therapistUid: uid });
+  return res.json({ ok: true, status: paid ? "paid" : "pending" });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
