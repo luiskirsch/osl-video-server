@@ -379,5 +379,18 @@
  "Olá{0}.": "Hola{0}.",
  "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões.": "El banco de sesiones de {0} llegó al 80% del mes. Quedan {1} sesiones.",
  "Se quiser ampliar o banco neste mês, responda este e-mail. Quem está em acompanhamento segue com as sessões reservadas.": "Si quieres ampliar el banco este mes, responde a este correo. Quienes están en acompañamiento mantienen sus sesiones reservadas.",
- "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "El banco de sesiones de {0} llegó al 80% del mes. Quedan {1} sesiones. Para ampliar el banco este mes, responde a este correo."
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "El banco de sesiones de {0} llegó al 80% del mes. Quedan {1} sesiones. Para ampliar el banco este mes, responde a este correo.",
+ "Inscrição no conselho confirmada — Espaço Prelúdio": "Inscripción en el consejo confirmada — Espaço Prelúdio",
+ "Inscrição confirmada": "Inscripción confirmada",
+ "Sua inscrição no conselho foi confirmada. Você já pode contratar a assinatura do Espaço Prelúdio pelo plano": "Tu inscripción en el consejo profesional fue confirmada. Ya puedes contratar la suscripción de Espaço Prelúdio con el plan",
+ "Profissional: R$ 60/mês": "Profesional: R$ 60/mes",
+ ", com 30 dias grátis.": ", con 30 días gratis.",
+ "Olá {0}, Sua inscrição no conselho foi confirmada. Você já pode contratar o plano Profissional (R$ 60/mês). Acesse: {1} Espaço Prelúdio": "Hola {0}, tu inscripción en el consejo profesional fue confirmada. Ya puedes contratar el plan Profesional (R$ 60/mes). Accede en: {1} Espaço Prelúdio",
+ "Sua inscrição no conselho foi confirmada. Você já pode contratar o plano Profissional (R$ 60/mês).": "Tu inscripción en el consejo profesional fue confirmada. Ya puedes contratar el plan Profesional (R$ 60/mes).",
+ "Revisamos seu comprovante de inscrição no conselho e ele não pôde ser aceito. Motivo:": "Revisamos tu comprobante de inscripción en el consejo y no pudo ser aceptado. Motivo:",
+ "Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 60/mês).": "Puedes enviar un nuevo comprobante (foto del carné del consejo, captura del sistema oficial de búsqueda pública o declaración de inscripción) o, si tu inscripción tiene más de 12 meses, contratar directamente el plan Profesional (R$ 60/mes).",
+ "Assinar o plano Profissional (R$ 60/mês):": "Suscribirte al plan Profesional (R$ 60/mes):",
+ "se já se formou e tem inscrição no conselho.": "si ya te graduaste y tienes inscripción en el consejo.",
+ "Como funciona: você atende seus próprios pacientes normalmente. Quando emite recibo de uma consulta como membro da clínica, o sistema calcula o repasse automaticamente. Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 60/mês).": "Cómo funciona: atiendes a tus propios pacientes con normalidad. Cuando emites un recibo de una consulta como miembro de la clínica, el sistema calcula el reparto automáticamente. Cada profesional mantiene su cuenta individual en Espaço Prelúdio (R$ 60/mes).",
+ "Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 60/mês).": "Cada profesional mantiene su cuenta individual en Espaço Prelúdio (R$ 60/mes)."
 }

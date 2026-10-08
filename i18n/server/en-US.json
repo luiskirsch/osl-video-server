@@ -379,5 +379,18 @@
  "Olá{0}.": "Hello{0}.",
  "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões.": "{0}'s session bank has reached 80% for the month. {1} sessions remain.",
  "Se quiser ampliar o banco neste mês, responda este e-mail. Quem está em acompanhamento segue com as sessões reservadas.": "If you'd like to expand the bank this month, reply to this email. Anyone currently in treatment will keep their reserved sessions.",
- "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "{0}'s session bank has reached 80% for the month. {1} sessions remain. To expand the bank this month, reply to this email."
+ "O banco de sessões da {0} chegou a 80% do mês. Restam {1} sessões. Para ampliar o banco neste mês, responda este e-mail.": "{0}'s session bank has reached 80% for the month. {1} sessions remain. To expand the bank this month, reply to this email.",
+ "Inscrição no conselho confirmada — Espaço Prelúdio": "Professional registration confirmed — Espaço Prelúdio",
+ "Inscrição confirmada": "Registration confirmed",
+ "Sua inscrição no conselho foi confirmada. Você já pode contratar a assinatura do Espaço Prelúdio pelo plano": "Your professional council registration has been confirmed. You can now subscribe to Espaço Prelúdio with the plan",
+ "Profissional: R$ 60/mês": "Professional: R$ 60/month",
+ ", com 30 dias grátis.": ", with 30 days free.",
+ "Olá {0}, Sua inscrição no conselho foi confirmada. Você já pode contratar o plano Profissional (R$ 60/mês). Acesse: {1} Espaço Prelúdio": "Hello {0}, Your professional council registration has been confirmed. You can now subscribe to the Professional plan (R$ 60/month). Go to: {1} Espaço Prelúdio",
+ "Sua inscrição no conselho foi confirmada. Você já pode contratar o plano Profissional (R$ 60/mês).": "Your professional council registration has been confirmed. You can now subscribe to the Professional plan (R$ 60/month).",
+ "Revisamos seu comprovante de inscrição no conselho e ele não pôde ser aceito. Motivo:": "We reviewed your council registration proof and it could not be accepted. Reason:",
+ "Você pode enviar um novo comprovante (foto da carteira do conselho, print do sistema oficial de busca pública ou declaração de inscrição) ou, se sua inscrição é mais antiga que 12 meses, contratar diretamente o plano Profissional (R$ 60/mês).": "You can submit a new proof (photo of your council card, a screenshot of the official public search system, or a registration statement) or, if your registration is older than 12 months, subscribe directly to the Professional plan (R$ 60/month).",
+ "Assinar o plano Profissional (R$ 60/mês):": "Subscribe to the Professional plan (R$ 60/month):",
+ "se já se formou e tem inscrição no conselho.": "if you have already graduated and are registered with your council.",
+ "Como funciona: você atende seus próprios pacientes normalmente. Quando emite recibo de uma consulta como membro da clínica, o sistema calcula o repasse automaticamente. Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 60/mês).": "How it works: you see your own patients as usual. When you issue a receipt for a session as a clinic member, the system calculates the payout automatically. Each professional keeps an individual account on Espaço Prelúdio (R$ 60/month).",
+ "Cada profissional mantém sua conta individual no Espaço Prelúdio (R$ 60/mês).": "Each professional keeps an individual account on Espaço Prelúdio (R$ 60/month)."
 }
