@@ -38,6 +38,7 @@ function millis(value) {
 // antigas do "Atendimento a Empresas" ficaram com plano "empresa" mas têm
 // cartão cadastrado e assinatura ativa.
 function isPayingProfessional(therapist = {}, now = Date.now()) {
+  if (therapist.legacyExempt === true) return true; // isentos contam como pagantes (diretório, valor próprio)
   if (PAYING_PREAPPROVAL_STATUSES.has(therapist.mpPreapprovalStatus)) return true;
   if (therapist.plano === "pro") return true;
   return millis(therapist.adminGrantedUntil) > now && therapist.plano !== "empresa";

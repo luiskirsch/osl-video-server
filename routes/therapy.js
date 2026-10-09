@@ -395,6 +395,10 @@ router.use(asyncHandler(async (req, res, next) => {
 function evaluatePlanAccess(therapist) {
   if (!therapist) return { ok: false, reason: "PROFISSIONAL_NAO_REGISTRADO", plano: null };
 
+  // Isenção vitalícia dos profissionais cadastrados antes da cobrança nova
+  // (2026-10-09). Só cadastros posteriores pagam mensalidade.
+  if (therapist.legacyExempt === true) return { ok: true, plano: therapist.plano || "trial", legacyExempt: true };
+
   // CORTESIA ADMIN — bypass que libera acesso independente do plano. Usado
   // pra conceder meses grátis manualmente via PATCH /therapy/admin/profissionais
   // (grantFreeMonths). Checa PRIMEIRO pra que cortesia funcione mesmo com
@@ -10003,6 +10007,34 @@ router.delete("/therapy/admin/profissionais/:uid", asyncHandler(async (req, res)
     { hint: "Só documentos sem nome e sem email podem ser removidos por aqui." });
   await ref.delete();
   return res.json({ ok: true, deleted: uid });
+}));
+
+// POST /therapy/admin/profissionais/:uid/excluir-definitivo — remove a conta
+// do profissional: cancela a assinatura no Mercado Pago, apaga o login
+// (Firebase Auth) e o cadastro. Exige confirmUid igual ao uid. Prontuários e
+// sessões cifrados permanecem (guarda legal de registros clínicos).
+router.post("/therapy/admin/profissionais/:uid/excluir-definitivo", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const adminAuth = await verifyAdminTherapy(req, res);
+  if (!adminAuth) return;
+  const uid = String(req.params.uid || "").trim();
+  if (!uid || req.body?.confirmUid !== uid) return sendError(res, 400, "CONFIRMACAO_OBRIGATORIA");
+  const ref = getDb().collection("therapists").doc(uid);
+  const snap = await ref.get();
+  const t = snap.exists ? snap.data() : {};
+  const result = { subscriptionCanceled: false, authDeleted: false, profileDeleted: false };
+  if (t.mpPreapprovalId) {
+    try {
+      const r = await mercadoPagoFetchTherapy(`https://api.mercadopago.com/preapproval/${encodeURIComponent(t.mpPreapprovalId)}`,
+        { method: "PUT", body: JSON.stringify({ status: "cancelled" }) });
+      result.subscriptionCanceled = r.response.ok;
+    } catch (e) { logWarn("admin_delete_cancel_sub_failed", { uid, error: e.message }); }
+  }
+  try { await admin.auth().deleteUser(uid); result.authDeleted = true; }
+  catch (e) { if (e?.code === "auth/user-not-found") result.authDeleted = true; else logWarn("admin_delete_auth_failed", { uid, error: e.message }); }
+  if (snap.exists) { await ref.delete(); result.profileDeleted = true; }
+  await logAudit({ type: "admin_therapist_deleted_permanently", therapistUid: uid, by: adminAuth.email || adminAuth.uid, name: t.displayName || null, ...result });
+  return res.json({ ok: true, ...result });
 }));
 
 // PATCH /therapy/admin/profissionais/:uid — ajusta plano/cortesias do prof
