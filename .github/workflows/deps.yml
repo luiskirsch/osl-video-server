@@ -32,10 +32,13 @@ jobs:
       - name: Instalar dependências sem executar scripts de terceiros
         run: npm ci --ignore-scripts
 
+      # Falha em qualquer high/critical, exceto exceções temporárias e
+      # justificadas em scripts/audit-prod.js (só valem sem correção publicada
+      # e até a data de revisão).
       - name: npm audit (produção, high + critical)
         id: audit
         continue-on-error: true
-        run: npm audit --omit=dev --audit-level=high --json > audit-report.json
+        run: node scripts/audit-prod.js --report audit-report.json
 
       - name: Upload do relatório de auditoria
         if: always()
@@ -50,7 +53,7 @@ jobs:
         if: steps.audit.outcome == 'failure'
         run: |
           echo "npm audit encontrou vulnerabilidades high ou critical."
-          echo "Rode 'npm audit' localmente e atualize o pacote afetado."
+          echo "Rode 'npm run audit:prod' localmente e atualize o pacote afetado."
           exit 1
 
   quality:

@@ -138,6 +138,10 @@
    - Verificar se o código afetado está em produção (não apenas devDependencies).
    - Adicionar mitigação no WAF ou validação de input se o vetor for externo.
    - Monitorar o advisory por patch.
+   - Se o trecho vulnerável comprovadamente não roda no backend, registrar uma
+     exceção temporária em scripts/audit-prod.js (advisory, pacote, motivo e
+     data de revisão). Ela deixa de valer sozinha quando sai correção ou vence
+     a data, e o CI volta a falhar.
 
 4. Commitar, push, deixar CI passar, Railway redeploya automaticamente.
 ```

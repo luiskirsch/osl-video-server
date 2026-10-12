@@ -16,7 +16,7 @@
     "body-parser": "^1.20.8",
     "ip-address": "^10.2.0",
     "qs": "^6.16.0",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "uuid": "^11.1.1"
   },
   "scripts": {
@@ -25,7 +25,7 @@
     "lint": "node scripts/check-syntax.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "npm run lint && npm test",
-    "audit:prod": "npm audit --omit=dev --audit-level=high"
+    "audit:prod": "node scripts/audit-prod.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
