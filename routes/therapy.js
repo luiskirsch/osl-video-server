@@ -2011,8 +2011,14 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
       .map(t => ({
         id:    String(t.id   || "").slice(0, 40) || crypto.randomBytes(6).toString("hex"),
         text:  String(t.text || "").trim().slice(0, 300),
-        abord: String(t.abord || "custom").slice(0, 30)
+        abord: "custom",
+        enabled: t.enabled !== false
       }));
+  }
+
+  if (Array.isArray(req.body?.disabledSessionTopics)) {
+    updates.disabledSessionTopics = [...new Set(req.body.disabledSessionTopics
+      .filter(key => typeof key === "string" && key.length <= 500))].slice(0, 200);
   }
 
   await getDb().collection("therapists").doc(uid).set(updates, { merge: true });
