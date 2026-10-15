@@ -7721,6 +7721,36 @@ router.post("/therapy/profissional/plano/cancelar", asyncHandler(async (req, res
   return res.json({ ok: true });
 }));
 
+// Encerra somente o cadastro profissional; o login pode ser compartilhado com
+// outros serviços. Registros clínicos e trilhas de auditoria não são apagados.
+router.post("/therapy/profissional/conta/encerrar", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  if (req.body?.confirmation !== "ENCERRAR") return sendError(res, 400, "CONFIRMACAO_OBRIGATORIA");
+  const therapist = await loadTherapist(uid);
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
+  // Não remova o cadastro se não foi possível interromper a cobrança.
+  if (therapist.mpPreapprovalId && therapist.mpPreapprovalStatus !== "cancelled") {
+    try {
+      const { response } = await mercadoPagoFetchTherapy(
+        `https://api.mercadopago.com/preapproval/${encodeURIComponent(therapist.mpPreapprovalId)}`,
+        { method: "PUT", body: JSON.stringify({ status: "cancelled" }) }
+      );
+      if (!response.ok) return sendError(res, 502, "MP_FALHOU_CANCELAR");
+    } catch (err) {
+      logError("therapy_account_cancel_failed", err, { uid });
+      return sendError(res, 503, "MP_INDISPONIVEL");
+    }
+    await getDb().collection("therapists").doc(uid).set({
+      plano: "canceled", mpPreapprovalStatus: "cancelled"
+    }, { merge: true });
+  }
+  await logAudit({ type: "therapy_conta_encerrada", therapistUid: uid });
+  await getDb().collection("therapists").doc(uid).delete();
+  return res.json({ ok: true });
+}));
+
 // Valida x-signature do Mercado Pago (mesmo template oficial usado em payments.js).
 // Em produção, exige secret configurado e assinatura válida — sem isso, qualquer
 // um conseguiria forjar/repetir um webhook de pagamento. Fora de produção, segue
@@ -7830,6 +7860,9 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   // evita promover uma assinatura institucional para o plano Profissional.
   const db = getDb();
   const therapistSnap = await db.collection("therapists").doc(uid).get();
+  if (!therapistSnap.exists) {
+    return res.json({ ok: true, ignored: true, reason: "PROFISSIONAL_NAO_REGISTRADO" });
+  }
   const savedTherapist = therapistSnap.exists ? therapistSnap.data() : {};
   const savedTier = String(savedTherapist?.proTier || "").toLowerCase();
 
@@ -7905,7 +7938,7 @@ router.post("/therapy/webhook/mp", asyncHandler(async (req, res) => {
   // depois 500 pro MP retentar.
   try {
     await withRetry(
-      () => db.collection("therapists").doc(uid).set(update, { merge: true }),
+      () => db.collection("therapists").doc(uid).update(update),
       { maxAttempts: 3, baseDelayMs: 250 }
     );
   } catch (err) {
