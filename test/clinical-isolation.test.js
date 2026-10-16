@@ -82,3 +82,21 @@ test("patient-note queries enforce authenticated ownership even when a foreign s
   const own = recorder(); await run({ query: {} }, own);
   assert.equal(own.body.notes.length, 1); assert.equal(own.body.notes[0].noteId, "note-a");
 });
+
+test("a private calendar feed cannot override clinical response privacy with a public cache policy", async () => {
+  const callback = handlers.get("get /therapy/agenda/feed.ics");
+  const run = vm.runInNewContext("(" + callback + ")", {
+    ensureDb: () => true, FEED_HORIZON_DAYS: 90,
+    icsEscape: value => value, icsDate: value => String(value),
+    getDb: () => ({ collection(name) {
+      return { where() { return this; }, limit() { return this; }, get: async () => name === "therapists"
+        ? { empty: false, docs: [{ id: "synthetic-owner", data: () => ({ displayName: "SYNTHETIC" }) }] }
+        : { docs: [] } };
+    } })
+  });
+  const res = { headers: {}, set(name, value) { this.headers[name] = value; }, send(body) { this.body = body; } };
+  await run({ query: { token: "synthetic-calendar-token" } }, res);
+  assert.match(res.headers["Cache-Control"], /private.*no-store/);
+  assert.doesNotMatch(res.headers["Cache-Control"], /public/);
+  assert.match(res.body, /BEGIN:VCALENDAR/);
+});

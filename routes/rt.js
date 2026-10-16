@@ -12,6 +12,7 @@ const admin = require('firebase-admin');
 
 const { THERAPY_ADMIN_EMAILS, THERAPY_RT_EMAILS } = require('../config');
 const { getBearerToken } = require('../services/auth');
+const { requireSecondFactor } = require('../services/clinical-second-factor');
 const { ensureDb, getDb } = require('../services/firestore');
 const { resolveSiglaFromTherapist } = require('../services/professional-councils');
 const { asyncHandler, sendError, normalizeEmail } = require('../utils');
@@ -116,6 +117,8 @@ async function authenticateRt(req, res) {
     sendError(res, 403, 'ACESSO_RT_NAO_LIBERADO');
     return null;
   }
+
+  if (!await requireSecondFactor(req, res, decoded.uid)) return null;
 
   return {
     uid: decoded.uid,

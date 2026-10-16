@@ -11,7 +11,7 @@ setLogLevel("silent");
 const clinicalCollections = ["therapists", "therapy_patient_accounts", "therapy_patients", "therapy_sessions",
   "therapy_notes", "therapy_patient_notes", "therapy_audit", "audit_logs", "therapy_humor",
   "therapy_chat_threads", "therapy_colaboradores", "therapy_estudantes", "nr1_campaigns",
-  "therapy_deletion_requests", "future_clinical_collection"];
+  "therapy_deletion_requests", "private_files", "future_clinical_collection"];
 
 test("published shared rules and dedicated clinical rules deny direct clinical access", async t => {
   assert.ok(process.env.FIRESTORE_EMULATOR_HOST, "Use npm run test:emulators; live Firebase is forbidden");
@@ -29,6 +29,7 @@ test("published shared rules and dedicated clinical rules deny direct clinical a
           await setDoc(doc(context.firestore(), name, "synthetic-record"), { uid: "patient-a", therapistUid: "therapist-a", marker: "synthetic-only" });
         }
         await setDoc(doc(context.firestore(), "therapy_sessions/synthetic-record/notes/synthetic-note"), { marker: "synthetic-only" });
+        await setDoc(doc(context.firestore(), "private_files/synthetic-record/chunks/000"), { i: 0, data: "U1lOVEhFVElD" });
         await setDoc(doc(context.firestore(), "config/public-test"), { theme: "test" });
         await uploadBytes(ref(context.storage(), "clinical/synthetic-record.txt"), new Uint8Array([1, 2, 3]));
       });
@@ -50,6 +51,11 @@ test("published shared rules and dedicated clinical rules deny direct clinical a
             await assertFails(deleteDoc(record));
           }
           await assertFails(getDoc(doc(db, "therapy_sessions/synthetic-record/notes/synthetic-note")));
+          const chunk = doc(db, "private_files/synthetic-record/chunks/000");
+          await assertFails(getDoc(chunk));
+          await assertFails(getDocs(collection(db, "private_files/synthetic-record/chunks")));
+          await assertFails(setDoc(chunk, { i: 0, data: "dGFtcGVyZWQ=" }));
+          await assertFails(deleteDoc(chunk));
           const file = ref(context.storage(), "clinical/synthetic-record.txt");
           await assertFails(uploadBytes(file, new Uint8Array([1, 2, 3])));
           await assertFails(getMetadata(file));

@@ -27,6 +27,8 @@ const { ensureDb, getDb, getStorageBucket } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken, timingSafeStringEqual } = require("../services/auth");
 const { getIo } = require("../services/socketio");
 const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
+const createTherapySecondFactor = require("../middleware/therapySecondFactor");
+const { twoFactorVersion } = require("../services/clinical-second-factor");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
@@ -211,7 +213,6 @@ function safeEqualHex(a, b) {
 }
 const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
 const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000;
-const TWOFA_HEADER = "x-therapy-2fa";
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
@@ -325,62 +326,7 @@ async function loadTherapist(uid) {
 // exigimos uma sessao curta assinada e vinculada ao uid + geracao atual do 2FA.
 // As quatro rotas do proprio fluxo ficam isentas: setup/enable/verify exigem
 // Firebase (e enable/verify validam TOTP); disable valida TOTP novamente.
-const TWOFA_EXEMPT_PATHS = new Set([
-  "/therapy/2fa/setup",
-  "/therapy/2fa/enable",
-  "/therapy/2fa/verify",
-  "/therapy/2fa/disable"
-]);
-
-function twoFactorVersion(therapist) {
-  return String(therapist?.twoFactorVersion || "legacy");
-}
-
-router.use(asyncHandler(async (req, res, next) => {
-  if (!req.path.startsWith("/therapy/") || TWOFA_EXEMPT_PATHS.has(req.path)) {
-    return next();
-  }
-
-  const firebaseToken = getBearerToken(req);
-  if (!firebaseToken) return next(); // a rota de destino produz o 401 canonico
-
-  let decoded;
-  try {
-    decoded = await admin.auth().verifyIdToken(firebaseToken, true);
-  } catch {
-    return next(); // evita duplicar a autenticacao da rota de destino
-  }
-  // As rotas protegidas abaixo reutilizam esta verificação, evitando uma
-  // segunda chamada ao Firebase Admin em toda requisição de profissional.
-  req.verifiedFirebaseToken = decoded;
-  req.firebaseRevocationChecked = true;
-  req.firebaseUid = decoded.uid;
-
-  const db = getDb();
-  if (!db) return next();
-  const therapist = await loadTherapist(decoded.uid);
-  if (!therapist?.twoFactorEnabled) return next();
-
-  res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  const sessionToken = String(req.headers[TWOFA_HEADER] || "").trim();
-  if (!sessionToken) {
-    return sendError(res, 401, "TWOFA_REQUIRED");
-  }
-
-  const verification = verifySignedToken(sessionToken, ACCESS_TOKEN_SECRET);
-  const payload = verification.payload || {};
-  if (
-    !verification.valid ||
-    payload.token_type !== "twofa_session" ||
-    payload.uid !== decoded.uid ||
-    String(payload.version || "legacy") !== twoFactorVersion(therapist)
-  ) {
-    return sendError(res, 401, "TWOFA_SESSION_INVALID");
-  }
-
-  req.therapyTwoFactor = { uid: decoded.uid, verified: true };
-  return next();
-}));
+router.use(createTherapySecondFactor());
 
 // Determina se o profissional pode usar funções clínicas (criar consulta,
 // receita, documento, paciente). Regra de produto:
@@ -5058,10 +5004,9 @@ router.get("/therapy/agenda/feed.ics", asyncHandler(async (req, res) => {
 
   lines.push("END:VCALENDAR");
 
-  // Cache curto (5 min) — calendários típicos polleam a cada 1-12h, mas
-  // mudanças rápidas via app/web devem refletir razoavelmente rápido.
+  // Calendar links contain personal appointments; shared caches must not store them.
   res.set("Content-Type", "text/calendar; charset=utf-8");
-  res.set("Cache-Control", "public, max-age=300");
+  res.set("Cache-Control", "private, no-store, max-age=0");
   res.set("Content-Disposition", `inline; filename="espacopreludio-${therapistUid}.ics"`);
   return res.send(lines.join("\r\n") + "\r\n");
 }));
