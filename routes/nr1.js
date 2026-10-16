@@ -78,7 +78,7 @@ module.exports = function createNr1Router({ verifyAdminTherapy, verificarEmpresa
 
   async function employee(req, res, { allowUnlinked = false } = {}) {
     if (!ensureDb(res)) return null;
-    const uid = await verifyFirebaseToken(req, res);
+    const uid = await verifyFirebaseToken(req, res, { checkRevoked: true });
     if (!uid) return null;
     const user = await admin.auth().getUser(uid);
     if (!user.emailVerified || !user.email) {

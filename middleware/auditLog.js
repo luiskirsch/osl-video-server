@@ -9,7 +9,7 @@ const { safeRequestPath } = require("../utils");
 let _db = null;
 function getDb() {
   if (!_db) {
-    try { _db = require("../services/firestore").db; } catch (_) { /* sem Firestore em dev */ }
+    try { _db = require("../services/firestore").getDb(); } catch (_) { /* sem Firestore em dev */ }
   }
   return _db;
 }
@@ -34,13 +34,14 @@ async function writeAuditDoc(entry) {
 
 // Fábrica: retorna middleware que loga ações em endpoints sensíveis.
 // category: string curta que identifica o grupo (ex: "admin", "ritual", "payment")
-function auditLog(category) {
+function auditLog(category, { includeSuccessfulReads = false, matches = null } = {}) {
   return (req, res, next) => {
+    if (matches && !matches(req)) return next();
     const started = Date.now();
 
     res.on("finish", () => {
       // Não auditar health checks e rotas públicas de leitura bem-sucedidas
-      if (req.method === "GET" && res.statusCode < 400) return;
+      if (!includeSuccessfulReads && req.method === "GET" && res.statusCode < 400) return;
 
       const entry = {
         time: new Date().toISOString(),

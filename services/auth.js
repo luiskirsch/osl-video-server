@@ -73,7 +73,8 @@ function verifySignedToken(token, secret) {
     return { valid: false, error: "PAYLOAD_INVALIDO" };
   }
 
-  if (typeof payload.exp !== "number" || Date.now() > payload.exp) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+      !Number.isFinite(payload.exp) || Date.now() >= payload.exp) {
     return { valid: false, error: "TOKEN_EXPIRADO", payload };
   }
 
@@ -159,16 +160,18 @@ function requireAdmin(req, res, next) {
   return sendError(res, 403, "ADMIN_SECRET_INVALIDO");
 }
 
-async function verifyFirebaseToken(req, res) {
-  if (req.verifiedFirebaseToken?.uid) {
+async function verifyFirebaseToken(req, res, { checkRevoked = false } = {}) {
+  const requireRevocationCheck = checkRevoked || req.requireFirebaseRevocationCheck === true;
+  if (req.verifiedFirebaseToken?.uid && (!requireRevocationCheck || req.firebaseRevocationChecked === true)) {
     req.firebaseUid = req.verifiedFirebaseToken.uid;
     return req.verifiedFirebaseToken.uid;
   }
   const bearer = getBearerToken(req);
   if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
   try {
-    const decoded = await admin.auth().verifyIdToken(bearer);
+    const decoded = await admin.auth().verifyIdToken(bearer, requireRevocationCheck);
     req.verifiedFirebaseToken = decoded;
+    req.firebaseRevocationChecked = requireRevocationCheck;
     req.firebaseUid = decoded.uid;
     req.firebaseUser = decoded;
     // Idioma escolhido no site (X-Locale) — usado nos e-mails para este usuário.

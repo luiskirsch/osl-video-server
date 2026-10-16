@@ -9,12 +9,24 @@
 ..bfg-report
 
 node_modules
+**/node_modules
+security
+scripts/security
 coverage
 test
 docs
 
 .env
 .env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+firebase-service-account*.json
+service-account*.json
+credentials.json
 *.log
 *.log.*
 *.sarif

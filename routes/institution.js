@@ -75,7 +75,7 @@ function serializeSchool(doc) {
 }
 
 async function getInstitutionActor(req, res) {
-  const uid = await verifyFirebaseToken(req, res);
+  const uid = await verifyFirebaseToken(req, res, { checkRevoked: true });
   if (!uid) return null;
 
   let user;

@@ -1,0 +1,181 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Salas de jogo (O SextoLugar) ──────────────────────────────────────
+    match /salas/{roomId} {
+      // Leitura pública: o código da sala é compartilhado pelo host com os jogadores
+      // por design. Subcoleções (players, messages, missions) têm regras próprias.
+      allow read: if true;
+      // Criação: qualquer usuário autenticado pode criar sala (código é o gate real).
+      allow create: if request.auth != null;
+      // Update: só o host pode alterar status, arenaActive, etc.
+      allow update: if request.auth != null &&
+        get(/databases/$(database)/documents/salas/$(roomId)).data.hostId == request.auth.uid;
+      allow delete: if false;
+
+      // Ritual: somente o backend (admin SDK) pode escrever. Clientes apenas leem.
+      match /ritual/state {
+        allow read: if request.auth != null;
+        allow create, update, delete: if false;
+      }
+
+      match /ritual/state/history/{histId} {
+        allow read: if request.auth != null;
+        allow create, update, delete: if false;
+      }
+
+      // Histórico de cartas: só membros da sala podem criar entradas
+      match /ritual/history/{histId} {
+        allow read: if request.auth != null;
+        allow create: if request.auth != null
+          && exists(/databases/$(database)/documents/salas/$(roomId)/players/$(request.auth.uid));
+        allow update, delete: if false;
+      }
+
+      // Chat da sala: só membros aprovados podem enviar (membership check).
+      // Mensagens de sistema criadas pelo host durante criação de sala também são permitidas.
+      match /messages/{msgId} {
+        allow read: if request.auth != null;
+        allow create: if request.auth != null && (
+          // Mensagem de usuário: deve ser membro da sala, ter texto ≤2000 chars e timestamp do servidor
+          (exists(/databases/$(database)/documents/salas/$(roomId)/players/$(request.auth.uid))
+            && request.resource.data.get('text', '') is string
+            && request.resource.data.get('text', '').size() <= 2000
+            && request.resource.data.createdAt == request.time)
+          ||
+          // Mensagem de sistema: apenas o host pode criar (durante criação de sala)
+          (request.resource.data.get('type', '') == 'system'
+            && get(/databases/$(database)/documents/salas/$(roomId)).data.hostId == request.auth.uid)
+        );
+        allow update, delete: if false;
+      }
+
+      // Players: qualquer autenticado pode escrever (participantId aleatório ou Firebase UID).
+      // Validação de conteúdo: avatarPhotoUrl deve ser https://, avatarColor deve ser hex.
+      match /players/{playerId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null
+          && (!('avatarPhotoUrl' in request.resource.data) ||
+               request.resource.data.avatarPhotoUrl.matches('https://.*') ||
+               request.resource.data.avatarPhotoUrl.matches('data:image/.*'))
+          && (!('avatarColor' in request.resource.data) ||
+               request.resource.data.avatarColor.matches('#[0-9a-fA-F]{3,8}'))
+          && (!('avatarEmoji' in request.resource.data) ||
+               request.resource.data.avatarEmoji.size() <= 8);
+        allow delete: if request.auth != null;
+      }
+
+      // Missões secretas: leitura restrita ao próprio jogador; escrita apenas pelo host da sala.
+      match /missions/{playerId} {
+        allow read: if request.auth != null && request.auth.uid == playerId;
+        allow create, update: if request.auth != null
+          && get(/databases/$(database)/documents/salas/$(roomId)).data.hostId == request.auth.uid;
+        allow delete: if false;
+      }
+
+      // Typing indicators: qualquer autenticado pode escrever (indicadores efêmeros, sem dados sensíveis)
+      match /typing/{typingId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null;
+      }
+
+      // Sessões de jogo: escritas exclusivamente pelo backend (Admin SDK).
+      // Clientes leem para replay, analytics e notificações de reconexão.
+      match /sessions/{sessionId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+
+        match /events/{eventId} {
+          allow read: if request.auth != null;
+          allow write: if false;
+        }
+
+        match /players/{playerId} {
+          allow read: if request.auth != null;
+          allow write: if false;
+        }
+      }
+    }
+
+    // ── Perfis de usuário ──────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if request.auth != null;
+
+      // Criação: o cliente não pode definir campos financeiros/monetização no doc inicial.
+      allow create: if request.auth != null
+        && request.auth.uid == uid
+        && !request.resource.data.keys().hasAny(["prestige", "coins", "compras", "dailyStreak"]);
+
+      // Update: usa diff para verificar apenas os campos ALTERADOS, não o doc completo.
+      // Sem isso, qualquer updateDoc falha porque o doc existente já tem xp/coins.
+      // XP e achievements são mecânicas de jogo sem impacto financeiro — cliente pode escrever.
+      // Prestige, coins, compras e dailyStreak são escritos exclusivamente pelo backend.
+      allow update: if request.auth != null
+        && request.auth.uid == uid
+        && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(["prestige", "coins", "compras", "dailyStreak"]);
+
+      match /decks/{deckId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null && request.auth.uid == uid;
+      }
+
+      match /customCards/{cardId} {
+        allow read: if request.auth != null;
+        allow write: if request.auth != null && request.auth.uid == uid;
+        allow delete: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+
+    // ── Encontro Marcado (matchmaking) ─────────────────────────────────────
+    // Gravações são feitas pelo backend via admin SDK; clientes apenas leem
+    match /encontros/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // ── Config pública (temas, etc.) ───────────────────────────────────────
+    match /config/{document=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ── therapy_* e audit_logs: acesso exclusivo via backend (Admin SDK) ───
+    // Dados clínicos e logs de segurança nunca são lidos diretamente pelo cliente.
+    match /audit_logs/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /therapy_patient_accounts/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_sessions/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_notes/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_scheduling_requests/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_transactions/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_webhooks/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapy_audit/{document=**} {
+      allow read, write: if false;
+    }
+    match /therapists/{document=**} {
+      allow read, write: if false;
+    }
+
+    // ── Fallback: bloqueia leitura e escrita de qualquer path não listado ──
+    // Todos os acessos a dados não cobertos acima devem passar pelo backend.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

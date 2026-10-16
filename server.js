@@ -69,6 +69,7 @@ const affiliateRouter = require("./routes/affiliate");
 const adminRouter     = require("./routes/admin");
 const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
+const clinicalPrivacyRouter = require("./routes/clinicalPrivacy")();
 const encontroRouter  = require("./routes/encontro");
 const securityRouter  = require("./routes/security");
 const panelRouter     = require("./routes/panel");
@@ -226,6 +227,7 @@ app.use(cors({
   maxAge: 600
 }));
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
+app.use(require("./middleware/clinicalSecurity"));
 app.use(waf);
 
 // Bloqueia floods antes de alocar/parsing de corpos potencialmente grandes.
@@ -266,6 +268,11 @@ app.use(auditLog("license"), licenseRouter);
 app.use(auditLog("affiliate"), affiliateRouter);
 app.use(auditLog("admin"), adminRouter);
 app.use(aiRouter);
+app.use(auditLog("clinical", {
+  includeSuccessfulReads: true,
+  matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
+}));
+app.use(clinicalPrivacyRouter);
 app.use(auditLog("therapy"), therapyRouter);
 app.use(auditLog("encontro"), encontroRouter);
 app.use(securityRouter);

@@ -1,7 +1,7 @@
 // Espaço Prelúdio — rotas SaaS de telessaúde para profissionais.
 //
 // Modelo de confiança:
-// - Profissional autentica via Firebase ID Token (mesma instância sextolugar-staging).
+// - Profissional autentica via Firebase ID Token da instância configurada no Admin SDK.
 // - Notas clínicas sobem cifradas: ciphertext + iv (AES-GCM, chave derivada client-side
 //   da senha do profissional via PBKDF2 + salt). O servidor NUNCA vê a chave nem o plaintext.
 // - Paciente entra via joinToken assinado (single-use, expira em 2h). Sem conta.
@@ -346,13 +346,14 @@ router.use(asyncHandler(async (req, res, next) => {
 
   let decoded;
   try {
-    decoded = await admin.auth().verifyIdToken(firebaseToken);
+    decoded = await admin.auth().verifyIdToken(firebaseToken, true);
   } catch {
     return next(); // evita duplicar a autenticacao da rota de destino
   }
   // As rotas protegidas abaixo reutilizam esta verificação, evitando uma
   // segunda chamada ao Firebase Admin em toda requisição de profissional.
   req.verifiedFirebaseToken = decoded;
+  req.firebaseRevocationChecked = true;
   req.firebaseUid = decoded.uid;
 
   const db = getDb();
@@ -582,7 +583,7 @@ async function verifyAdminTherapy(req, res) {
   if (!bearer) { sendError(res, 401, "TOKEN_NAO_INFORMADO"); return null; }
   let decoded;
   try {
-    decoded = await admin.auth().verifyIdToken(bearer);
+    decoded = await admin.auth().verifyIdToken(bearer, true);
   } catch {
     sendError(res, 401, "TOKEN_INVALIDO");
     return null;
@@ -611,7 +612,7 @@ async function verifyAdminTherapy(req, res) {
 async function verifyOptionalIdToken(idToken) {
   if (!idToken) return null;
   try {
-    const decoded = await admin.auth().verifyIdToken(String(idToken));
+    const decoded = await admin.auth().verifyIdToken(String(idToken), true);
     return decoded.uid;
   } catch (error) {
     logError("verify_optional_id_token_failed", error);
@@ -10425,7 +10426,7 @@ async function resolveDirectoryAudience(req) {
   const token = getBearerToken(req);
   if (!token) return "pacientes";
   try {
-    const { uid } = await admin.auth().verifyIdToken(token);
+    const { uid } = await admin.auth().verifyIdToken(token, true);
     const db = getDb();
     const corporate = await resolveCorporateEmployee(db, uid).catch(() => ({ reason: "ERRO" }));
     if (!corporate.reason) return "programa";
@@ -11051,7 +11052,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   const bearer = getBearerToken(req);
   if (bearer) {
     try {
-      const decoded = await admin.auth().verifyIdToken(bearer);
+      const decoded = await admin.auth().verifyIdToken(bearer, true);
       patientAuth = {
         uid: decoded.uid,
         email: String(decoded.email || "").trim().toLowerCase()
@@ -21109,7 +21110,10 @@ function verificarEmpresaToken(token) {
     if (!timingSafeStringEqual(sig, expected)) return null;
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
     // Token válido por 7 dias
-    if (Date.now() - data.iat > 7 * 24 * 3600 * 1000) return null;
+    if (!data || typeof data !== "object" || Array.isArray(data) ||
+        typeof data.empresaId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(data.empresaId) ||
+        !Number.isSafeInteger(data.iat) || data.iat <= 0 || data.iat > Date.now() ||
+        Date.now() - data.iat >= 7 * 24 * 3600 * 1000) return null;
     return data;
   } catch { return null; }
 }

@@ -85,13 +85,14 @@ async function authenticateRt(req, res) {
 
   let decoded;
   try {
-    decoded = await admin.auth().verifyIdToken(token);
+    decoded = await admin.auth().verifyIdToken(token, true);
   } catch (_) {
     sendError(res, 401, 'TOKEN_INVALIDO');
     return null;
   }
 
   const email = normalizeEmail(decoded.email || '');
+  req.firebaseUid = decoded.uid;
   if (!email || decoded.email_verified !== true) {
     sendError(res, 403, 'EMAIL_DO_RT_NAO_VERIFICADO');
     return null;
