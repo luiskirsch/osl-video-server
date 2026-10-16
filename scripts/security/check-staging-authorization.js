@@ -115,6 +115,10 @@ async function main() {
     await request("enrolled therapist with proof allowed", target, tokenA, 200, null, proof);
     await request("enrolled RT with proof allowed", "/rt/me", tokenA, 200, null, proof);
     await request("another account cannot borrow second-factor proof", target, tokenB, 403, null, proof);
+    if (config.browserPort) {
+      const checkBrowser = require("./check-staging-mfa-browser");
+      report.checks.push(await checkBrowser({ port: config.browserPort, customToken: await auth.createCustomToken(a), code: totp(setup.secret) }));
+    }
     const verified = await twofa("verify", tokenA, { code: totp(setup.secret) });
     assert.ok(verified.sessionToken);
     await twofa("disable", tokenA, { code: totp(setup.secret) });
