@@ -21988,7 +21988,7 @@ function sealMoodNote(uid, text) {
   const key = moodNoteKey(uid);
   if (!key) throw new Error("NOTA_INDISPONIVEL");
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, { authTagLength: 16 });
   const data = Buffer.concat([cipher.update(text, "utf8"), cipher.final(), cipher.getAuthTag()]);
   return { v: 1, iv: iv.toString("base64"), data: data.toString("base64") };
 }
@@ -21997,7 +21997,7 @@ function openMoodNote(uid, sealed) {
     const key = moodNoteKey(uid);
     if (!key || !sealed?.data) return null;
     const buf = Buffer.from(sealed.data, "base64");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(sealed.iv, "base64"));
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(sealed.iv, "base64"), { authTagLength: 16 });
     decipher.setAuthTag(buf.subarray(buf.length - 16));
     return Buffer.concat([decipher.update(buf.subarray(0, buf.length - 16)), decipher.final()]).toString("utf8");
   } catch { return null; }
