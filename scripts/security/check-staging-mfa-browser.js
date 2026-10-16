@@ -56,7 +56,8 @@ module.exports = async function checkStagingMfaBrowser({ port, customToken, code
       return true;
     })()`);
     await until('location.pathname === "/staging/2fa-verify.html" && !!document.getElementById("codeInput")', "MFA_CHALLENGE_NOT_REACHED");
-    await evaluate(`(() => { const input = document.getElementById("codeInput"); input.value = ${JSON.stringify(code)}; input.dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("verifyBtn").click(); return true; })()`);
+    const currentCode = typeof code === "function" ? code() : code;
+    await evaluate(`(() => { const input = document.getElementById("codeInput"); input.value = ${JSON.stringify(currentCode)}; input.dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("verifyBtn").click(); return true; })()`);
     await until('location.pathname === "/staging/rt-painel.html" && document.querySelector("#rtApp")?.hidden === false', "MFA_RETURN_DID_NOT_LOAD_RT");
     return { name: "isolated browser: RT second-factor challenge, verify and return", passed: true };
   } finally { socket.close(); }

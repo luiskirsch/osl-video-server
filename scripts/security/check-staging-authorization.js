@@ -117,7 +117,7 @@ async function main() {
     await request("another account cannot borrow second-factor proof", target, tokenB, 403, null, proof);
     if (config.browserPort) {
       const checkBrowser = require("./check-staging-mfa-browser");
-      report.checks.push(await checkBrowser({ port: config.browserPort, customToken: await auth.createCustomToken(a), code: totp(setup.secret) }));
+      report.checks.push(await checkBrowser({ port: config.browserPort, customToken: await auth.createCustomToken(a), code: () => totp(setup.secret) }));
     }
     const verified = await twofa("verify", tokenA, { code: totp(setup.secret) });
     assert.ok(verified.sessionToken);
@@ -136,6 +136,7 @@ async function main() {
   } catch (error) {
     failed = error;
     report.failure = { code: error.code || "CHECK_FAILED", message: error instanceof assert.AssertionError ? error.message.split("\n")[0] : "Provider operation failed; sensitive details omitted" };
+    if (["BROWSER_PROTOCOL_FAILED", "BROWSER_TIMEOUT", "BROWSER_EVALUATION_FAILED", "ISOLATED_BLANK_BROWSER_REQUIRED", "RT_LOGIN_NOT_READY", "MFA_CHALLENGE_NOT_REACHED", "MFA_RETURN_DID_NOT_LOAD_RT"].includes(error.message)) report.failure.message = error.message;
   } finally {
     const cleanup = await Promise.allSettled([
       ...createdDocs.map(ref => ref.delete()),
