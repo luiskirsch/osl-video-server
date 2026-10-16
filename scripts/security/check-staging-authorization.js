@@ -136,7 +136,8 @@ async function main() {
   } catch (error) {
     failed = error;
     report.failure = { code: error.code || "CHECK_FAILED", message: error instanceof assert.AssertionError ? error.message.split("\n")[0] : "Provider operation failed; sensitive details omitted" };
-    if (["BROWSER_PROTOCOL_FAILED", "BROWSER_TIMEOUT", "BROWSER_EVALUATION_FAILED", "ISOLATED_BLANK_BROWSER_REQUIRED", "RT_LOGIN_NOT_READY", "MFA_CHALLENGE_NOT_REACHED", "MFA_RETURN_DID_NOT_LOAD_RT"].includes(error.message)) report.failure.message = error.message;
+    if (["BROWSER_PROTOCOL_FAILED", "BROWSER_TIMEOUT", "BROWSER_EVALUATION_FAILED", "ISOLATED_BLANK_BROWSER_REQUIRED", "RT_LOGIN_NOT_READY", "MFA_CHALLENGE_NOT_REACHED", "MFA_FORM_NOT_READY", "MFA_RETURN_DID_NOT_LOAD_RT"].includes(error.message)) report.failure.message = error.message;
+    if (error.browserTrace) report.failure.browserTrace = error.browserTrace;
   } finally {
     const cleanup = await Promise.allSettled([
       ...createdDocs.map(ref => ref.delete()),

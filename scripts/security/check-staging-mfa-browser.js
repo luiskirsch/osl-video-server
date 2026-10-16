@@ -14,8 +14,24 @@ module.exports = async function checkStagingMfaBrowser({ port, customToken, code
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => { socket.addEventListener("open", resolve, { once: true }); socket.addEventListener("error", reject, { once: true }); });
   const pending = new Map(); let id = 0;
+  const trace = [];
   socket.addEventListener("message", event => {
     const message = JSON.parse(event.data);
+    if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) {
+      try {
+        const page = new URL(message.params.frame.url);
+        if (page.origin === "https://espacopreludio.com.br") trace.push({ page: page.pathname, rtContext: page.searchParams.get("context") === "rt" });
+      } catch {}
+    }
+    if (message.method === "Network.responseReceived") {
+      try {
+        const response = message.params.response, endpoint = new URL(response.url);
+        if (endpoint.origin === "https://osl-video-server-staging.up.railway.app" &&
+            ["/rt/me", "/rt/dashboard", "/therapy/2fa/verify"].includes(endpoint.pathname)) {
+          trace.push({ endpoint: endpoint.pathname, status: response.status });
+        }
+      } catch {}
+    }
     if (message.id && pending.has(message.id)) {
       const callback = pending.get(message.id); pending.delete(message.id);
       if (message.error) callback.reject(new Error("BROWSER_PROTOCOL_FAILED")); else callback.resolve(message.result);
@@ -55,10 +71,12 @@ module.exports = async function checkStagingMfaBrowser({ port, customToken, code
       await signInWithCustomToken(auth, ${JSON.stringify(customToken)});
       return true;
     })()`);
-    await until('location.pathname === "/staging/2fa-verify.html" && !!document.getElementById("codeInput")', "MFA_CHALLENGE_NOT_REACHED");
+    await until('location.pathname === "/staging/2fa-verify.html" && document.readyState === "complete" && !!document.getElementById("codeInput")', "MFA_CHALLENGE_NOT_REACHED");
     const currentCode = typeof code === "function" ? code() : code;
-    await evaluate(`(() => { const input = document.getElementById("codeInput"); input.value = ${JSON.stringify(currentCode)}; input.dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("verifyBtn").click(); return true; })()`);
+    await until(`(() => { const input = document.getElementById("codeInput"); input.value = ${JSON.stringify(currentCode)}; input.dispatchEvent(new Event("input", { bubbles: true })); return !document.getElementById("verifyBtn").disabled; })()`, "MFA_FORM_NOT_READY");
+    await evaluate('document.getElementById("verifyBtn").click(); true');
     await until('location.pathname === "/staging/rt-painel.html" && document.querySelector("#rtApp")?.hidden === false', "MFA_RETURN_DID_NOT_LOAD_RT");
     return { name: "isolated browser: RT second-factor challenge, verify and return", passed: true };
-  } finally { socket.close(); }
+  } catch (error) { error.browserTrace = trace.slice(-30); throw error; }
+  finally { socket.close(); }
 };
