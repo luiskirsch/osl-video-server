@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
-const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
+const { readClientEncryption, encryptJson, decryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
 const whisper = require("../services/whisper");
 const sessionSummary = require("../services/session-summary");
 const { processAiSummary } = require("../services/therapy-ai-summary");
@@ -20,6 +20,23 @@ test("clinical payload uses authenticated AES-256-GCM", () => {
   const decoded = JSON.parse(Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8"));
   assert.deepEqual(decoded, payload);
   assert.equal(encrypted.algorithm, "AES-256-GCM");
+});
+
+test("clinical decryption preserves existing GCM payloads and rejects tampering", () => {
+  const key = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const payload = { summary: "legacy payload" };
+  // Formato anterior: tag padrão de 16 bytes, sem authTagLength explícito.
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const raw = Buffer.concat([cipher.update(JSON.stringify(payload)), cipher.final(), cipher.getAuthTag()]);
+  const envelope = { iv: iv.toString("base64"), ciphertext: raw.toString("base64") };
+  assert.deepEqual(decryptJson(envelope, key), payload);
+  assert.deepEqual(decryptJson(encryptJson(payload, key), key), payload);
+  const altered = Buffer.from(raw);
+  altered[altered.length - 1] ^= 1;
+  assert.throws(() => decryptJson({ ...envelope, ciphertext: altered.toString("base64") }, key));
+  assert.throws(() => decryptJson({ ...envelope, ciphertext: raw.subarray(0, -4).toString("base64") }, key));
+  assert.throws(() => decryptJson(envelope, crypto.randomBytes(32)));
 });
 
 test("client encryption headers require exact key and IV sizes", () => {

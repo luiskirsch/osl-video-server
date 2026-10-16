@@ -29,7 +29,7 @@ function readClientEncryption(req) {
 function encryptJson(payload, key) {
   if (!Buffer.isBuffer(key) || key.length !== KEY_BYTES) throw new Error("AI_RESULT_KEY_INVALIDO");
   const iv = crypto.randomBytes(IV_BYTES);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv, { authTagLength: TAG_BYTES });
   const plaintext = Buffer.from(JSON.stringify(payload), "utf8");
   const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
   plaintext.fill(0);
@@ -46,7 +46,7 @@ function decryptJson({ ciphertext, iv }, key) {
   const raw = Buffer.from(String(ciphertext || ""), "base64");
   const ivBuf = Buffer.from(String(iv || ""), "base64");
   if (ivBuf.length !== IV_BYTES || raw.length <= TAG_BYTES) throw new Error("CIFRADO_INVALIDO");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, ivBuf, { authTagLength: TAG_BYTES });
   decipher.setAuthTag(raw.subarray(raw.length - TAG_BYTES));
   const plaintext = Buffer.concat([decipher.update(raw.subarray(0, raw.length - TAG_BYTES)), decipher.final()]);
   try {
