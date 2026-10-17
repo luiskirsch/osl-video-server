@@ -10,7 +10,8 @@
 //   node scripts/backup/restore.js download --date 2026-10-17 --out ./restore
 //       baixa e decifra para arquivos locais (inspeção, sem tocar em banco)
 //   node scripts/backup/restore.js firestore --date 2026-10-17 --target-project <id> [--prefix therapists/]
-//       grava os documentos no projeto alvo (FIREBASE_SERVICE_ACCOUNT_JSON do ALVO)
+//       grava os documentos no projeto alvo. Credencial do ALVO via
+//       --service-account <arquivo.json> ou FIREBASE_SERVICE_ACCOUNT_JSON
 //   node scripts/backup/restore.js storage --target-project <id> [--prefix path/]
 //       recria os arquivos do Storage no bucket do projeto alvo
 //
@@ -50,7 +51,9 @@ function targetApp(opts) {
   if (PRODUCTION_PROJECTS.has(project) && !opts["allow-production"]) {
     fail(`${project} é produção. Restaure primeiro em homologação; para produção use --allow-production.`);
   }
-  const account = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}");
+  const account = typeof opts["service-account"] === "string"
+    ? JSON.parse(fs.readFileSync(opts["service-account"], "utf8"))
+    : JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "{}");
   if (account.project_id !== project) fail("FIREBASE_SERVICE_ACCOUNT_JSON não pertence ao projeto alvo.");
   const { initializeApp, cert } = require("firebase-admin/app");
   return initializeApp({
