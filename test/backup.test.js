@@ -19,35 +19,31 @@ function memoryR2() {
   };
 }
 
-// Firestore mínimo: coleções aninhadas a partir de { "col/doc": data }.
+// Firestore mínimo a partir de { "col/doc": data, "col/doc/sub/x": data }. Como
+// no real, um pai pode não existir ("documento ausente") e ter subcoleções.
 function fakeDb(docs) {
-  const reads = { count: 0 };
+  const paths = Object.keys(docs);
+  function docRef(p) { return { path: p, listCollections: async () => collectionsUnder(p) }; }
   function collection(collPath) {
-    const ids = Object.keys(docs).filter(p => p.startsWith(collPath + "/") && p.split("/").length === collPath.split("/").length + 1).sort();
-    function query(start, limit) {
-      return {
-        orderBy: () => query(start, limit),
-        limit: n => query(start, n),
-        startAfter: cursor => query(ids.indexOf(cursor.ref.path) + 1, limit),
-        async get() {
-          const slice = ids.slice(start || 0, (start || 0) + (limit || ids.length));
-          reads.count += slice.length;
-          const docSnaps = slice.map(p => ({ ref: docRef(p), data: () => docs[p] }));
-          return { size: docSnaps.length, docs: docSnaps };
-        }
-      };
-    }
-    return query(0, undefined);
+    const depth = collPath.split("/").length + 1;
+    return {
+      async listDocuments() {
+        const ids = new Set(paths.filter(p => p.startsWith(collPath + "/")).map(p => p.split("/").slice(0, depth).join("/")));
+        return [...ids].sort().map(docRef);
+      }
+    };
   }
-  function children(prefix) {
+  function collectionsUnder(prefix) {
     const depth = prefix ? prefix.split("/").length + 1 : 1;
-    const names = new Set(Object.keys(docs).filter(p => (!prefix || p.startsWith(prefix + "/")) && p.split("/").length > depth)
+    const names = new Set(paths.filter(p => (!prefix || p.startsWith(prefix + "/")) && p.split("/").length > depth)
       .map(p => p.split("/").slice(0, depth).join("/")));
-    if (!prefix) for (const p of Object.keys(docs)) names.add(p.split("/")[0]);
     return [...names].sort().map(collection);
   }
-  function docRef(p) { return { path: p, listCollections: async () => children(p) }; }
-  return { reads, listCollections: async () => children(""), doc: p => ({ path: p }) };
+  return {
+    listCollections: async () => collectionsUnder(""),
+    getAll: async (...refs) => refs.map(ref => ({ ref, exists: ref.path in docs, data: () => docs[ref.path] })),
+    doc: p => ({ path: p })
+  };
 }
 
 test("cifra com AAD: decifra o original e rejeita objeto trocado de lugar ou adulterado", () => {
@@ -75,6 +71,13 @@ test("export percorre subcoleções e aborta ao estourar o orçamento de leitura
   const dump = await backup.exportFirestore(fakeDb(docs));
   assert.deepEqual(dump.ndjson.trim().split("\n").map(l => JSON.parse(l).path).sort(), Object.keys(docs).sort());
   await assert.rejects(backup.exportFirestore(fakeDb(docs), { maxReads: 3 }), /ORCAMENTO/);
+});
+
+test("export alcança documentos sob pais inexistentes (subcoleções órfãs)", async () => {
+  const docs = { "salas/viva": { n: 1 }, "salas/apagada/ritual/r1": { t: 1 }, "salas/apagada/ritual/r1/history/h1": { t: 2 },
+    "therapy_patients/p/notes/n1": { t: 3 } };
+  const dump = await backup.exportFirestore(fakeDb(docs));
+  assert.deepEqual(dump.ndjson.trim().split("\n").map(l => JSON.parse(l).path).sort(), Object.keys(docs).sort());
 });
 
 test("runBackup grava dump verificável, copia Storage incremental e marca apagados", async () => {
@@ -109,11 +112,12 @@ test("falha no Storage não invalida o dump do Firestore", async () => {
   assert.deepEqual(spark.storage, { skipped: "SEM_BUCKET" });
 });
 
-test("retenção mantém 30 diários e o dia 1º por ~13 meses", () => {
+test("retenção mantém diários por 1 ano e o dia 1º por 5 anos; arquivo/ nunca expira", () => {
   const now = new Date("2026-10-17T06:00:00Z");
-  const keys = ["firestore/2026-10-16.ndjson.gz.enc", "firestore/2026-09-10.ndjson.gz.enc",
-    "firestore/2026-08-01.ndjson.gz.enc", "firestore/2025-08-01.ndjson.gz.enc", "storage/manifest.json.gz.enc"];
-  assert.deepEqual(backup.expiredDumps(keys, now), ["firestore/2026-09-10.ndjson.gz.enc", "firestore/2025-08-01.ndjson.gz.enc"]);
+  const keys = ["firestore/2026-10-16.ndjson.gz.enc", "firestore/2026-01-10.ndjson.gz.enc",
+    "firestore/2025-09-10.ndjson.gz.enc", "firestore/2022-08-01.ndjson.gz.enc", "firestore/2021-08-01.ndjson.gz.enc",
+    "storage/manifest.json.gz.enc", "arquivo/2026-10-17-pre-migracao-jogo.ndjson.gz.enc"];
+  assert.deepEqual(backup.expiredDumps(keys, now), ["firestore/2025-09-10.ndjson.gz.enc", "firestore/2021-08-01.ndjson.gz.enc"]);
 });
 
 test("backupConfig exige todas as variáveis", () => {

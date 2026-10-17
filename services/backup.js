@@ -6,6 +6,10 @@
 //   firestore/YYYY-MM-DD.ndjson.gz.enc   dump completo do dia (1 doc por linha)
 //   storage/objects/<sha256(nome)>-<md5>.enc   cada arquivo, incremental
 //   storage/manifest.json.gz.enc         nome → objeto cifrado + metadados
+//   arquivo/…                            retratos permanentes (nunca rotacionados)
+//
+// Retenção: diários por 1 ano; o do dia 1º de cada mês por 5 anos (guarda do
+// prontuário, Resolução CFP 001/2009).
 //
 // Formato cifrado: "EPBK1" | iv(12) | ciphertext | tag(16), AES-256-GCM.
 // O AAD é a chave do objeto no bucket: trocar arquivos de lugar quebra a
@@ -21,8 +25,8 @@ const { Timestamp, GeoPoint, DocumentReference } = require("firebase-admin/fires
 const { logInfo, logError } = require("../logger");
 
 const MAGIC = Buffer.from("EPBK1");
-const DAILY_RETENTION_DAYS = 30;
-const MONTHLY_RETENTION_DAYS = 400;
+const DAILY_RETENTION_DAYS = 366;
+const MONTHLY_RETENTION_DAYS = 5 * 366;
 const DEFAULT_MAX_READS = 30_000;
 const DEFAULT_MAX_STORAGE_BYTES = 700 * 1024 * 1024;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
@@ -94,21 +98,24 @@ async function exportFirestore(db, { maxReads = DEFAULT_MAX_READS } = {}) {
     reads += n;
     if (reads > maxReads) throw Object.assign(new Error("BACKUP_ORCAMENTO_LEITURAS_EXCEDIDO"), { reads });
   };
+  // listDocuments() inclui "documentos ausentes": pais apagados cujas
+  // subcoleções continuam com dados. Uma consulta comum não os alcança, e o
+  // que está embaixo deles ficaria fora do backup.
   async function walkCollection(collection) {
-    let cursor = null;
-    for (;;) {
-      let query = collection.orderBy("__name__").limit(500);
-      if (cursor) query = query.startAfter(cursor);
-      const snap = await query.get();
-      spend(Math.max(1, snap.size));
-      for (const doc of snap.docs) {
-        lines.push(JSON.stringify({ path: doc.ref.path, data: encodeValue(doc.data()) }));
-        const subs = await doc.ref.listCollections();
-        spend(1);
-        for (const sub of subs) await walkCollection(sub);
+    const refs = await collection.listDocuments();
+    spend(Math.max(1, refs.length));
+    for (let i = 0; i < refs.length; i += 100) {
+      const chunk = refs.slice(i, i + 100);
+      const snaps = await db.getAll(...chunk);
+      spend(chunk.length);
+      for (const snap of snaps) {
+        if (snap.exists) lines.push(JSON.stringify({ path: snap.ref.path, data: encodeValue(snap.data()) }));
       }
-      if (snap.size < 500) return;
-      cursor = snap.docs[snap.docs.length - 1];
+    }
+    for (const ref of refs) {
+      const subs = await ref.listCollections();
+      spend(1);
+      for (const sub of subs) await walkCollection(sub);
     }
   }
   const roots = await db.listCollections();
@@ -199,7 +206,7 @@ async function backupStorage(bucket, r2, key, { maxBytes = DEFAULT_MAX_STORAGE_B
 }
 
 // ─── Retenção ───────────────────────────────────────────────────────────
-// 30 diários + o do dia 1º de cada mês por ~13 meses.
+// Diários por 1 ano + o do dia 1º de cada mês por 5 anos.
 function expiredDumps(keys, now = new Date()) {
   return keys.filter(key => {
     const match = /^firestore\/(\d{4})-(\d{2})-(\d{2})\.ndjson\.gz\.enc$/.exec(key);

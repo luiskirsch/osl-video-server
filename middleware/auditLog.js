@@ -1,7 +1,7 @@
 // Middleware de audit logging para endpoints sensíveis.
 // Grava quem fez o quê, quando e de onde — estrutura compatível com o logger.js.
-// Os logs também vão para Firestore audit_logs/ com TTL de 90 dias
-// (configurar TTL policy no Firestore Console → audit_logs → campo expireAt).
+// Os logs também vão para Firestore audit_logs/ e ficam 6 meses (Marco Civil,
+// art. 15); a remoção é feita por jobs/auditLogCleanup.js.
 
 const { logInfo } = require("../logger");
 const { safeRequestPath } = require("../utils");
@@ -14,7 +14,7 @@ function getDb() {
   return _db;
 }
 
-const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+const AUDIT_RETENTION_MS = 183 * 24 * 60 * 60 * 1000; // 6 meses
 
 function extractUid(req) {
   // Somente identidade comprovada pelo middleware de autenticação.
@@ -25,7 +25,7 @@ async function writeAuditDoc(entry) {
   try {
     const db = getDb();
     if (!db) return;
-    const expireAt = new Date(Date.now() + NINETY_DAYS_MS);
+    const expireAt = new Date(Date.now() + AUDIT_RETENTION_MS);
     await db.collection("audit_logs").add({ ...entry, expireAt });
   } catch (_) {
     // Nunca deixar falha de audit quebrar a request
@@ -65,4 +65,4 @@ function auditLog(category, { includeSuccessfulReads = false, matches = null } =
   };
 }
 
-module.exports = { auditLog };
+module.exports = { auditLog, AUDIT_RETENTION_MS };

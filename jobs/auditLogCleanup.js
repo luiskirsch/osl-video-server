@@ -1,27 +1,24 @@
-// Limpeza diária de audit_logs expirados.
-// Substitui Firestore TTL policy (requer billing) — deleta documentos onde
-// expireAt < now(), em lotes de 400 para respeitar limite de batch do Firestore.
+// Limpeza diária de audit_logs com mais de 6 meses — o mínimo de guarda dos
+// registros de acesso exigido pelo Marco Civil da Internet (art. 15), sem
+// reter IP/navegador além disso (LGPD, necessidade). Substitui a TTL policy
+// do Firestore (requer billing). Usa o campo `time` (ISO, gravado na criação)
+// para valer também para registros antigos, criados com expireAt de 90 dias.
 
 const { logInfo, logError } = require("../logger");
+const { AUDIT_RETENTION_MS } = require("../middleware/auditLog");
 
 const BATCH_SIZE = 400;
 
-async function runAuditLogCleanup() {
-  let db;
-  try {
-    db = require("../services/firestore").db;
-  } catch (_) {
-    return;
-  }
-  if (!db) return;
+async function runAuditLogCleanup({ db = require("../services/firestore").getDb(), now = new Date() } = {}) {
+  if (!db) return 0;
 
-  const now = new Date();
+  const cutoff = new Date(now.getTime() - AUDIT_RETENTION_MS).toISOString();
   let total = 0;
 
   try {
     while (true) {
       const snap = await db.collection("audit_logs")
-        .where("expireAt", "<", now)
+        .where("time", "<", cutoff)
         .limit(BATCH_SIZE)
         .get();
 
@@ -35,10 +32,11 @@ async function runAuditLogCleanup() {
       if (snap.docs.length < BATCH_SIZE) break;
     }
 
-    logInfo("audit_log_cleanup", { deleted: total, ranAt: now.toISOString() });
+    logInfo("audit_log_cleanup", { deleted: total, cutoff, ranAt: now.toISOString() });
   } catch (err) {
     logError("audit_log_cleanup_error", err);
   }
+  return total;
 }
 
 const MS_24H = 24 * 60 * 60 * 1000;
@@ -51,4 +49,4 @@ function scheduleAuditLogCleanup() {
   }, 60 * 1000).unref();
 }
 
-module.exports = { scheduleAuditLogCleanup };
+module.exports = { scheduleAuditLogCleanup, runAuditLogCleanup };
