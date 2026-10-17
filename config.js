@@ -38,7 +38,7 @@ const GAME_ENABLED = process.env.GAME_ENABLED === "true";
 
 const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || "";
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
-const LIVEKIT_URL        = process.env.LIVEKIT_URL        || "wss://osextolugar-eqa7q1iz.livekit.cloud";
+const LIVEKIT_URL        = process.env.LIVEKIT_URL        || "wss://espaco-preludio-tsrg54s9.livekit.cloud";
 
 const S3_ACCESS_KEY        = process.env.S3_ACCESS_KEY        || "";
 const S3_SECRET_KEY        = process.env.S3_SECRET_KEY        || "";
