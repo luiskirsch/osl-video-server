@@ -104,6 +104,9 @@ test("falha no Storage não invalida o dump do Firestore", async () => {
     bucket: { getFiles: async () => { throw new Error("BUCKET_INEXISTENTE"); } } });
   assert.match(result.storage.error, /BUCKET_INEXISTENTE/);
   assert.ok(r2.objects.has(result.dumpKey));
+  const spark = await backup.runBackup({ db: fakeDb({ "a/1": {} }), r2, key,
+    bucket: { getFiles: async () => { throw Object.assign(new Error("The specified bucket does not exist."), { code: 404 }); } } });
+  assert.deepEqual(spark.storage, { skipped: "SEM_BUCKET" });
 });
 
 test("retenção mantém 30 diários e o dia 1º por ~13 meses", () => {

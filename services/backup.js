@@ -236,8 +236,13 @@ async function runBackup({ db, bucket, r2, key, now = new Date(), maxReads, maxS
   try {
     if (bucket) storage = await backupStorage(bucket, r2, key, { maxBytes: maxStorageBytes, now });
   } catch (error) {
-    storage = { error: String(error.message || error).slice(0, 200) };
-    logError("backup_storage_falhou", error);
+    // Plano Spark não tem bucket: os arquivos privados ficam no Firestore
+    // (services/private-files.js) e já estão no dump acima.
+    if (error?.code === 404) storage = { skipped: "SEM_BUCKET" };
+    else {
+      storage = { error: String(error.message || error).slice(0, 200) };
+      logError("backup_storage_falhou", error);
+    }
   }
   const expired = expiredDumps(await r2.list("firestore/"), now);
   if (expired.length) await r2.remove(expired);
