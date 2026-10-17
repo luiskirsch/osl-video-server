@@ -53,6 +53,9 @@ function createAccountRouter(deps = {}) {
   const email = deps.email || require("../services/email");
   const authenticate = deps.authenticate || require("../services/auth").verifyFirebaseToken;
   const localeFor = deps.localeFor || require("../services/user-locale").localeForEmail;
+  // Conta inexistente responde no mesmo tempo aproximado de um envio real:
+  // o tempo da resposta não pode revelar quem tem cadastro.
+  const delay = deps.delay || (() => new Promise(resolve => setTimeout(resolve, 400 + crypto.randomInt(400))));
   const site = siteBaseFor({ frontendBase: config.THERAPY_FRONTEND_BASE, isStaging: config.IS_STAGING });
   const limited = { ok: false, error: "MUITAS_TENTATIVAS" };
 
@@ -78,16 +81,18 @@ function createAccountRouter(deps = {}) {
     return next();
   }, resetEmailLimit, asyncHandler(async (req, res) => {
     const to = req.accountEmail, continueUrl = req.accountReturn;
-    let link;
-    try {
-      link = await auth().generatePasswordResetLink(to, continueUrl ? { url: continueUrl } : undefined);
-    } catch (error) {
-      if (["auth/user-not-found", "auth/email-not-found", "auth/user-disabled"].includes(error?.code)) {
-        logInfo("account_reset_no_account", { emailHash: emailKey(to).slice(0, 12) });
-        return res.json({ ok: true });
-      }
-      throw error;
+    // Com a proteção contra enumeração de e-mails ligada, o Firebase não gera
+    // link para conta inexistente e o Admin SDK falha com um erro genérico.
+    // Por isso a existência é conferida antes.
+    let account = null;
+    try { account = await auth().getUserByEmail(to); }
+    catch (error) { if (error?.code !== "auth/user-not-found") throw error; }
+    if (!account || account.disabled) {
+      logInfo("account_reset_no_account", { emailHash: emailKey(to).slice(0, 12) });
+      await delay();
+      return res.json({ ok: true });
     }
+    const link = await auth().generatePasswordResetLink(to, continueUrl ? { url: continueUrl } : undefined);
     const sent = await deliver({ to, template: email.templateAccountPasswordReset,
       link: toSiteLink(link, { site, continueUrl, lang: await localeFor(to) }) });
     if (!sent?.ok) return sendError(res, 503, "EMAIL_INDISPONIVEL");

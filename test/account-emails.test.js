@@ -14,8 +14,13 @@ function harness({ users = {}, verified = false, sendOk = true, staging = false 
   const router = createAccountRouter({
     config: { THERAPY_FRONTEND_BASE: "https://espacopreludio.com.br", IS_STAGING: staging, ACCOUNT_EMAIL_FROM: "EP <conta@espacopreludio.com.br>" },
     auth: () => ({
-      async generatePasswordResetLink(email, settings) {
+      async getUserByEmail(email) {
         if (!users[email]) throw Object.assign(new Error("nope"), { code: "auth/user-not-found" });
+        return { uid: "u-" + email, disabled: users[email] === "disabled" };
+      },
+      async generatePasswordResetLink(email, settings) {
+        // Como no Firebase com proteção contra enumeração: sem link para quem não existe.
+        if (!users[email]) throw new Error("INTERNAL ASSERT FAILED: Unable to create the email action link");
         generated.push({ email, settings });
         return FIREBASE_LINK;
       },
@@ -35,7 +40,8 @@ function harness({ users = {}, verified = false, sendOk = true, staging = false 
       req.firebaseUid = "u1";
       return "u1";
     },
-    localeFor: async () => "pt-BR"
+    localeFor: async () => "pt-BR",
+    delay: async () => {}
   });
   const app = express();
   app.use(express.json());
@@ -82,10 +88,12 @@ test("redefinição envia nosso e-mail com retorno ao passo da chave-semente", a
   assert.match(sent[0].html, /^https:\/\/espacopreludio\.com\.br\/conta-acao\.html\?mode=resetPassword&oobCode=CODE_123-abc/);
 });
 
-test("conta inexistente recebe a mesma resposta e nenhum e-mail (sem revelar cadastro)", async () => {
-  const { app, sent } = harness();
-  const response = await post(app, "/conta/redefinir-senha", { email: "ninguem@exemplo.com", retorno: "paciente" });
-  assert.deepEqual(response, { status: 200, body: { ok: true } });
+test("conta inexistente ou desativada recebe a mesma resposta e nenhum e-mail (sem revelar cadastro)", async () => {
+  const { app, sent } = harness({ users: { "off@exemplo.com": "disabled" } });
+  for (const email of ["ninguem@exemplo.com", "off@exemplo.com"]) {
+    const response = await post(app, "/conta/redefinir-senha", { email, retorno: "paciente" });
+    assert.deepEqual(response, { status: 200, body: { ok: true } });
+  }
   assert.equal(sent.length, 0);
 });
 
