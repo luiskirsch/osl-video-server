@@ -94,6 +94,8 @@ async function authenticateRt(req, res) {
 
   const email = normalizeEmail(decoded.email || '');
   req.firebaseUid = decoded.uid;
+  req.verifiedFirebaseToken = decoded;
+  req.firebaseRevocationChecked = true;
   if (!email || decoded.email_verified !== true) {
     sendError(res, 403, 'EMAIL_DO_RT_NAO_VERIFICADO');
     return null;
@@ -118,7 +120,7 @@ async function authenticateRt(req, res) {
     return null;
   }
 
-  if (!await requireSecondFactor(req, res, decoded.uid)) return null;
+  if (!await requireSecondFactor(req, res, decoded.uid, { required: true })) return null;
 
   return {
     uid: decoded.uid,

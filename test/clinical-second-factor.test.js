@@ -27,11 +27,18 @@ test("enrolled accounts require a valid signed second factor bound to identity a
   assert.deepEqual(req.therapyTwoFactor, { uid: "owner", verified: true });
 });
 
-test("missing enrollment retains existing access; failure to read enrollment cannot authorize", async () => {
-  for (const profile of [null, {}, { twoFactorEnabled: false }]) {
+test("unregistered callers remain subject to route authorization; registered professionals must enroll", async () => {
+  for (const profile of [{}, { twoFactorEnabled: false }]) {
     const check = createSecondFactorCheck({ secret, loadProfile: async () => profile });
-    assert.equal(await check({ headers: {} }, recorder(), "owner"), true);
+    const res = recorder();
+    assert.equal(await check({ headers: {} }, res, "owner"), false);
+    assert.equal(res.body.error, "TWOFA_ENROLLMENT_REQUIRED");
   }
+  const absent = createSecondFactorCheck({ secret, loadProfile: async () => null });
+  assert.equal(await absent({ headers: {} }, recorder(), "unknown"), true);
+  const privileged = recorder();
+  assert.equal(await absent({ headers: {} }, privileged, "rt-without-professional-profile", { required: true }), false);
+  assert.equal(privileged.body.error, "TWOFA_ENROLLMENT_REQUIRED");
   const check = createSecondFactorCheck({ secret, loadProfile: async () => { throw new Error("DATABASE_OFFLINE"); } });
   await assert.rejects(check({ headers: {} }, recorder(), "owner"), /DATABASE_OFFLINE/);
 });

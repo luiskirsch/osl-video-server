@@ -70,6 +70,7 @@ const adminRouter     = require("./routes/admin");
 const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
 const clinicalPrivacyRouter = require("./routes/clinicalPrivacy")();
+const clinicalMfaRouter = require("./routes/clinicalMfa")();
 const encontroRouter  = require("./routes/encontro");
 const securityRouter  = require("./routes/security");
 const panelRouter     = require("./routes/panel");
@@ -272,6 +273,7 @@ app.use(auditLog("clinical", {
   includeSuccessfulReads: true,
   matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
 }));
+app.use(clinicalMfaRouter);
 app.use(clinicalPrivacyRouter);
 app.use(auditLog("therapy"), therapyRouter);
 app.use(auditLog("encontro"), encontroRouter);

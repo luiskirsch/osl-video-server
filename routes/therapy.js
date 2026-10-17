@@ -26,9 +26,8 @@ const { asyncHandler, sendError } = require("../utils");
 const { ensureDb, getDb, getStorageBucket } = require("../services/firestore");
 const { verifyFirebaseToken, signPayload, verifySignedToken, getBearerToken, timingSafeStringEqual } = require("../services/auth");
 const { getIo } = require("../services/socketio");
-const { generateSecret: gen2faSecret, verifyTotp, otpauthUrl } = require("../services/twofa");
 const createTherapySecondFactor = require("../middleware/therapySecondFactor");
-const { twoFactorVersion } = require("../services/clinical-second-factor");
+const { requireSecondFactor } = require("../services/clinical-second-factor");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL, ACCESS_TOKEN_SECRET,
   THERAPY_ADMIN_EMAILS,
@@ -212,7 +211,6 @@ function safeEqualHex(a, b) {
   try { return crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex")); } catch { return false; }
 }
 const NOTE_CIPHERTEXT_MAX = 256 * 1024; // 256 KB de cifrado por nota
-const TWOFA_TOKEN_VALIDITY_MS = 8 * 60 * 60 * 1000;
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
@@ -549,6 +547,10 @@ async function verifyAdminTherapy(req, res) {
     sendError(res, 403, "EMAIL_NAO_VERIFICADO");
     return null;
   }
+  req.verifiedFirebaseToken = decoded;
+  req.firebaseRevocationChecked = true;
+  req.firebaseUid = decoded.uid;
+  if (!await requireSecondFactor(req, res, decoded.uid, { required: true })) return null;
   return { uid: decoded.uid, email };
 }
 
@@ -1998,7 +2000,8 @@ router.get("/therapy/profissional/me", asyncHandler(async (req, res) => {
   // Remove secrets do payload — twoFactorSecret/twoFactorPendingSecret e
   // asaasApiKey nunca saem do servidor. Mantém só flags públicas (enabled).
   const { twoFactorSecret, twoFactorPendingSecret, asaasApiKey, mpConnect: mpConnectRecord, ...therapistPublic } = therapist;
-  therapistPublic.twoFactorEnabled = !!therapist.twoFactorEnabled;
+  therapistPublic.twoFactorEnabled = !!req.therapyTwoFactor?.verified;
+  therapistPublic.twoFactorRequired = true;
   therapistPublic.asaasConfigured  = !!asaasApiKey;
 
   // NFS-e: nunca devolve o apiTokenEncrypted (mesmo cifrado, evita exposição
@@ -4119,153 +4122,8 @@ router.delete("/therapy/agenda/blackout/:blackoutId", asyncHandler(async (req, r
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
-// 2FA (TOTP) — autenticação de 2 fatores opcional pro profissional
-//
-// Fluxo:
-// 1. /2fa/setup — gera secret pendente + QR code. Profissional escaneia.
-// 2. /2fa/enable body: { code } — verifica código com pending; se OK, ativa.
-// 3. /2fa/verify body: { code } — após login Firebase, gera token de sessão.
-// 4. /2fa/disable body: { code } — verifica código antes de desativar.
-//
-// Storage: therapists/{uid}.twoFactorSecret, twoFactorEnabled,
-//          twoFactorPendingSecret (durante setup).
-// Secrets NUNCA saem do servidor (filtrados em /me).
-// Enforcement: middleware deste router valida X-Therapy-2FA no servidor.
-// ─────────────────────────────────────────────────────────────────────────
-const twoFactorLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { ok: false, error: "MUITAS_TENTATIVAS_2FA" }
-});
+// MFA enrollment, verification and recovery are mounted in routes/clinicalMfa.js.
 
-router.post("/therapy/2fa/setup", twoFactorLimiter, asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
-  if (therapist.twoFactorEnabled) return sendError(res, 409, "JA_ATIVADO");
-
-  const secret = gen2faSecret();
-  const label = therapist.displayName || therapist.email || uid;
-  const url = otpauthUrl({ secret, label, issuer: "Espaço Prelúdio" });
-
-  await getDb().collection("therapists").doc(uid).set({
-    twoFactorPendingSecret: secret,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  return res.json({ ok: true, secret, otpauthUrl: url });
-}));
-
-router.post("/therapy/2fa/enable", twoFactorLimiter, asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  if (!ACCESS_TOKEN_SECRET) return sendError(res, 503, "TWOFA_SESSION_SECRET_NAO_CONFIGURADO");
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const code = String(req.body?.code || "").trim();
-  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
-
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
-  if (therapist.twoFactorEnabled) return sendError(res, 409, "JA_ATIVADO");
-  if (!therapist.twoFactorPendingSecret) return sendError(res, 400, "SETUP_NAO_INICIADO");
-
-  if (!verifyTotp(therapist.twoFactorPendingSecret, code)) {
-    return sendError(res, 401, "CODIGO_INCORRETO");
-  }
-
-  const version = crypto.randomBytes(16).toString("hex");
-  await getDb().collection("therapists").doc(uid).set({
-    twoFactorEnabled: true,
-    twoFactorSecret: therapist.twoFactorPendingSecret,
-    twoFactorVersion: version,
-    twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
-    twoFactorEnabledAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  await logAudit({ type: "twofa_enabled", therapistUid: uid });
-
-  // Emite token de sessão imediato pra evitar redirect logo após enable.
-  const sessionToken = signPayload({
-    token_type: "twofa_session",
-    uid,
-    version,
-    iat: Date.now(),
-    exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
-  }, ACCESS_TOKEN_SECRET);
-
-  return res.json({ ok: true, sessionToken });
-}));
-
-router.post("/therapy/2fa/verify", twoFactorLimiter, asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  if (!ACCESS_TOKEN_SECRET) return sendError(res, 503, "TWOFA_SESSION_SECRET_NAO_CONFIGURADO");
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const code = String(req.body?.code || "").trim();
-  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
-
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
-  if (!therapist.twoFactorEnabled || !therapist.twoFactorSecret) {
-    return sendError(res, 400, "TWOFA_NAO_ATIVADO");
-  }
-
-  if (!verifyTotp(therapist.twoFactorSecret, code)) {
-    return sendError(res, 401, "CODIGO_INCORRETO");
-  }
-
-  await logAudit({ type: "twofa_verified", therapistUid: uid });
-
-  const sessionToken = signPayload({
-    token_type: "twofa_session",
-    uid,
-    version: twoFactorVersion(therapist),
-    iat: Date.now(),
-    exp: Date.now() + TWOFA_TOKEN_VALIDITY_MS
-  }, ACCESS_TOKEN_SECRET);
-
-  return res.json({ ok: true, sessionToken });
-}));
-
-router.post("/therapy/2fa/disable", twoFactorLimiter, asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const code = String(req.body?.code || "").trim();
-  if (!/^\d{6}$/.test(code)) return sendError(res, 400, "CODIGO_INVALIDO");
-
-  const therapist = await loadTherapist(uid);
-  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_REGISTRADO");
-  if (!therapist.twoFactorEnabled) return sendError(res, 409, "NAO_ATIVADO");
-
-  if (!verifyTotp(therapist.twoFactorSecret, code)) {
-    return sendError(res, 401, "CODIGO_INCORRETO");
-  }
-
-  await getDb().collection("therapists").doc(uid).set({
-    twoFactorEnabled: false,
-    twoFactorSecret: admin.firestore.FieldValue.delete(),
-    twoFactorPendingSecret: admin.firestore.FieldValue.delete(),
-    twoFactorVersion: admin.firestore.FieldValue.delete(),
-    twoFactorDisabledAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  await logAudit({ type: "twofa_disabled", therapistUid: uid });
-
-  return res.json({ ok: true });
-}));
-
-// ─────────────────────────────────────────────────────────────────────────
 // NPS — Net Promoter Score pós-consulta
 //
 // Modelo: therapy_nps_responses/{responseId}
