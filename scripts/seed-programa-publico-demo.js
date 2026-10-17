@@ -16,7 +16,7 @@ const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
 
 const studentPortalEmail = String(process.argv[2] || "luishenriquekirsch@hotmail.com").trim().toLowerCase();
-const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@preludiojogos.com.br").trim().toLowerCase();
+const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@espacopreludio.com.br").trim().toLowerCase();
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "null");
 if (!sa) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não configurado.");
 require("./confirm-firebase-project").assertFirebaseProjectConfirmed(sa, "seed-programa-publico-demo");

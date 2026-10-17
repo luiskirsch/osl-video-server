@@ -253,7 +253,6 @@ const PANEL_TOTP_SECRET = process.env.PANEL_TOTP_SECRET || "";
 const THERAPY_ADMIN_EMAILS = [...new Set([
   "luishenriquekirsch@hotmail.com",
   "contato@espacopreludio.com.br",
-  "contato@preludiojogos.com.br",
   ...String(process.env.THERAPY_ADMIN_EMAILS || "")
     .toLowerCase()
     .split(",")

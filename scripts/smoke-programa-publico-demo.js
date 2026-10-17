@@ -13,7 +13,7 @@ const { getAuth } = require("firebase-admin/auth");
 const backendBase = String(process.env.PUBLIC_PROGRAM_SMOKE_BACKEND || "https://osl-video-server-production.up.railway.app").replace(/\/$/, "");
 const firebaseWebApiKey = String(process.env.FIREBASE_WEB_API_KEY || "AIzaSyC8sSvA7_1HPYRFGFgdgzstkP_yQHadY-c").trim();
 const studentEmail = String(process.argv[2] || "luishenriquekirsch@hotmail.com").trim().toLowerCase();
-const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@preludiojogos.com.br").trim().toLowerCase();
+const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@espacopreludio.com.br").trim().toLowerCase();
 const studentId = "demo_portal_2hOQGb2JzRO5ZiKrG3tnN3fleJg2";
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "null");
