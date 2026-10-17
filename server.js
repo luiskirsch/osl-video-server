@@ -108,6 +108,21 @@ const trustedProxyHops = Number.isSafeInteger(trustedProxyHopsRaw) && trustedPro
   : (IS_PRODUCTION ? 1 : 0);
 app.set("trust proxy", trustedProxyHops);
 
+// Diagnóstico TEMPORÁRIO da cadeia de proxies do Railway (IP real do cliente).
+// Só existe com IP_DIAG_TOKEN definido e exige o token no cabeçalho.
+if (process.env.IP_DIAG_TOKEN) {
+  app.get("/health/ip-diag", (req, res) => {
+    const expected = Buffer.from(String(process.env.IP_DIAG_TOKEN));
+    const sent = Buffer.from(String(req.get("x-ep-diag") || ""));
+    if (sent.length !== expected.length || !require("node:crypto").timingSafeEqual(sent, expected)) {
+      return res.status(404).json({ ok: false, error: "ROTA_NAO_ENCONTRADA" });
+    }
+    res.set("Cache-Control", "no-store");
+    return res.json({ ip: req.ip, xff: req.get("x-forwarded-for") || null, xRealIp: req.get("x-real-ip") || null,
+      remote: req.socket.remoteAddress || null, edge: req.get("x-railway-edge") || null });
+  });
+}
+
 // Redireciona pra HTTPS só quando a borda (Railway) explicitamente marcou a
 // requisição como HTTP. Ausência do header x-forwarded-proto = requisição
 // direta ao container (ex.: healthcheck interno da própria Railway) — nunca
