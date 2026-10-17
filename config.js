@@ -30,6 +30,12 @@ const APP_ENV = normalizeAppEnv(process.env.APP_ENV);
 const IS_STAGING    = APP_ENV === "staging";
 const IS_PRODUCTION = APP_ENV === "production";
 
+// O SextoLugar (jogo, Encontro e administração da plataforma) está parado e
+// seus dados foram movidos para o projeto Firebase osextolugar-jogo. Os
+// módulos continuam no código, mas só carregam com GAME_ENABLED=true — e,
+// ligados, voltariam a gravar no Firestore do Espaço Prelúdio.
+const GAME_ENABLED = process.env.GAME_ENABLED === "true";
+
 const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || "";
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
 const LIVEKIT_URL        = process.env.LIVEKIT_URL        || "wss://osextolugar-eqa7q1iz.livekit.cloud";
@@ -366,7 +372,7 @@ const CORS_ALLOWED_HEADERS = [
 
 module.exports = {
   PORT,
-  APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv,
+  APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv, GAME_ENABLED,
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL,

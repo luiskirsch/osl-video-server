@@ -3,6 +3,7 @@
 const { Server } = require("socket.io");
 const admin = require("firebase-admin");
 const { logInfo, logWarn, logError } = require("../logger");
+const { GAME_ENABLED } = require("../config");
 
 // Rate limit de chat por WebSocket: 20 mensagens/minuto por uid.
 // In-memory — adequado para Railway (redeploy reseta, não há estado crítico aqui).
@@ -39,8 +40,9 @@ function initSocketIo(httpServer, allowedOrigins) {
     try {
       const decoded = await admin.auth().verifyIdToken(token);
       socket.uid = decoded.uid;
+      if (!GAME_ENABLED) return next();
 
-      // Usuários banidos não podem conectar ao socket
+      // Usuários banidos não podem conectar ao socket (moderação do jogo)
       const { isUserBanned } = require("./abuseGuard");
       const banned = await isUserBanned(decoded.uid);
       if (banned) {
@@ -59,6 +61,8 @@ function initSocketIo(httpServer, allowedOrigins) {
     // Cada usuário entra no próprio room (uid) — push apenas para ele.
     socket.join(socket.uid);
     logInfo("socket_connected", { uid: socket.uid });
+    // Daqui em diante: amigos, Encontro e chat — recursos do O SextoLugar.
+    if (!GAME_ENABLED) return;
 
     // Notifica amigos que este usuário está online
     _notifyFriendsOnline(socket.uid).catch(() => {});
@@ -138,6 +142,7 @@ function initSocketIo(httpServer, allowedOrigins) {
   });
 
   // ── World updates em tempo real ───────────────────────────────────────────
+  if (!GAME_ENABLED) return _io;
 
   const events = require("./events");
 

@@ -52,46 +52,34 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT, APP_ENV, IS_PRODUCTION, CORS_ALLOWED_HEADERS } = require("./config");
+const { PORT, APP_ENV, IS_PRODUCTION, CORS_ALLOWED_HEADERS, GAME_ENABLED } = require("./config");
 const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
 const healthRouter    = require("./routes/health");
 const i18nRouter      = require("./routes/i18n");
 const { router: stripeRouter, webhookRouter: stripeWebhookRouter } = require("./routes/stripe");
-const gameRouter      = require("./routes/game");
-const recordingRouter = require("./routes/recording");
-const streamingRouter = require("./routes/streaming");
-const discordRouter   = require("./routes/discord");
-const paymentsRouter  = require("./routes/payments");
-const licenseRouter   = require("./routes/license");
-const affiliateRouter = require("./routes/affiliate");
-const adminRouter     = require("./routes/admin");
-const aiRouter        = require("./routes/ai");
 const therapyRouter   = require("./routes/therapy");
 const clinicalPrivacyRouter = require("./routes/clinicalPrivacy")();
 const clinicalMfaRouter = require("./routes/clinicalMfa")();
-const encontroRouter  = require("./routes/encontro");
-const securityRouter  = require("./routes/security");
-const panelRouter     = require("./routes/panel");
-const ritualRouter    = require("./routes/ritual");
-const analyticsRouter  = require("./routes/analytics");
-const socialRouter     = require("./routes/social");
-const cosmeticsRouter  = require("./routes/cosmetics");
-const platformRouter   = require("./routes/platform");
-const contentRouter    = require("./routes/content");
-const sessionRouter    = require("./routes/session");
-const opsRouter        = require("./routes/ops");
-const liveRouter         = require("./routes/liveService");
-const notificationsRouter = require("./routes/notifications");
-const inviteLinksRouter  = require("./routes/inviteLinks");
-const roomsRouter           = require("./routes/rooms");
-const recurringGroupsRouter = require("./routes/recurringGroups");
-const hubRouter             = require("./routes/hub");
-const quickRitualRouter     = require("./routes/quickRitual");
-const discoveriesRouter     = require("./routes/discoveries");
 const institutionRouter     = require("./routes/institution");
 const rtRouter              = require("./routes/rt");
+
+// Módulos do O SextoLugar (ver GAME_ENABLED em config.js). Carregados sob
+// demanda: alguns iniciam timers ao serem importados (ex.: game/rooms.js).
+// [categoria de auditoria | null, módulo], na ordem original entre si.
+const GAME_ROUTERS = [
+  [null, "./routes/game"], ["recording", "./routes/recording"], [null, "./routes/streaming"],
+  [null, "./routes/discord"], ["payment", "./routes/payments"], ["license", "./routes/license"],
+  ["affiliate", "./routes/affiliate"], ["admin", "./routes/admin"], [null, "./routes/ai"],
+  ["encontro", "./routes/encontro"], [null, "./routes/security"], ["panel", "./routes/panel"],
+  ["ritual", "./routes/ritual"], [null, "./routes/analytics"], [null, "./routes/social"],
+  [null, "./routes/cosmetics"], [null, "./routes/platform"], [null, "./routes/content"],
+  [null, "./routes/session"], [null, "./routes/liveService"], [null, "./routes/notifications"],
+  [null, "./routes/inviteLinks"], [null, "./routes/rooms"], [null, "./routes/recurringGroups"],
+  [null, "./routes/hub"], [null, "./routes/quickRitual"], [null, "./routes/discoveries"],
+  ["ops", "./routes/ops"],
+];
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
@@ -260,15 +248,6 @@ app.get("/.well-known/security.txt", (req, res) => {
 // --- Montagem de rotas ---
 app.use(healthRouter);
 app.use(i18nRouter);
-app.use(gameRouter);
-app.use(auditLog("recording"), recordingRouter);
-app.use(streamingRouter);
-app.use(discordRouter);
-app.use(auditLog("payment"), paymentsRouter);
-app.use(auditLog("license"), licenseRouter);
-app.use(auditLog("affiliate"), affiliateRouter);
-app.use(auditLog("admin"), adminRouter);
-app.use(aiRouter);
 app.use(auditLog("clinical", {
   includeSuccessfulReads: true,
   matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
@@ -276,27 +255,14 @@ app.use(auditLog("clinical", {
 app.use(clinicalMfaRouter);
 app.use(clinicalPrivacyRouter);
 app.use(auditLog("therapy"), therapyRouter);
-app.use(auditLog("encontro"), encontroRouter);
-app.use(securityRouter);
-app.use(auditLog("panel"), panelRouter);
-app.use(auditLog("ritual"), ritualRouter);
-app.use(analyticsRouter);
-app.use(socialRouter);
-app.use(cosmeticsRouter);
-app.use(platformRouter);
-app.use(contentRouter);
-app.use(sessionRouter);
-app.use(liveRouter);
-app.use(notificationsRouter);
-app.use(inviteLinksRouter);
-app.use(roomsRouter);
-app.use(recurringGroupsRouter);
-app.use(hubRouter);
-app.use(quickRitualRouter);
-app.use(discoveriesRouter);
 app.use(auditLog("institution"), institutionRouter);
 app.use(auditLog("responsavel-tecnico"), rtRouter);
-app.use(auditLog("ops"), opsRouter);
+if (GAME_ENABLED) {
+  for (const [category, path] of GAME_ROUTERS) {
+    const router = require(path);
+    if (category) app.use(auditLog(category), router); else app.use(router);
+  }
+}
 
 // --- 404 ---
 app.use((req, res) => {
@@ -393,7 +359,9 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   startSchedulerLoop();
   startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
   scheduleAuditLogCleanup();
-  [
+  // Motor do jogo (EventBus): só com GAME_ENABLED — grava em salas, users,
+  // daily_ritual, world_state etc.
+  if (GAME_ENABLED) [
     ["sessionDna", sessionDna],
     ["socialGraph", socialGraph],
     ["reputation", reputation],
