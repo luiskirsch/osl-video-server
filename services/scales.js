@@ -115,8 +115,29 @@ function validateAndScore(responses, scale) {
   };
 }
 
+// Respostas item a item com o texto da pergunta e da opção, pro prontuário
+// (tela + PDF). Itens sem resposta válida vêm com value null.
+function describeResponses(scale, responses) {
+  if (!scale) return [];
+  const r = responses && typeof responses === "object" ? responses : {};
+  return scale.questions.map((q, idx) => {
+    const n = Number(r[q.id]);
+    const valid = Number.isInteger(n) && n >= 0 && n <= 3;
+    const option = valid ? scale.options.find(o => o.value === n) : null;
+    return {
+      n: idx + 1,
+      id: q.id,
+      label: q.label,
+      value: valid ? n : null,
+      valueLabel: option ? option.label : null,
+      flag: q.flag || null
+    };
+  });
+}
+
 module.exports = {
   getScale,
   listScales,
-  validateAndScore
+  validateAndScore,
+  describeResponses
 };

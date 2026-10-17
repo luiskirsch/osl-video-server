@@ -16422,15 +16422,14 @@ router.get("/therapy/escala/publica", asyncHandler(async (req, res) => {
     photoMime:   therapist.photoMime || ""
   } : null;
 
+  // Respostas já enviadas não voltam pelo link público: ele circula por
+  // e-mail/WhatsApp e o registro, depois de respondido, pertence ao prontuário.
   return res.json({
     ok: true,
     escala: {
       responseId: r.responseId,
       status: r.status,
       patientNameSnapshot: r.patientNameSnapshot || "",
-      responses: r.responses || {},
-      score: r.score,
-      band: r.band,
       respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null
     },
     scale,
@@ -16459,47 +16458,53 @@ router.post("/therapy/escala/publica/responder", asyncHandler(async (req, res) =
   const scored = scales.validateAndScore(req.body?.responses || {}, scale);
   if (!scored.ok) return sendError(res, 400, "RESPOSTAS_INVALIDAS", { detalhes: scored.errors });
 
-  const wasAlreadyAnswered = r.status === "answered";
+  // Resposta é imutável: entra no prontuário e não pode ser reescrita pelo
+  // link (CFP 1/2009 — integridade do registro). A transação fecha a corrida
+  // entre dois envios simultâneos do mesmo link.
+  const accepted = await db.runTransaction(async tx => {
+    const cur = await tx.get(ref);
+    if (cur.data()?.status === "answered") return false;
+    tx.set(ref, {
+      responses: scored.clean,
+      score: scored.score,
+      band: scored.band,
+      suicideFlag: scored.suicideFlag,
+      status: "answered",
+      respondedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    return true;
+  });
+  if (!accepted) return sendError(res, 409, "ESCALA_JA_RESPONDIDA");
 
-  await ref.set({
-    responses: scored.clean,
-    score: scored.score,
-    band: scored.band,
-    suicideFlag: scored.suicideFlag,
-    status: "answered",
-    respondedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  if (!wasAlreadyAnswered) {
-    try {
-      const therapist = await loadTherapist(r.therapistUid);
-      const therapistEmail = await resolveTherapistEmail(r.therapistUid, therapist);
-      if (therapistEmail) {
-        const tpl = templateEscalaRespondida({
-          therapistName: therapist?.displayName || "Profissional",
-          patientName: r.patientNameSnapshot || "Paciente",
-          scaleName: scale.name,
-          score: scored.score,
-          bandLabel: scored.band?.label || "—",
-          suicideAlert: scored.suicideFlag,
-          painelUrl: buildPainelUrl()
-        });
-        sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
-          logError("escala_notify_email_failed", e, { responseId: r.responseId })
-        );
-      }
-
-      // Push pro terapeuta (idem anamnese — fire-and-forget)
-      pushToTherapist(r.therapistUid, {
-        title: scored.suicideFlag ? "⚠ Alerta clínico" : "Escala respondida",
-        body: `${r.patientNameSnapshot || "Paciente"} respondeu ${scale.name} — score ${scored.score} (${scored.band?.label || "—"})`,
-        url: r.patientId ? `/pacientes.html` : "/painel.html",
-        tag: scored.suicideFlag ? "escala-alerta" : "escala-respondida"
-      }).catch(e => logError("push_escala_failed", e, { responseId: r.responseId }));
-    } catch (e) {
-      logError("escala_notify_failed", e, { responseId: r.responseId });
+  try {
+    const therapist = await loadTherapist(r.therapistUid);
+    const therapistEmail = await resolveTherapistEmail(r.therapistUid, therapist);
+    if (therapistEmail) {
+      const tpl = templateEscalaRespondida({
+        therapistName: therapist?.displayName || "Profissional",
+        patientName: r.patientNameSnapshot || "Paciente",
+        scaleName: scale.name,
+        score: scored.score,
+        bandLabel: scored.band?.label || "—",
+        suicideAlert: scored.suicideFlag,
+        painelUrl: buildPainelUrl()
+      });
+      sendEmail({ to: therapistEmail, ...tpl }).catch(e =>
+        logError("escala_notify_email_failed", e, { responseId: r.responseId })
+      );
     }
+
+    // Push pro terapeuta (idem anamnese — fire-and-forget). Abre direto o
+    // prontuário, onde ficam as respostas item a item.
+    pushToTherapist(r.therapistUid, {
+      title: scored.suicideFlag ? "⚠ Alerta clínico" : "Escala respondida",
+      body: `${r.patientNameSnapshot || "Paciente"} respondeu ${scale.name} — score ${scored.score} (${scored.band?.label || "—"})`,
+      url: r.patientId ? `/prontuario.html?p=${encodeURIComponent(r.patientId)}` : "/painel.html",
+      tag: scored.suicideFlag ? "escala-alerta" : "escala-respondida"
+    }).catch(e => logError("push_escala_failed", e, { responseId: r.responseId }));
+  } catch (e) {
+    logError("escala_notify_failed", e, { responseId: r.responseId });
   }
 
   await logAudit({
@@ -16509,8 +16514,7 @@ router.post("/therapy/escala/publica/responder", asyncHandler(async (req, res) =
     patientId: r.patientId || null,
     scaleType: r.scaleType,
     score: scored.score,
-    suicideFlag: scored.suicideFlag,
-    resubmission: wasAlreadyAnswered
+    suicideFlag: scored.suicideFlag
   });
 
   return res.json({ ok: true, score: scored.score, band: scored.band });
@@ -16531,6 +16535,7 @@ router.get("/therapy/escalas", asyncHandler(async (req, res) => {
   const snap = await q.limit(500).get();
   const items = snap.docs.map(d => {
     const r = d.data();
+    const answered = r.status === "answered";
     return {
       responseId: r.responseId,
       patientId: r.patientId || null,
@@ -16541,6 +16546,9 @@ router.get("/therapy/escalas", asyncHandler(async (req, res) => {
       score: r.score,
       band: r.band,
       suicideFlag: !!r.suicideFlag,
+      // Respostas item a item (texto da pergunta + opção marcada) — só pra
+      // escala respondida; o dono já foi garantido pelo filtro therapistUid.
+      items: answered ? scales.describeResponses(scales.getScale(r.scaleType), r.responses) : [],
       createdAt: r.createdAt?.toMillis ? r.createdAt.toMillis() : null,
       respondedAt: r.respondedAt?.toMillis ? r.respondedAt.toMillis() : null
     };
