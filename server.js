@@ -186,17 +186,15 @@ app.use((req, res, next) => {
 });
 
 // CORS restrito (security fix #8)
+// Só o Espaço Prelúdio. Os sites do O SextoLugar (preludiojogos.*,
+// luiskirsch.github.io) saíram com o jogo; GAME_ENABLED não os reativa.
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://preludiojogos.com",
-  "https://www.preludiojogos.com",
-  "https://preludiojogos.com.br",
-  "https://www.preludiojogos.com.br",
   "https://espacopreludio.com.br",
   "https://www.espacopreludio.com.br",
-  "https://luiskirsch.github.io",
   "http://localhost:3000",
   "http://localhost:8080",
   "http://localhost:5173",
+  "https://api.espacopreludio.com.br",
   "https://osl-video-server-production.up.railway.app"
 ];
 const configuredAllowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || "")
