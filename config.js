@@ -313,6 +313,8 @@ const THERAPY_MIN_CANCEL_HOURS_PATIENT = envNumber("THERAPY_MIN_CANCEL_HOURS_PAT
 // degrada silenciosamente sem quebrar criação de sessão.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const EMAIL_FROM     = process.env.EMAIL_FROM     || "Espaço Prelúdio <agendas@espacopreludio.com.br>";
+// Remetente dos e-mails de conta (senha, confirmação de e-mail).
+const ACCOUNT_EMAIL_FROM = process.env.ACCOUNT_EMAIL_FROM || "Espaço Prelúdio <conta@espacopreludio.com.br>";
 // Janela do cron de lembretes: lookahead em horas (procura sessões cujo
 // scheduledAt cai entre now+lookahead-1h e now+lookahead). 24h por default;
 // 1h de janela permite que o cron rode 1×/h sem perder eventos.
@@ -401,7 +403,7 @@ module.exports = {
   THERAPY_TRIAL_DAYS, THERAPY_TRIAL_DAYS_PROFISSIONAL, THERAPY_TRIAL_DAYS_RECEM_FORMADO,
   THERAPY_FRONTEND_BASE,
   THERAPY_MIN_CANCEL_HOURS_PATIENT,
-  RESEND_API_KEY, EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
+  RESEND_API_KEY, EMAIL_FROM, ACCOUNT_EMAIL_FROM, REMINDER_LOOKAHEAD_HOURS,
   ZAPI_INSTANCE_ID, ZAPI_CLIENT_TOKEN, ZAPI_SECURITY_TOKEN, ZAPI_BASE_URL,
   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID,
   DISCORD_REDIRECT_URI, DISCORD_ROLE_BUYER_ID, DISCORD_ROLE_AFFILIATE_ID, DISCORD_API_BASE

@@ -56,7 +56,7 @@ function describeWhenPtBR(scheduledAt) {
   return `em ${days} dias`;
 }
 
-async function sendEmail({ to, subject, html, text, replyTo, locale }) {
+async function sendEmail({ to, subject, html, text, replyTo, locale, from = EMAIL_FROM }) {
   if (!RESEND_API_KEY) {
     logWarn("email_skipped_no_api_key", { to, subject });
     return { ok: false, skipped: true };
@@ -75,7 +75,7 @@ async function sendEmail({ to, subject, html, text, replyTo, locale }) {
   ({ subject, html, text } = localizeMessage({ subject, html, text }, lang));
   if (lang !== "pt-BR" && html) html = html.replace(/<html lang="pt-BR"/i, `<html lang="${lang}"`);
 
-  const payload = { from: EMAIL_FROM, to, subject, html, text };
+  const payload = { from, to, subject, html, text };
   if (replyTo) payload.reply_to = replyTo;
 
   try {
@@ -667,6 +667,44 @@ function templateClinicInvite({ ownerName, clinicName, invitedEmail, repasseRule
   return { subject, html, text };
 }
 
+// E-mails de conta: enviados por nós (não pelo Firebase), com link para
+// conta-acao.html no site. O código do link é de uso único.
+function accountButton(url, label) {
+  return `<p style="margin:24px 0;"><a href="${escHtml(url)}" style="display:inline-block; background:#2d4a3e; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">${escHtml(label)}</a></p>
+      <p style="margin:0 0 14px; font-size:13px; color:rgba(28,31,29,0.65);">Se o botão não funcionar, copie e cole este endereço no navegador:<br><span style="word-break:break-all;">${escHtml(url)}</span></p>`;
+}
+
+function templateAccountPasswordReset({ email, actionUrl }) {
+  const subject = "Redefinição de senha do Espaço Prelúdio";
+  const html = renderShell({
+    heading: "Redefinir sua senha",
+    bodyHtml: `
+      <p style="margin:0 0 14px;">Olá,</p>
+      <p style="margin:0 0 14px;">Recebemos um pedido para redefinir a senha da conta <strong>${escHtml(email)}</strong> no Espaço Prelúdio.</p>
+      ${accountButton(actionUrl, "Criar nova senha")}
+      <p style="margin:0; font-size:13px; color:rgba(28,31,29,0.65);">O link vale por 1 hora e só pode ser usado uma vez. Se a sua conta guarda anotações cifradas, depois de trocar a senha você vai precisar da sua chave-semente.</p>
+    `,
+    footer: "Se você não pediu a redefinição, ignore este e-mail: sua senha continua a mesma."
+  });
+  const text = `Recebemos um pedido para redefinir a senha da conta ${email} no Espaço Prelúdio.\n\nCriar nova senha: ${actionUrl}\n\nO link vale por 1 hora e só pode ser usado uma vez. Se você não pediu, ignore este e-mail.\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
+function templateAccountVerifyEmail({ email, actionUrl }) {
+  const subject = "Confirme seu e-mail no Espaço Prelúdio";
+  const html = renderShell({
+    heading: "Confirme seu e-mail",
+    bodyHtml: `
+      <p style="margin:0 0 14px;">Olá,</p>
+      <p style="margin:0 0 14px;">Confirme o endereço <strong>${escHtml(email)}</strong> para concluir seu cadastro no Espaço Prelúdio.</p>
+      ${accountButton(actionUrl, "Confirmar meu e-mail")}
+    `,
+    footer: "Se você não criou uma conta no Espaço Prelúdio, ignore este e-mail."
+  });
+  const text = `Confirme o endereço ${email} para concluir seu cadastro no Espaço Prelúdio.\n\nConfirmar meu e-mail: ${actionUrl}\n\nSe você não criou uma conta, ignore este e-mail.\n\nEspaço Prelúdio`;
+  return { subject, html, text };
+}
+
 function templateStudentSessionRequest({ studentName, studentEmail, programName, schoolName, therapistName, painelUrl }) {
   const subject = `Aluno solicita nova consulta — ${studentName}`;
   const html = renderShell({
@@ -710,6 +748,8 @@ module.exports = {
   templateFormacaoRejected,
   templateStudentExpired,
   templateClinicInvite,
+  templateAccountPasswordReset,
+  templateAccountVerifyEmail,
   templateStudentSessionRequest,
   templateStudentLeadReceived,
   templateInstitutionLeadReceived,

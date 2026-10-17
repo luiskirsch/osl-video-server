@@ -62,6 +62,7 @@ const { router: stripeRouter, webhookRouter: stripeWebhookRouter } = require("./
 const therapyRouter   = require("./routes/therapy");
 const clinicalPrivacyRouter = require("./routes/clinicalPrivacy")();
 const clinicalMfaRouter = require("./routes/clinicalMfa")();
+const accountRouter         = require("./routes/account")();
 const institutionRouter     = require("./routes/institution");
 const rtRouter              = require("./routes/rt");
 
@@ -248,6 +249,7 @@ app.get("/.well-known/security.txt", (req, res) => {
 // --- Montagem de rotas ---
 app.use(healthRouter);
 app.use(i18nRouter);
+app.use(auditLog("conta", { matches: req => /^\/conta\//i.test(req.path) }), accountRouter);
 app.use(auditLog("clinical", {
   includeSuccessfulReads: true,
   matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
