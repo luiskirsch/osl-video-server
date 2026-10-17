@@ -60,7 +60,7 @@ function readLogTail(maxBytes = 512 * 1024) {
 router.get("/", (req, res) => {
   return res.status(200).json({
     ok: true,
-    service: "osl-video-server",
+    service: "espaco-preludio-api",
     message: "Servidor do O SextoLugar está online.",
     appEnv: APP_ENV,
     port: PORT
@@ -76,7 +76,7 @@ router.get("/health", (req, res) => {
   const privileged = checkPanelToken(req);
   return res.status(200).json({
     ok: true,
-    service: "osl-video-server",
+    service: "espaco-preludio-api",
     appEnv: APP_ENV,
     uptimeSec: Math.round(process.uptime()),
     startedAt: new Date(APP_START_TIME).toISOString(),
