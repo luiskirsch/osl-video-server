@@ -15,7 +15,7 @@ function config() {
   return {
     clientId: process.env.MP_CLIENT_ID_THERAPY || "",
     clientSecret: process.env.MP_CLIENT_SECRET_THERAPY || "",
-    backendBase: process.env.BACKEND_BASE_URL || "https://osl-video-server-production.up.railway.app"
+    backendBase: process.env.BACKEND_BASE_URL || "https://api.espacopreludio.com.br"
   };
 }
 

@@ -87,7 +87,7 @@ const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || "";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-const BACKEND_BASE_URL  = process.env.BACKEND_BASE_URL  || "https://osl-video-server-production.up.railway.app";
+const BACKEND_BASE_URL  = process.env.BACKEND_BASE_URL  || "https://api.espacopreludio.com.br";
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "https://preludiojogos.com";
 
 const PRODUCT_ID       = "osl_ritual_completo";
