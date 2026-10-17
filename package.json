@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",
+    "@aws-sdk/client-s3": "^3.1152.0",
     "@huggingface/transformers": "^4.3.0",
     "@sentry/node": "^10.75.0",
     "bcrypt": "^6.0.0",

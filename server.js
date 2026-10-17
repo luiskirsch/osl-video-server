@@ -354,6 +354,8 @@ app.use((err, req, res, next) => {
 // --- Startup ---
 const { startCleanupLoop, stopCleanupLoop } = require("./services/cleanup");
 const { startSchedulerLoop, stopSchedulerLoop } = require("./services/scheduler");
+const { startBackupLoop, stopBackupLoop } = require("./services/backup");
+const { getDb: getFirestoreDb, getStorageBucket } = require("./services/firestore");
 const sessionDna   = require("./services/sessionDna");
 const socialGraph  = require("./services/socialGraph");
 const reputation   = require("./services/reputation");
@@ -389,6 +391,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
   startCleanupLoop();
   startSchedulerLoop();
+  startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
   scheduleAuditLogCleanup();
   [
     ["sessionDna", sessionDna],
@@ -432,6 +435,7 @@ async function shutdown(signal) {
   logWarn("shutdown_started", { signal });
   stopCleanupLoop();
   stopSchedulerLoop();
+  stopBackupLoop();
   recurringGroups.stop();
 
   await gracefullyStopAllEgress();
