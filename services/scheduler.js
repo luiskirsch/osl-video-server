@@ -11,7 +11,7 @@
 const admin = require("firebase-admin");
 const { logInfo, logWarn, logError } = require("../logger");
 const { getDb } = require("./firestore");
-const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET } = require("../config");
+const { REMINDER_LOOKAHEAD_HOURS, ACCESS_TOKEN_SECRET, RESEND_API_KEY } = require("../config");
 const { signPayload } = require("./auth");
 const { localeForEmail } = require("./user-locale");
 const { translateText } = require("./server-i18n");
@@ -132,7 +132,9 @@ async function runReminderTick() {
           joinUrl, cancelUrl, confirmUrl
         });
         const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
-        if (result.ok || result.skipped) {
+        // "skipped" = e-mail não configurado nesta instância: NÃO conta como
+        // enviado, senão outra instância (com e-mail) deixaria de enviar.
+        if (result.ok) {
           await doc.ref.set({ emailReminderSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
           sent++;
           anySent = true;
@@ -276,7 +278,7 @@ async function runReminder1hTick() {
           joinUrl, cancelUrl, confirmUrl
         });
         const result = await sendEmail({ to: s.patientEmail, replyTo: s.therapistEmail || undefined, ...tpl });
-        if (result.ok || result.skipped) {
+        if (result.ok) { // "skipped" não conta como enviado (ver lembrete de 24h)
           await doc.ref.set({ emailReminder1hSentAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
           sent++;
           anySent = true;
@@ -506,8 +508,13 @@ async function runNpsTick() {
         npsUrl
       });
       const r = await sendEmail({ to: s.patientEmail, ...tpl });
-      if (r.ok || r.skipped) sent++;
-      else errors++;
+      if (r.ok) sent++;
+      else {
+        // Libera a marcação feita antes do envio: sem e-mail aqui ("skipped") ou
+        // falha, outra tentativa/instância ainda pode enviar a pesquisa.
+        await doc.ref.set({ npsSentAt: admin.firestore.FieldValue.delete() }, { merge: true }).catch(() => {});
+        if (!r.skipped) errors++;
+      }
     } catch (e) {
       logError("nps_email_failed", e, { sessionId: s.sessionId });
       errors++;
@@ -585,7 +592,7 @@ async function runBirthdayTick() {
         clinicName
       });
       const r = await sendEmail({ to: o.patientEmail, ...tpl });
-      if (r.ok || r.skipped) {
+      if (r.ok) { // "skipped" não conta como enviado
         await doc.ref.set({
           lastSentAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
@@ -792,6 +799,12 @@ function startJoinPushLoop() {
 
 function startSchedulerLoop() {
   if (timer || startupTimer) return;
+  // Sem e-mail configurado esta instância não entrega nada, e disputaria os
+  // lembretes com a instância que entrega (ex.: cópia antiga do backend).
+  if (!RESEND_API_KEY) {
+    logWarn("scheduler_desativado_sem_email", {});
+    return;
+  }
   startJoinPushLoop();
   // Primeiro tick depois de 1min (evita bater no startup do Firebase Admin).
   startupTimer = setTimeout(() => {
