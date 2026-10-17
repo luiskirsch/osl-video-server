@@ -226,7 +226,7 @@ const geoLookupLimiter = rateLimit({
 });
 
 router.get("/therapy/geo", geoLookupLimiter, (req, res) => {
-  const ip = String(req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+  const ip = String(req.ip || "").trim();
   const geo = geoipCountry.lookup(ip);
   return res.json({ ok: true, country: geo?.country || null });
 });
@@ -843,7 +843,7 @@ router.post("/therapy/profissional/registrar", asyncHandler(async (req, res) => 
   await logAudit({
     type: "therapist_registered",
     therapistUid: uid,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({
@@ -898,7 +898,7 @@ router.post("/therapy/profissional/recuperar", asyncHandler(async (req, res) => 
   await logAudit({
     type: "therapist_recovered",
     therapistUid: uid,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({ ok: true });
@@ -1208,7 +1208,7 @@ router.post("/therapy/profissional/comprovante-estudante", asyncHandler(async (r
     decision: result.decision,
     confidence: result.confidence,
     fileHash,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   // Retorna resultado pro frontend
@@ -1397,7 +1397,7 @@ router.post("/therapy/profissional/comprovante-recem-formado", asyncHandler(asyn
     decision: result.decision,
     confidence: result.confidence,
     fileHash,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({
@@ -1541,7 +1541,7 @@ router.post("/therapy/profissional/comprovante-formacao", asyncHandler(async (re
     therapistUid: uid,
     uploadId,
     fileHash,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({
@@ -3013,7 +3013,7 @@ router.post("/therapy/sessao/join", asyncHandler(async (req, res) => {
     sessionId: payload.sessionId,
     patientName: finalName,
     patientAccountUid: patientAccountUid || null,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({
@@ -5328,7 +5328,7 @@ router.post("/therapy/paciente/registrar", asyncHandler(async (req, res) => {
   await logAudit({
     type: "patient_account_registered",
     patientAccountUid: uid,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   // Auto-link retroativo de sessões anteriores criadas com o email deste
@@ -5439,7 +5439,7 @@ router.post("/therapy/paciente/recuperar", asyncHandler(async (req, res) => {
   await logAudit({
     type: "patient_account_recovered",
     patientAccountUid: uid,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({ ok: true });
@@ -6214,7 +6214,7 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
   await logAudit({
     type: "receita_publica_access",
     receitaId: r.receitaId,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   // Devolve metadados + PDF base64 + dados do médico pra renderizar
@@ -6611,7 +6611,7 @@ router.get("/therapy/documento/publica", asyncHandler(async (req, res) => {
     type: "documento_publica_access",
     documentoId: d.documentoId,
     tipo: d.tipo,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   const therapist = await loadTherapist(d.therapistUid);
@@ -6789,7 +6789,7 @@ router.post("/therapy/receita/dispensar", asyncHandler(async (req, res) => {
         quantidade,
         dispensadoAtMs: Date.now(),
         dispensadoAt: admin.firestore.FieldValue.serverTimestamp(),
-        ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null,
+        ip: req.ip || null,
         userAgent: String(req.headers["user-agent"] || "").slice(0, 200)
       });
 
@@ -6826,7 +6826,7 @@ router.post("/therapy/receita/dispensar", asyncHandler(async (req, res) => {
     farmaciaCNPJ: farmaciaCNPJraw,
     quantidade,
     novoTotal: resultPayload.novoTotal,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   // Notificação por e-mail ao psiquiatra prescritor (fire-and-forget).
@@ -10916,7 +10916,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
 
   // Cria a solicitação.
   const requestId = newId("scrq");
-  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipRaw = String(req.ip || "").trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
   const expiresAt = Date.now() + SCHEDULING_REQUEST_TTL_DAYS * 24 * 60 * 60 * 1000;
   const schoolContext = patientAuth
@@ -11500,7 +11500,7 @@ router.post("/public/leads/estudante", publicStudentLeadLimiter, asyncHandler(as
   const message     = String(req.body?.message || "").trim().slice(0, STUDENT_LEAD_MESSAGE_MAX);
 
   const leadId = newId("stlead");
-  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipRaw = String(req.ip || "").trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
 
   await getDb().collection("therapy_student_leads").doc(leadId).set({
@@ -11577,7 +11577,7 @@ router.post("/public/leads/instituicao", publicInstitutionLeadLimiter, asyncHand
   if (Number.isNaN(students)) return sendError(res, 400, "QUANTIDADE_ALUNOS_INVALIDA");
 
   const leadId = newId("inlead");
-  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipRaw = String(req.ip || "").trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex").slice(0, 16) : null;
 
   await getDb().collection("therapy_institution_leads").doc(leadId).set({
@@ -14157,7 +14157,7 @@ router.post("/therapy/webhook/zapi", asyncHandler(async (req, res) => {
       } catch { tokenOk = false; }
     }
     if (!tokenOk) {
-      logWarn("zapi_webhook_token_invalido", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress });
+      logWarn("zapi_webhook_token_invalido", { ip: req.ip });
       return res.status(401).json({ ok: false });
     }
   }
@@ -14390,7 +14390,7 @@ router.post("/webhooks/asaas/financeiro", asyncHandler(async (req, res) => {
     } catch { tokenOk = false; }
   }
   if (!tokenOk) {
-    logWarn("asaas_webhook_token_invalido", { ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress });
+    logWarn("asaas_webhook_token_invalido", { ip: req.ip });
     return res.status(401).json({ ok: false });
   }
 
@@ -19292,7 +19292,7 @@ router.post("/public/aluno-consentimento/:token", publicStudentConsentLimiter, a
     return res.json({ ok: true, alreadyConfirmed: true, nome: data.nome, status: data.status });
   }
 
-  const ipRaw = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const ipRaw = String(req.ip || "").trim();
   const ipHash = ipRaw ? crypto.createHash("sha256").update(ipRaw).digest("hex") : null;
 
   if (onboarding.value.decision === "declined") {
@@ -21595,7 +21595,7 @@ router.post("/therapy/paciente/sessoes/:sessionId/livekit-token", asyncHandler(a
     type: "patient_joined_native",
     sessionId,
     patientAccountUid: uid,
-    ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null
+    ip: req.ip || null
   });
 
   return res.json({

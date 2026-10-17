@@ -6,19 +6,23 @@ const rateLimit = require("express-rate-limit");
 const { logWarn } = require("../logger");
 const { safeRequestPath } = require("../utils");
 
-// Railway appende o IP real do cliente como o último valor no XFF.
-// O cliente só pode injetar valores à ESQUERDA (início), nunca à direita.
-// Usar o valor mais à direita é sempre o IP real — imune a XFF spoofing.
+// IP real do cliente = req.ip, resolvido pelo Express com "trust proxy" (ver
+// server.js). O último valor do X-Forwarded-For é o proxy interno do
+// Railway, não o cliente: usá-lo juntava todos os usuários no mesmo limite.
 function getRealIp(req) {
-  const xff = req.headers["x-forwarded-for"];
-  if (xff) return xff.split(",").pop().trim() || req.socket?.remoteAddress || "unknown";
-  return req.socket?.remoteAddress || "unknown";
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+// Chave de limite por IP: IPv6 agrupado na faixa /56 (ipKeyGenerator), para que
+// trocar de endereço dentro da mesma conexão não escape do limite.
+function ipKey(req) {
+  return rateLimit.ipKeyGenerator(getRealIp(req));
 }
 
 function makeHandler(errorCode) {
   return (req, res) => {
     logWarn("rate_limit_hit", {
-      ip: req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null,
+      ip: getRealIp(req),
       path: safeRequestPath(req),
       uid: req.firebaseUid || null,
       errorCode,
@@ -31,7 +35,7 @@ function makeHandler(errorCode) {
 const globalLimiter = rateLimit({
   windowMs: 60_000,
   limit: 300,
-  keyGenerator: getRealIp,
+  keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -41,7 +45,7 @@ const globalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 5 * 60_000,
   limit: 20,
-  keyGenerator: getRealIp,
+  keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("MUITAS_TENTATIVAS"),
@@ -51,7 +55,7 @@ const authLimiter = rateLimit({
 const voteLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 120,
-  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
+  keyGenerator: (req) => req.firebaseUid || ipKey(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("VOTOS_EXCEDIDOS"),
@@ -61,7 +65,7 @@ const voteLimiter = rateLimit({
 const photoLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
-  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
+  keyGenerator: (req) => req.firebaseUid || ipKey(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -71,7 +75,7 @@ const photoLimiter = rateLimit({
 const reportLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 10,
-  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
+  keyGenerator: (req) => req.firebaseUid || ipKey(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("DENUNCIAS_EXCEDIDAS"),
@@ -81,7 +85,7 @@ const reportLimiter = rateLimit({
 const roomLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 20,
-  keyGenerator: getRealIp,
+  keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -91,7 +95,7 @@ const roomLimiter = rateLimit({
 const panelLoginLimiter = rateLimit({
   windowMs: 15 * 60_000,
   limit: 5,
-  keyGenerator: getRealIp,
+  keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("MUITAS_TENTATIVAS_DE_LOGIN"),
@@ -101,7 +105,7 @@ const panelLoginLimiter = rateLimit({
 const joinLimiter = rateLimit({
   windowMs: 60_000,
   limit: 60,
-  keyGenerator: getRealIp,
+  keyGenerator: ipKey,
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -111,7 +115,7 @@ const joinLimiter = rateLimit({
 const sessaoCriarLimiter = rateLimit({
   windowMs: 60 * 60_000,
   limit: 30,
-  keyGenerator: (req) => req.firebaseUid || getRealIp(req),
+  keyGenerator: (req) => req.firebaseUid || ipKey(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("SESSOES_LIMITE_EXCEDIDO"),

@@ -98,30 +98,17 @@ checkSecrets({ exitOnError: false });
 const app = express();
 
 app.disable("x-powered-by");
-// trust proxy: 1 — confiar em exatamente 1 hop (Railway).
-// Com "true", Express usa o IP mais à esquerda do XFF (controlado pelo cliente),
-// o que permite bypassar rate limiting via X-Forwarded-For spoofing.
-// Com 1, Express usa o penúltimo valor que Railway inseriu = IP real do cliente.
-const trustedProxyHopsRaw = Number(process.env.TRUST_PROXY_HOPS || (IS_PRODUCTION ? 1 : 0));
+// trust proxy: 2 — medido em produção (2026-10-17): o Railway entrega
+// X-Forwarded-For = "<cliente>, <proxy interno do Railway>" e o socket vem de
+// 100.64.x. Ele DESCARTA o X-Forwarded-For enviado pelo cliente e sobrescreve
+// X-Real-IP, então o penúltimo valor é sempre o IP real. Com 1, todo usuário
+// aparecia com o IP do proxy (limites por IP compartilhados por todos e
+// registros de acesso sem o IP real). Nunca usar "true" (IP mais à esquerda).
+const trustedProxyHopsRaw = Number(process.env.TRUST_PROXY_HOPS || (IS_PRODUCTION ? 2 : 0));
 const trustedProxyHops = Number.isSafeInteger(trustedProxyHopsRaw) && trustedProxyHopsRaw >= 0 && trustedProxyHopsRaw <= 5
   ? trustedProxyHopsRaw
-  : (IS_PRODUCTION ? 1 : 0);
+  : (IS_PRODUCTION ? 2 : 0);
 app.set("trust proxy", trustedProxyHops);
-
-// Diagnóstico TEMPORÁRIO da cadeia de proxies do Railway (IP real do cliente).
-// Só existe com IP_DIAG_TOKEN definido e exige o token no cabeçalho.
-if (process.env.IP_DIAG_TOKEN) {
-  app.get("/health/ip-diag", (req, res) => {
-    const expected = Buffer.from(String(process.env.IP_DIAG_TOKEN));
-    const sent = Buffer.from(String(req.get("x-ep-diag") || ""));
-    if (sent.length !== expected.length || !require("node:crypto").timingSafeEqual(sent, expected)) {
-      return res.status(404).json({ ok: false, error: "ROTA_NAO_ENCONTRADA" });
-    }
-    res.set("Cache-Control", "no-store");
-    return res.json({ ip: req.ip, xff: req.get("x-forwarded-for") || null, xRealIp: req.get("x-real-ip") || null,
-      remote: req.socket.remoteAddress || null, edge: req.get("x-railway-edge") || null });
-  });
-}
 
 // Redireciona pra HTTPS só quando a borda (Railway) explicitamente marcou a
 // requisição como HTTP. Ausência do header x-forwarded-proto = requisição
