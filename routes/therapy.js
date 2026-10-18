@@ -78,6 +78,7 @@ const {
   isTherapySessionOverdue,
   selectTherapyPanelSessions
 } = require("../services/therapy-session-state");
+const { APPOINTMENT_TYPES, PAYMENT_TYPES, validDuration, appointmentDuration, sessionPaymentType, overlaps, weeklyWindows } = require("../services/appointment-settings");
 const studentDevelopment = require("../services/student-development");
 const privateFiles = require("../services/private-files");
 const corporateDevelopment = require("../services/corporate-development");
@@ -1821,7 +1822,19 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     if (cfg.startHour !== undefined && cfg.endHour !== undefined && cfg.endHour <= cfg.startHour) {
       return sendError(res, 400, "AGENDA_CONFIG_INVALIDO", { hint: "endHour deve ser > startHour" });
     }
-    if (Object.keys(cfg).length) updates.agendaConfig = cfg;
+    if (ac.appointmentDurations !== undefined) {
+      if (!ac.appointmentDurations || typeof ac.appointmentDurations !== "object" || Array.isArray(ac.appointmentDurations)) return sendError(res, 400, "AGENDA_CONFIG_INVALIDO");
+      cfg.appointmentDurations = {};
+      for (const type of ["initial", "return", "follow_up"]) {
+        const minutes = ac.appointmentDurations[type];
+        if (minutes === undefined) continue;
+        if (!validDuration(minutes)) return sendError(res, 400, "DURACAO_CONSULTA_INVALIDA");
+        cfg.appointmentDurations[type] = minutes;
+      }
+    }
+    if (Object.keys(cfg).length) updates.agendaConfig = { ...(therapist.agendaConfig || {}), ...cfg,
+      ...(cfg.appointmentDurations ? { appointmentDurations: { ...therapist.agendaConfig?.appointmentDurations, ...cfg.appointmentDurations } } : {})
+    };
   }
 
   // Configuração de agendamento público (auto-scheduling via link público).
@@ -2107,9 +2120,13 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
   const patientPhone = patientPhoneNorm.length >= 12 ? patientPhoneNorm : null;
   const scheduledAtRaw = Number(req.body?.scheduledAt || 0);
   const scheduledAt = Number.isFinite(scheduledAtRaw) && scheduledAtRaw > 0 ? scheduledAtRaw : null;
-  const durationMinutes = therapySessionDurationMinutes({
-    durationMinutes: therapist?.agendaConfig?.slotMinutes
-  });
+  const appointmentType = req.body?.appointmentType ?? "standard";
+  const paymentType = req.body?.paymentType ?? "unspecified";
+  if (!APPOINTMENT_TYPES.includes(appointmentType)) return sendError(res, 400, "TIPO_CONSULTA_INVALIDO");
+  if (!PAYMENT_TYPES.includes(paymentType)) return sendError(res, 400, "TIPO_PAGAMENTO_INVALIDO");
+  let durationMinutes;
+  try { durationMinutes = appointmentDuration(therapist.agendaConfig, appointmentType, req.body?.durationMinutes); }
+  catch (error) { return sendError(res, 400, error.message); }
 
   const recurrenceWeekly = Number(req.body?.recurrence?.weekly || 1);
   const isRecurring = recurrenceWeekly >= 2;
@@ -2195,6 +2212,8 @@ router.post("/therapy/sessao/criar", sessaoCriarLimiter, asyncHandler(async (req
       e2eeKey,
       scheduledAt: at,
       durationMinutes,
+      appointmentType,
+      paymentType: isInstitutionalProfessional(therapist) ? "unspecified" : paymentType,
       status: "scheduled",
       ...(chargeAmountCents ? { patientCharge: { amountCents: chargeAmountCents, status: "pending", createdAt: Date.now() } } : {}),
       joinTokenExp,
@@ -2391,6 +2410,8 @@ function therapyPanelSessionSummary(data, now = Date.now()) {
     patientId: data.patientId || null,
     scheduledAt: data.scheduledAt,
     durationMinutes: therapySessionDurationMinutes(data),
+    appointmentType: data.appointmentType || "standard",
+    paymentType: sessionPaymentType(data),
     overdueAt: therapySessionOverdueAt(data),
     timingState: overdue ? "overdue" : null,
     status: data.status,
@@ -2442,6 +2463,8 @@ router.get("/therapy/sessoes", asyncHandler(async (req, res) => {
         status: data.status,
         scheduledAt: data.scheduledAt || null,
         durationMinutes: therapySessionDurationMinutes(data),
+        appointmentType: data.appointmentType || "standard",
+        paymentType: sessionPaymentType(data),
         overdueAt: therapySessionOverdueAt(data),
         timingState: isTherapySessionOverdue(data) ? "overdue" : null,
         livekitRoom: data.livekitRoom,
@@ -4827,7 +4850,7 @@ router.get("/therapy/agenda/feed.ics", asyncHandler(async (req, res) => {
     if (at > horizonEnd) continue;
     if (at < now - 7 * 24 * 60 * 60 * 1000) continue; // 7 dias de cauda histórica
     const start = at;
-    const end   = at + 50 * 60 * 1000; // 50min default (padrão clínico)
+    const end   = at + therapySessionDurationMinutes(s) * 60 * 1000;
     const cancelled = s.status === "canceled";
     lines.push("BEGIN:VEVENT");
     lines.push(`UID:sess-${s.sessionId}@espacopreludio.com.br`);
@@ -10113,12 +10136,13 @@ function summarizeTherapistForPublicScheduling(therapist) {
 // Computa slots livres entre [fromMs, toMs] aplicando agendaConfig + sessões
 // existentes + blackouts + solicitações pendentes (que ainda não viraram
 // sessões mas já bloqueiam o slot pra evitar overbooking).
-async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) {
+async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs, appointmentType = "standard" }) {
   const cfg = therapist.agendaConfig || {};
   const startHour   = Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8;
   const endHour     = Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21;
-  const slotMinutes = Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50;
+  const slotMinutes = appointmentDuration({ slotMinutes: 50, ...cfg }, appointmentType);
   const slotMs = slotMinutes * 60 * 1000;
+  const stepMinutes = appointmentType === "standard" ? slotMinutes : (slotMinutes % 10 === 0 ? 10 : 5);
 
   const minNoticeHours = Number.isFinite(therapist.publicSchedulingMinNoticeHours)
     ? therapist.publicSchedulingMinNoticeHours
@@ -10137,7 +10161,7 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   // Query simples por therapistUid; filtro de janela aplicado em memória.
   const [sessionsSnap, blackoutsSnap, pendingSnap] = await Promise.all([
     db.collection("therapy_sessions").where("therapistUid", "==", therapistUid).get(),
-    db.collection("therapy_agenda_blackouts").where("therapistUid", "==", therapistUid).get(),
+    db.collection("therapy_blackouts").where("therapistUid", "==", therapistUid).get(),
     db.collection("therapy_scheduling_requests")
       .where("therapistUid", "==", therapistUid)
       .where("status", "==", "pending").get()
@@ -10146,14 +10170,15 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   const busyRanges = [];
   sessionsSnap.forEach(d => {
     const s = d.data();
-    if (s.status === "canceled") return;
+    if (["canceled", "cancelled"].includes(s.status)) return;
     if (!s.scheduledAt) return;
-    busyRanges.push({ start: s.scheduledAt, end: s.scheduledAt + slotMs });
+    const start = therapyTimestampMillis(s.scheduledAt);
+    if (start) busyRanges.push({ start, end: start + therapySessionDurationMinutes(s) * 60 * 1000 });
   });
   blackoutsSnap.forEach(d => {
     const b = d.data();
-    if (!b.startAt || !b.endAt) return;
-    busyRanges.push({ start: b.startAt, end: b.endAt });
+    if (!b.from || !b.to) return;
+    busyRanges.push({ start: b.from, end: b.to });
   });
   pendingSnap.forEach(d => {
     const r = d.data();
@@ -10164,10 +10189,7 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   });
 
   function isBusy(slotStart, slotEnd) {
-    for (const r of busyRanges) {
-      if (slotStart < r.end && slotEnd > r.start) return true;
-    }
-    return false;
+    return overlaps(slotStart, slotEnd, busyRanges);
   }
 
   // Itera dia a dia no fuso America/Sao_Paulo (UTC-3 fixo). Sem DST no BR
@@ -10178,9 +10200,9 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
   const slots = [];
   const dayMs = 24 * 60 * 60 * 1000;
   const weeklyAvailability = therapist.weeklyAvailability || null; // null = sem grade configurada
-  const startDayUtc = Math.floor((effectiveFrom + TZ_OFFSET_MS) / dayMs) * dayMs - TZ_OFFSET_MS;
+  const startDayUtc = Math.floor((effectiveFrom - TZ_OFFSET_MS) / dayMs) * dayMs + TZ_OFFSET_MS;
   for (let dayStart = startDayUtc; dayStart <= effectiveTo; dayStart += dayMs) {
-    const localDate = new Date(dayStart + TZ_OFFSET_MS);
+    const localDate = new Date(dayStart - TZ_OFFSET_MS);
     const dow = localDate.getUTCDay();
 
     // Com grade configurada: usa os horários definidos pelo profissional.
@@ -10196,17 +10218,19 @@ async function computeAvailableSlots({ therapist, therapistUid, fromMs, toMs }) 
         localDate.getUTCDate()
       );
       const TZ_H = TZ_OFFSET_MS / 3600000; // 3 (horas)
-      for (const h of availHours) {
-        const slotStart = utcMidnight + (h + TZ_H) * 3600 * 1000;
-        const slotEnd   = slotStart + slotMs;
-        if (slotStart < effectiveFrom || slotStart > effectiveTo) continue;
-        slots.push({ start: slotStart, end: slotEnd, available: !isBusy(slotStart, slotEnd) });
+      for (const window of weeklyWindows(availHours)) {
+        for (let minute = window.start; minute + slotMinutes <= window.end; minute += stepMinutes) {
+          const slotStart = utcMidnight + TZ_H * 3600000 + minute * 60000;
+          const slotEnd = slotStart + slotMs;
+          if (slotStart < effectiveFrom || slotStart > effectiveTo) continue;
+          slots.push({ start: slotStart, end: slotEnd, available: !isBusy(slotStart, slotEnd) });
+        }
       }
       continue; // pula o loop legado abaixo
     }
 
     if (dow === 0 || dow === 6) continue;
-    for (let h = startHour * 60; h + slotMinutes <= endHour * 60; h += slotMinutes) {
+    for (let h = startHour * 60; h + slotMinutes <= endHour * 60; h += stepMinutes) {
       const slotStart = dayStart + h * 60 * 1000;
       const slotEnd   = slotStart + slotMs;
       if (slotStart < effectiveFrom) continue;
@@ -10377,7 +10401,8 @@ router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
       agendaConfig: {
         startHour:   Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8,
         endHour:     Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21,
-        slotMinutes: Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50
+        slotMinutes: appointmentDuration({ slotMinutes: 50, ...cfg }),
+      appointmentDurations: Object.fromEntries(["initial", "return", "follow_up"].map(type => [type, appointmentDuration(cfg, type)]))
       },
       schedulingRules: {
         minNoticeHours: Number.isFinite(therapist.publicSchedulingMinNoticeHours)
@@ -10417,7 +10442,8 @@ router.get("/public/agendar/:slug", asyncHandler(async (req, res) => {
     agendaConfig: {
       startHour:   Number.isFinite(cfg.startHour)   ? cfg.startHour   : 8,
       endHour:     Number.isFinite(cfg.endHour)     ? cfg.endHour     : 21,
-      slotMinutes: Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50
+      slotMinutes: appointmentDuration({ slotMinutes: 50, ...cfg }),
+      appointmentDurations: Object.fromEntries(["initial", "return", "follow_up"].map(type => [type, appointmentDuration(cfg, type)]))
     },
     schedulingRules: {
       minNoticeHours: Number.isFinite(therapist.publicSchedulingMinNoticeHours)
@@ -10460,8 +10486,10 @@ router.get("/public/agendar/:slug/slots", asyncHandler(async (req, res) => {
 
   const therapistUid = (await getDb().collection("therapists")
     .where("publicSchedulingSlug", "==", slug).limit(1).get()).docs[0].id;
+  const appointmentType = req.query.appointmentType || "standard";
+  if (!APPOINTMENT_TYPES.includes(appointmentType)) return sendError(res, 400, "TIPO_CONSULTA_INVALIDO");
   const { slots, slotMinutes } = await computeAvailableSlots({
-    therapist, therapistUid, fromMs, toMs
+    therapist, therapistUid, fromMs, toMs, appointmentType
   });
 
   return res.json({ ok: true, slots, slotMinutes });
@@ -10902,10 +10930,13 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
   // Valida que o slot ainda está livre (race: outro paciente pediu o mesmo
   // horário entre o GET /slots e este POST). Janela de checagem = slot inteiro.
   const cfg = therapist.agendaConfig || {};
-  const slotMinutes = Number.isFinite(cfg.slotMinutes) ? cfg.slotMinutes : 50;
+  const appointmentType = req.body?.appointmentType || "standard";
+  if (!APPOINTMENT_TYPES.includes(appointmentType)) return sendError(res, 400, "TIPO_CONSULTA_INVALIDO");
+  const slotMinutes = appointmentDuration({ slotMinutes: 50, ...cfg }, appointmentType);
   const slotEndMs = requestedSlot + slotMinutes * 60 * 1000;
   const { slots } = await computeAvailableSlots({
     therapist, therapistUid,
+    appointmentType,
     fromMs: requestedSlot - 60 * 1000,
     toMs:   slotEndMs   + 60 * 1000
   });
@@ -11015,7 +11046,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
       }
       tx.set(requestRef, {
         requestId, therapistUid, therapistSlug: slug, patientName, patientEmail,
-        patientPhone, notes, requestedSlot, requestedSlotEnd: slotEndMs,
+        patientPhone, notes, appointmentType, requestedSlot, requestedSlotEnd: slotEndMs,
         status: "pending", ipHash, expiresAt, tcleSigned: true, tcleSignedAt,
         requestSource: "corporate_employee", patientAccountUid: patientAuth.uid,
         empresaId: companyId, colaboradorId: employeeId,
@@ -11058,6 +11089,7 @@ router.post("/public/agendar/:slug/solicitar", publicSchedulingLimiter, asyncHan
     notes,
     requestedSlot,
     requestedSlotEnd: slotEndMs,
+    appointmentType,
     status: "pending",
     ipHash,
     expiresAt,
@@ -11986,6 +12018,7 @@ router.get("/therapy/agendamentos/solicitacoes", asyncHandler(async (req, res) =
       notes: data.notes || "",
       requestedSlot: data.requestedSlot,
       requestedSlotEnd: data.requestedSlotEnd,
+      appointmentType: data.appointmentType || "standard",
       status: data.status,
       sessionId: data.sessionId || null,
       requestSource: data.requestSource || "public_link",
@@ -12083,6 +12116,8 @@ router.post("/therapy/agendamentos/solicitacoes/:id/aprovar", asyncHandler(async
     e2eeKey,
     scheduledAt: reqData.requestedSlot,
     durationMinutes,
+    appointmentType: reqData.appointmentType || "standard",
+    paymentType: !schoolContext && !reqData.corporateBenefit ? "private" : "unspecified",
     status: "scheduled",
     joinTokenExp: joinPayload.exp,
     recurrenceGroupId: null,
