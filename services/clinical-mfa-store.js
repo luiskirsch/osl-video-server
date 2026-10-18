@@ -10,6 +10,9 @@ const COLLECTION = "therapy_security_accounts";
 const SESSION_MS = 2 * 60 * 60 * 1000;
 const PENDING_MS = 10 * 60 * 1000;
 function error(code, status = 400) { return Object.assign(new Error(code), { code, status }); }
+// Patient-side accounts (paciente, colaborador, aluno) may opt in; professionals,
+// RT and admins stay mandatory. A professional profile always wins.
+function isOptional(state) { return state?.twoFactorRequired === false && !state?.registeredProfessional; }
 function currentStep(secret, code, now) {
   if (typeof code !== "string" || !/^\d{6}$/.test(code)) return null;
   const step = Math.floor(now / 30_000);
@@ -79,11 +82,11 @@ function createMfaStore({ database = getDb, signingSecret = ACCESS_TOKEN_SECRET,
     return signPayload({ token_type: "twofa_session", uid, version: String(state.twoFactorVersion || "legacy"),
       auth_time: authTime, iat: now(), exp: now() + SESSION_MS }, signingSecret);
   }
-  async function setup(uid, label) {
+  async function setup(uid, label, { optional = false } = {}) {
     const secret = generateSecret();
     await transaction(uid, async (state, tx, ref) => {
       if (state.twoFactorEnabled) throw error("JA_ATIVADO", 409);
-      tx.set(ref.security, { twoFactorRequired: true, twoFactorPendingSealed: seal(uid, secret),
+      tx.set(ref.security, { twoFactorRequired: !(optional && !state.registeredProfessional), twoFactorPendingSealed: seal(uid, secret),
         twoFactorPendingExpiresAt: now() + PENDING_MS, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
       audit(tx, uid, "twofa_setup");
     });
@@ -98,7 +101,7 @@ function createMfaStore({ database = getDb, signingSecret = ACCESS_TOKEN_SECRET,
       if (step === null) throw error("CODIGO_INCORRETO", 401);
       const version = crypto.randomBytes(16).toString("hex");
       const recovery = recoverySet(uid, version);
-      const next = { twoFactorRequired: true, twoFactorEnabled: true, twoFactorVersion: version,
+      const next = { twoFactorRequired: !isOptional(state), twoFactorEnabled: true, twoFactorVersion: version,
         twoFactorSecretSealed: seal(uid, secret), twoFactorPendingSealed: FieldValue.delete(),
         twoFactorPendingExpiresAt: FieldValue.delete(), twoFactorLastStep: step, twoFactorRecoveryHashes: recovery.hashes,
         twoFactorEnabledAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() };
@@ -115,7 +118,7 @@ function createMfaStore({ database = getDb, signingSecret = ACCESS_TOKEN_SECRET,
       const step = currentStep(secret, code, now());
       if (step === null) throw error("CODIGO_INCORRETO", 401);
       if (step <= Number(state.twoFactorLastStep ?? -1)) throw error("CODIGO_REUTILIZADO", 401);
-      const next = { twoFactorRequired: true, twoFactorEnabled: true, twoFactorVersion: String(state.twoFactorVersion || "legacy"),
+      const next = { twoFactorRequired: !isOptional(state), twoFactorEnabled: true, twoFactorVersion: String(state.twoFactorVersion || "legacy"),
         twoFactorSecretSealed: state.twoFactorSecretSealed || seal(uid, secret), twoFactorLastStep: step,
         updatedAt: FieldValue.serverTimestamp() };
       const sessionToken = session(uid, next, authTime);
@@ -138,7 +141,7 @@ function createMfaStore({ database = getDb, signingSecret = ACCESS_TOKEN_SECRET,
       }
       // Recovery never removes the requirement. It revokes existing sessions
       // and requires enrollment of a new authenticator before any clinical access.
-      tx.set(ref.security, { twoFactorRequired: true, twoFactorEnabled: false,
+      tx.set(ref.security, { twoFactorRequired: !isOptional(state), twoFactorEnabled: false,
         twoFactorVersion: crypto.randomBytes(16).toString("hex"), twoFactorSecretSealed: FieldValue.delete(),
         twoFactorPendingSealed: FieldValue.delete(), twoFactorPendingExpiresAt: FieldValue.delete(),
         twoFactorLastStep: FieldValue.delete(), twoFactorRecoveryHashes: [], updatedAt: FieldValue.serverTimestamp() }, { merge: true });
@@ -149,8 +152,27 @@ function createMfaStore({ database = getDb, signingSecret = ACCESS_TOKEN_SECRET,
       return { status: "reenrollment_required" };
     });
   }
-  return { load, setup, enable, verify, recover, session };
+  // Only opt-in accounts may turn the factor off, and only with a current code.
+  // A new version revokes every outstanding second-factor session.
+  async function disable(uid, code) {
+    return transaction(uid, async (state, tx, ref) => {
+      if (!isOptional(state)) throw error("MFA_OBRIGATORIO_SEM_DESATIVACAO", 403);
+      if (!state.twoFactorEnabled) throw error("TWOFA_NAO_ATIVADO", 409);
+      const secret = state.twoFactorSecretSealed ? open(uid, state.twoFactorSecretSealed) : null;
+      if (!secret) throw error("MFA_SECRET_INVALIDO", 503);
+      const step = currentStep(secret, code, now());
+      if (step === null) throw error("CODIGO_INCORRETO", 401);
+      if (step <= Number(state.twoFactorLastStep ?? -1)) throw error("CODIGO_REUTILIZADO", 401);
+      tx.set(ref.security, { twoFactorRequired: false, twoFactorEnabled: false,
+        twoFactorVersion: crypto.randomBytes(16).toString("hex"), twoFactorSecretSealed: FieldValue.delete(),
+        twoFactorPendingSealed: FieldValue.delete(), twoFactorPendingExpiresAt: FieldValue.delete(),
+        twoFactorLastStep: FieldValue.delete(), twoFactorRecoveryHashes: [], updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+      audit(tx, uid, "twofa_disabled_optional");
+      return { status: "disabled" };
+    });
+  }
+  return { load, setup, enable, verify, recover, disable, session };
 }
 
 const store = createMfaStore();
-module.exports = { createMfaStore, loadMfaProfile: store.load, store, currentStep, SESSION_MS };
+module.exports = { createMfaStore, isOptional, loadMfaProfile: store.load, store, currentStep, SESSION_MS };

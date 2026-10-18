@@ -89,3 +89,21 @@ test("RT authorization checks the enrolled second factor after role validation",
   assert.equal(actor.uid, "owner");
   assert.equal(enrolledChecks, 2);
 });
+
+test("opt-in patient accounts pass until enrolled, then require the factor; professionals never become optional", async () => {
+  const { isOptional } = require("../services/clinical-mfa-store");
+  assert.equal(isOptional({ twoFactorRequired: false }), true);
+  assert.equal(isOptional({ twoFactorRequired: false, registeredProfessional: true }), false);
+  assert.equal(isOptional({}), false);
+  const notEnrolled = createSecondFactorCheck({ secret, loadProfile: async () => ({ twoFactorRequired: false, twoFactorEnabled: false }) });
+  assert.equal(await notEnrolled({ headers: {} }, recorder(), "owner"), true);
+  const res = recorder();
+  assert.equal(await notEnrolled({ headers: {} }, res, "owner", { required: true }), false);
+  const enrolled = createSecondFactorCheck({ secret, loadProfile: async () => ({ twoFactorRequired: false, twoFactorEnabled: true, twoFactorVersion: "v2" }) });
+  const denied = recorder();
+  assert.equal(await enrolled({ headers: {} }, denied, "owner"), false);
+  assert.equal(denied.body.error, "TWOFA_REQUIRED");
+  assert.equal(await enrolled({ headers: { "x-therapy-2fa": session() } }, recorder(), "owner"), true);
+  const hijacked = createSecondFactorCheck({ secret, loadProfile: async () => ({ twoFactorRequired: false, twoFactorEnabled: false, registeredProfessional: true }) });
+  assert.equal((await hijacked({ headers: {} }, recorder(), "owner")), false);
+});

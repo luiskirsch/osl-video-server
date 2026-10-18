@@ -15,6 +15,9 @@ async function eligibleActor(uid, decoded) {
   if (THERAPY_ADMIN_EMAILS.includes(email) || THERAPY_RT_EMAILS.includes(email)) return { label: email };
   const assignments = await getDb().collection("therapy_rt_assignments").where("email", "==", email).limit(1).get();
   if (!assignments.empty && assignments.docs[0].data().active !== false) return { label: email };
+  // Patient-side portal accounts (paciente, colaborador, aluno): optional factor.
+  const patient = await getDb().collection("therapy_patient_accounts").doc(uid).get();
+  if (patient.exists) return { label: decoded.email || patient.data().displayName || uid, optional: true };
   return null;
 }
 
@@ -51,15 +54,19 @@ function createClinicalMfaRouter({ authenticate = verifyFirebaseToken, available
     const sessionValid = !!(state?.twoFactorEnabled && verification.valid && proof.token_type === "twofa_session" &&
       proof.uid === req.firebaseUid && String(proof.version || "legacy") === String(state.twoFactorVersion || "legacy") &&
       proof.auth_time === req.verifiedFirebaseToken?.auth_time);
-    return { required: true, enabled: !!state?.twoFactorEnabled, sessionValid,
+    const optional = !!req.mfaActor.optional;
+    return { required: !optional, enabled: !!state?.twoFactorEnabled, sessionValid,
       recoveryCodesRemaining: Array.isArray(state?.twoFactorRecoveryHashes) ? state.twoFactorRecoveryHashes.length : 0 };
   }));
-  router.post("/therapy/2fa/setup", identity, accountLimit, action(req => mfa.setup(req.firebaseUid, req.mfaActor.label)));
+  router.post("/therapy/2fa/setup", identity, accountLimit, action(req => mfa.setup(req.firebaseUid, req.mfaActor.label, { optional: !!req.mfaActor.optional })));
   router.post("/therapy/2fa/enable", identity, accountLimit, action(req => mfa.enable(req.firebaseUid, String(req.body?.code || "").trim(), req.verifiedFirebaseToken?.auth_time)));
   router.post("/therapy/2fa/verify", identity, accountLimit, action(req => mfa.verify(req.firebaseUid, String(req.body?.code || "").trim(), req.verifiedFirebaseToken?.auth_time)));
   router.post("/therapy/2fa/recovery-codes", identity, accountLimit, action(req => mfa.verify(req.firebaseUid, String(req.body?.code || "").trim(), req.verifiedFirebaseToken?.auth_time, { renewRecovery: true })));
   router.post("/therapy/2fa/recover", identity, accountLimit, action(req => mfa.recover(req.firebaseUid, req.body?.recoveryCode)));
-  router.post("/therapy/2fa/disable", identity, (_req, res) => sendError(res, 403, "MFA_OBRIGATORIO_SEM_DESATIVACAO"));
+  router.post("/therapy/2fa/disable", identity, accountLimit, (req, res, next) => {
+    if (!req.mfaActor.optional) return sendError(res, 403, "MFA_OBRIGATORIO_SEM_DESATIVACAO");
+    return next();
+  }, action(req => mfa.disable(req.firebaseUid, String(req.body?.code || "").trim())));
   return router;
 }
 module.exports = createClinicalMfaRouter;

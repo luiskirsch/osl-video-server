@@ -1,7 +1,7 @@
 "use strict";
 const { verifySignedToken } = require("./auth");
 const { ACCESS_TOKEN_SECRET } = require("../config");
-const { loadMfaProfile } = require("./clinical-mfa-store");
+const { loadMfaProfile, isOptional } = require("./clinical-mfa-store");
 const { sendError } = require("../utils");
 
 function twoFactorVersion(profile) { return String(profile?.twoFactorVersion || "legacy"); }
@@ -10,7 +10,8 @@ function createSecondFactorCheck({ loadProfile = loadMfaProfile, secret = ACCESS
   return async function requireSecondFactor(req, res, uid, { required = false } = {}) {
     const profile = await loadProfile(uid);
     if (!profile?.twoFactorEnabled) {
-      if (required || profile) { sendError(res, 401, "TWOFA_ENROLLMENT_REQUIRED"); return false; }
+      // Opt-in accounts that have not enrolled (or turned it off) pass through.
+      if (required || (profile && !isOptional(profile))) { sendError(res, 401, "TWOFA_ENROLLMENT_REQUIRED"); return false; }
       return true;
     }
     const token = String(req.headers["x-therapy-2fa"] || "").trim();
