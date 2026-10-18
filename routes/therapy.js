@@ -4950,6 +4950,7 @@ router.get("/therapy/pacientes", asyncHandler(async (req, res) => {
         deleted: !!data.deleted,
         ciphertext: data.ciphertext,
         iv: data.iv,
+        revision: data.revision || 0,
         createdAt: data.createdAt?.toMillis ? data.createdAt.toMillis() : null,
         updatedAt: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : null
       };
@@ -5011,17 +5012,21 @@ router.patch("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
 
   const db = getDb();
   const docRef = db.collection("therapy_patients").doc(patientId);
-  const snap = await docRef.get();
-  if (!snap.exists) return sendError(res, 404, "PACIENTE_NAO_ENCONTRADO");
-  if (snap.data().therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
-
-  await docRef.set({
-    ciphertext, iv,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  const expectedRevision = req.body?.expectedRevision;
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) return sendError(res, 400, "VERSAO_INVALIDA");
+  const outcome = await db.runTransaction(async tx => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists || snap.data().deleted) return { status: 404, error: "PACIENTE_NAO_ENCONTRADO" };
+    if (snap.data().therapistUid !== uid) return { status: 403, error: "ACESSO_NEGADO" };
+    const revision = snap.data().revision || 0;
+    if (expectedRevision !== undefined && expectedRevision !== revision) return { status: 409, error: "PACIENTE_ATUALIZADO_EM_OUTRA_ABA" };
+    tx.set(docRef, { ciphertext, iv, revision: revision + 1, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    return { revision: revision + 1 };
+  });
+  if (outcome.error) return sendError(res, outcome.status, outcome.error);
 
   await logAudit({ type: "patient_updated", patientId, therapistUid: uid });
-  return res.json({ ok: true });
+  return res.json({ ok: true, revision: outcome.revision });
 }));
 
 // DELETE /therapy/pacientes/:patientId — soft delete
@@ -5063,6 +5068,11 @@ router.get("/therapy/pacientes/:patientId", asyncHandler(async (req, res) => {
   if (patient.therapistUid !== uid) return sendError(res, 403, "ACESSO_NEGADO");
   return res.json({ ok: true, patient: { patientId, ...patient } });
 }));
+
+require("./therapy-chart").registerChartRoutes(router, {
+  asyncHandler, ensureDb, getDb, verifyFirebaseToken, sendError, logAudit,
+  timestamp: () => admin.firestore.FieldValue.serverTimestamp()
+});
 
 // GET /therapy/pacientes/:patientId/sessoes — todas as sessões deste paciente
 router.get("/therapy/pacientes/:patientId/sessoes", asyncHandler(async (req, res) => {
