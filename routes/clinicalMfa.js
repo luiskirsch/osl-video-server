@@ -16,8 +16,11 @@ async function eligibleActor(uid, decoded) {
   const assignments = await getDb().collection("therapy_rt_assignments").where("email", "==", email).limit(1).get();
   if (!assignments.empty && assignments.docs[0].data().active !== false) return { label: email };
   // Patient-side portal accounts (paciente, colaborador, aluno): optional factor.
-  const patient = await getDb().collection("therapy_patient_accounts").doc(uid).get();
-  if (patient.exists) return { label: decoded.email || patient.data().displayName || uid, optional: true };
+  const [patient, student] = await Promise.all([
+    getDb().collection("therapy_patient_accounts").doc(uid).get(),
+    getDb().collection("therapy_estudantes").where("portalAccountUid", "==", uid).limit(1).get()
+  ]);
+  if (patient.exists || !student.empty) return { label: decoded.email || uid, optional: true };
   return null;
 }
 
