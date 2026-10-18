@@ -32,8 +32,8 @@ test("falha do Mercado Pago preserva diagnóstico sem expor e-mail ou credencial
   });
 });
 
-test("plano profissional custa 30 dias grátis e exige meio de pagamento no trial", () => {
-  assert.equal(THERAPY_TRIAL_DAYS_PROFISSIONAL, 30);
+test("plano profissional custa 14 dias grátis e exige meio de pagamento no trial", () => {
+  assert.equal(THERAPY_TRIAL_DAYS_PROFISSIONAL, 14);
   assert.deepEqual(evaluatePlanAccess({ plano: "trial", intendedTier: "profissional", trialUntil: Date.now() + 86_400_000 }), {
     ok: false,
     reason: "MEIO_PAGAMENTO_OBRIGATORIO",
@@ -46,8 +46,8 @@ test("plano profissional custa 30 dias grátis e exige meio de pagamento no tria
   assert.deepEqual(evaluatePlanAccess({ plano: "pro" }), { ok: true, plano: "pro" });
 });
 
-test("teste profissional agenda a primeira cobrança para 30 dias e não se repete", () => {
+test("teste profissional agenda a primeira cobrança para 14 dias e não se repete", () => {
   const now = Date.parse("2026-09-24T12:00:00.000Z");
-  assert.equal(professionalTrialStartDate({}, now), "2026-10-24T12:00:00.000Z");
+  assert.equal(professionalTrialStartDate({}, now), "2026-10-08T12:00:00.000Z");
   assert.equal(professionalTrialStartDate({ professionalTrialUsedAt: now }, now), null);
 });

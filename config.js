@@ -276,7 +276,7 @@ const THERAPY_RT_EMAILS = [...new Set([
 
 // Plano Pro do Espaço Prelúdio — preapproval recorrente MercadoPago.
 // Tiers ativos:
-//   - "profissional"  (R$ 99,00)  — 30 dias grátis após cadastrar o meio de pagamento
+//   - "profissional"  (R$ 99,00)  — 14 dias grátis após cadastrar o meio de pagamento
 //   - "empresa"       — sem cobrança do profissional; acesso por vínculo aprovado
 // THERAPY_PLAN_AMOUNT mantido por compat (default sem flag explícita).
 const THERAPY_PLAN_AMOUNT                 = envNumber("THERAPY_PLAN_AMOUNT", 60.00, { min: 0, max: 1_000_000 });
@@ -294,13 +294,13 @@ const THERAPY_PLAN_NAME       = process.env.THERAPY_PLAN_NAME       || "Espaço 
 
 // Trial diferenciado por plano intencionado no cadastro:
 //   - "estudante"     →  0 dias (irrelevante: vira student-active após validar doc)
-//   - "recem-formado" → 30 dias (1 mês pra validar inscrição + decidir contratar)
-//   - "profissional"  → 30 dias (período de teste padrão)
-//   - default         → 30 dias (cadastros sem flag explícita = profissional)
+//   - "recem-formado" → 14 dias (14 dias pra validar inscrição + decidir contratar)
+//   - "profissional"  → 14 dias (período de teste padrão)
+//   - default         → 14 dias (cadastros sem flag explícita = profissional)
 // THERAPY_TRIAL_DAYS mantido por compat — usado se intendedTier não vier.
-const THERAPY_TRIAL_DAYS      = envNumber("THERAPY_TRIAL_DAYS", 30, { min: 0, max: 3650, integer: true });
-const THERAPY_TRIAL_DAYS_PROFISSIONAL  = envNumber("THERAPY_TRIAL_DAYS_PROFISSIONAL", 30, { min: 0, max: 3650, integer: true });
-const THERAPY_TRIAL_DAYS_RECEM_FORMADO = envNumber("THERAPY_TRIAL_DAYS_RECEM_FORMADO", 30, { min: 0, max: 3650, integer: true });
+const THERAPY_TRIAL_DAYS      = envNumber("THERAPY_TRIAL_DAYS", 14, { min: 0, max: 3650, integer: true });
+const THERAPY_TRIAL_DAYS_PROFISSIONAL  = envNumber("THERAPY_TRIAL_DAYS_PROFISSIONAL", 14, { min: 0, max: 3650, integer: true });
+const THERAPY_TRIAL_DAYS_RECEM_FORMADO = envNumber("THERAPY_TRIAL_DAYS_RECEM_FORMADO", 14, { min: 0, max: 3650, integer: true });
 const THERAPY_FRONTEND_BASE   = process.env.THERAPY_FRONTEND_BASE   || "https://espacopreludio.com.br";
 // Janela mínima (em horas) para o paciente cancelar uma sessão futura. Abaixo
 // disso, só o terapeuta pode cancelar. Default 24h alinha com a expectativa

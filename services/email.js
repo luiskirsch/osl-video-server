@@ -378,7 +378,7 @@ function templateRecemFormadoApproved({ therapistName, painelUrl }) {
     heading: "Inscrição confirmada",
     bodyHtml: `
       <p style="margin:0 0 12px;">Olá ${escHtml(therapistName)},</p>
-      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você já pode contratar a assinatura do Espaço Prelúdio pelo plano <strong>Profissional: R$ 60/mês</strong>, com 30 dias grátis.</p>
+      <p style="margin:0 0 16px;">Sua inscrição no conselho foi confirmada. Você já pode contratar a assinatura do Espaço Prelúdio pelo plano <strong>Profissional: R$ 60/mês</strong>, com 14 dias grátis.</p>
       <p style="margin:0 0 24px;"><a href="${escHtml(painelUrl)}" style="display:inline-block; background:#2d8a52; color:#fff; padding:12px 22px; border-radius:6px; text-decoration:none; font-weight:500;">Contratar agora</a></p>
     `,
     footer: "Notificação do Espaço Prelúdio sobre seu plano."

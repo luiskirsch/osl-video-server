@@ -85,7 +85,7 @@ Planos:
 - Profissional: R$ 199/mês
 - Recém-formado (12 meses pós-conselho): R$ 99,50/mês
 - Estudante de graduação: GRÁTIS (com comprovante validado por IA)
-- Trial: 7 dias
+- Trial: 14 dias
 
 Mapa funcional (nomes do menu):
 - Consultas — lista de sessões agendadas, criar/iniciar consulta

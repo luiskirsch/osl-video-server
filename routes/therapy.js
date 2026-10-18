@@ -401,7 +401,7 @@ async function requirePaidPlan(req, res, uid) {
   if (!access.ok) {
     const detail = access.reason === "MEIO_PAGAMENTO_OBRIGATORIO"
       ? (therapist?.intendedTier === "profissional"
-        ? "Cadastre um meio de pagamento para liberar as consultas. Os primeiros 30 dias do plano Profissional são gratuitos."
+        ? "Cadastre um meio de pagamento para liberar as consultas. Os primeiros 14 dias do plano Profissional são gratuitos."
         : "Cadastre um meio de pagamento para liberar as consultas do programa institucional. Os primeiros 7 dias são gratuitos.")
       : "Sua trial expirou ou você não tem assinatura ativa. Acesse o seu perfil para contratar um plano.";
     sendError(res, 402, access.reason, {
