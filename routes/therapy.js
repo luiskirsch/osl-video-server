@@ -84,6 +84,7 @@ const privateFiles = require("../services/private-files");
 const corporateDevelopment = require("../services/corporate-development");
 const { withRetry } = require("../services/retry");
 const { endTherapyRoom } = require("../services/therapy-room");
+const { deleteForAccount: deleteDiaryForAccount } = require("../services/diary");
 const { readClientEncryption, encryptJson, encryptedPayloadResponse } = require("../services/clinical-encryption");
 const { processAiSummary, splitAudioSegments, updateCurrentAttempt } = require("../services/therapy-ai-summary");
 const aiPieces = require("../services/ai-summary-pieces");
@@ -9906,6 +9907,8 @@ router.post("/therapy/admin/profissionais/:uid/excluir-definitivo", asyncHandler
       result.subscriptionCanceled = r.response.ok;
     } catch (e) { logWarn("admin_delete_cancel_sub_failed", { uid, error: e.message }); }
   }
+  try { result.diaryEntriesDeleted = await deleteDiaryForAccount(getDb(), uid); }
+  catch { return sendError(res, 503, "DIARIO_EXCLUSAO_FALHOU"); }
   try { await admin.auth().deleteUser(uid); result.authDeleted = true; }
   catch (e) { if (e?.code === "auth/user-not-found") result.authDeleted = true; else logWarn("admin_delete_auth_failed", { uid, error: e.message }); }
   if (snap.exists) { await ref.delete(); result.profileDeleted = true; }
@@ -21982,6 +21985,7 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   return res.json({ ok: true, items });
 }));
 
+router.use(require("./diary")({ verifyFirebaseToken, ensureDb, getDb, secret: require("../config").EMPRESA_JWT_SECRET }));
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
 router._test = { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

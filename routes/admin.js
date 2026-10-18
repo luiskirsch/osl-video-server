@@ -12,6 +12,7 @@ const experiments   = require("../services/experiments");
 const liveService   = require("../services/liveService");
 const worldState    = require("../services/worldState");
 const discoveriesSvc = require("../services/discoveries");
+const { deleteForAccount: deleteDiaryForAccount } = require("../services/diary");
 
 const router = express.Router();
 
@@ -148,6 +149,14 @@ router.post("/admin/delete-user", adminLimiter, requireAdmin, asyncHandler(async
     }
   } catch (e) { summary.errors.push({ step: "deletePatientNotes", error: e.message }); }
 
+  // Personal diary entries are separate from clinical records and must be
+  // erased before removing the shared login, so cleanup remains retryable.
+  try {
+    const deleted = await deleteDiaryForAccount(db, uid);
+    if (deleted) summary.deletedFrom.push(`therapy_diaries (${deleted} docs)`);
+  } catch {
+    return sendError(res, 503, "DIARIO_EXCLUSAO_FALHOU");
+  }
   // 5. Deletar do Firebase Auth (irrev)
   try {
     await admin.auth().deleteUser(uid);
