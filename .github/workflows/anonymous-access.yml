@@ -1,8 +1,14 @@
 name: Acesso anônimo às rotas clínicas
 
-# Probe ao vivo (scripts/security/check-anonymous-access.js): toda rota que
-# devolve dado clínico tem de responder 401/403 a quem não está logado.
+# Probe ao vivo (scripts/security/check-anonymous-access.js): toda rota GET que
+# devolve dado clínico tem de responder 401/403 a quem não está logado. As
+# rotas são descobertas a partir do próprio app, então rota nova entra sozinha.
+#
+# Roda: alguns minutos depois de cada push (espera o Railway publicar), uma vez
+# por dia, e sob demanda. Contra produção e staging.
 on:
+  push:
+    branches: [luiskirsch.github.io]
   schedule:
     - cron: "30 9 * * *"
   workflow_dispatch:
@@ -13,7 +19,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -24,9 +30,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # wait-for-deploy usa git merge-base
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Esperar o deploy do commit
+        if: github.event_name == 'push'
+        run: node scripts/security/wait-for-deploy.js "$API" "$GITHUB_SHA"
+        env:
+          API: ${{ matrix.api }}
       - name: Rotas clínicas negam chamador anônimo
         run: node scripts/security/check-anonymous-access.js "$API"
         env:

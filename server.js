@@ -266,6 +266,28 @@ if (GAME_ENABLED) {
   }
 }
 
+// Introspecção de rotas (usada pelo teste de cobertura de autorização
+// test/clinical-route-coverage.test.js). Roda depois de todas as montagens,
+// imprime a lista de rotas e sai — não sobe o servidor.
+if (process.env.DUMP_ROUTES === "1") {
+  const routes = [];
+  const walk = (stack, prefix = "") => {
+    for (const layer of stack || []) {
+      if (layer.route && layer.route.path) {
+        const methods = Object.keys(layer.route.methods || {}).filter(m => layer.route.methods[m]);
+        const paths = Array.isArray(layer.route.path) ? layer.route.path : [layer.route.path];
+        for (const p of paths) for (const m of methods) routes.push({ method: m.toUpperCase(), path: prefix + p });
+      } else if (layer.handle && layer.handle.stack) {
+        walk(layer.handle.stack, prefix);
+      }
+    }
+  };
+  walk(app._router && app._router.stack);
+  // Sentinela para separar a lista dos logs que o boot também escreve em stdout.
+  process.stdout.write("\n__ROUTES_JSON__" + JSON.stringify(routes) + "\n");
+  process.exit(0);
+}
+
 // --- 404 ---
 app.use((req, res) => {
   return res.status(404).json({
