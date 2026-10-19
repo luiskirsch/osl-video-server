@@ -18,6 +18,11 @@ const DENIED = [
   { path: "/therapy/profissional/me", label: "perfil do profissional" },
   { path: "/therapy/pacientes", label: "lista de pacientes" },
   { path: "/therapy/paciente/notas", label: "notas do paciente" },
+  { path: "/therapy/paciente/diario", label: "diário/cápsulas do paciente (cifrado)" },
+  // Prontuário cifrado (:patientId): o auth roda antes da busca por id, então
+  // anônimo recebe 401 com qualquer id — por isso o placeholder _probe.
+  { path: "/therapy/pacientes/_probe/prontuario", label: "prontuário do paciente" },
+  { path: "/therapy/pacientes/_probe/prontuario/registros", label: "registros do prontuário" },
   { path: "/therapy/sessoes", label: "sessões" },
   { path: "/therapy/receitas", label: "receitas" },
   { path: "/therapy/documentos", label: "documentos clínicos" },
