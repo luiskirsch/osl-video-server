@@ -181,6 +181,27 @@ test("custom aromas are encrypted, restored and replaced by a preset without sta
   assert.equal(replaced.body.item.aromaText, "");
 });
 
+test("metadata-only pages persist encrypted and can be restored or cleared", async t => {
+  const f = await fixture(t);
+  const metadata = entry({ text: "", feelings: ["serenidade"], tags: ["chuva"], aroma: "lavanda", font: "classic", weather: "rain" });
+  const created = await f.call("PUT", "/weather-only", metadata);
+  assert.equal(created.status, 200);
+  assert.equal(created.body.item.text, "");
+  assert.deepEqual(created.body.item.feelings, ["serenidade"]);
+  assert.equal(created.body.item.weather, "rain");
+  const stored = [...f.db.data.values()][0];
+  assert.equal(JSON.stringify(stored).includes("serenidade"), false);
+  assert.equal(JSON.stringify(stored).includes("lavanda"), false);
+  const restored = (await f.call()).body.items[0];
+  assert.equal(restored.text, "");
+  assert.equal(restored.aroma, "lavanda");
+  assert.equal(restored.font, "classic");
+  const cleared = await f.call("PUT", "/weather-only", entry({ text: "", version: 1, feelings: [], tags: [], aroma: "", font: "hand", weather: "" }));
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.item.version, 2);
+  assert.equal(cleared.body.item.weather, "");
+});
+
 test("capsules omit every content field until the Sao Paulo unlock date and remain immutable", async t => {
   const f = await fixture(t);
   const capsule = entry({ kind: "capsule", unlockDate: "2026-10-20", aroma: "", aromaText: "Perfume de uma lembrança futura" });
@@ -234,10 +255,14 @@ test("optimistic transactions reject concurrent/stale edits and stale deletes", 
 test("entry validation rejects malformed dates, oversized fields, invalid enums and unsafe versions", async t => {
   const f = await fixture(t);
   const invalid = [
-    { kind: "other" }, { text: "" }, { text: "  " }, { text: "a".repeat(20001) },
+    { kind: "other" },
+    { text: "", feelings: [], tags: [], aroma: "", font: "hand", weather: "" },
+    { text: "  ", feelings: [], tags: [], aroma: "", font: "hand", weather: "" },
+    { text: "a".repeat(20001) },
     { date: "2026-02-29" }, { date: "2026-13-18" }, { date: "2026-00-18" }, { date: "2026-10-32" },
     { date: "0000-01-01" }, { date: "2026-2-01" }, { date: "2026-10-18T00:00:00Z" }, { date: "2026-10-19" },
     { unlockDate: "2027-01-01" }, { kind: "capsule", unlockDate: null },
+    { kind: "capsule", text: "", unlockDate: "2026-10-20" },
     { kind: "capsule", unlockDate: "2026-10-18" }, { kind: "capsule", unlockDate: "2026-02-30" },
     { version: -1 }, { version: "0" }, { version: 1.1 }, { version: Number.MAX_SAFE_INTEGER },
     { feelings: null }, { feelings: ["invalid"] }, { feelings: ["serenidade", "alegria", "gratidao", "nostalgia"] }, { tags: ["a".repeat(31)] }, { tags: Array(7).fill("tag") },

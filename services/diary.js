@@ -19,7 +19,7 @@ function validDate(value) {
 
 function normalize(input, today) {
   if (!input || typeof input !== "object" || Array.isArray(input) || !["diary", "dream", "capsule"].includes(input.kind)) invalid();
-  if (typeof input.text !== "string" || !input.text.trim() || input.text.length > 20000) invalid("TEXTO_INVALIDO");
+  if (typeof input.text !== "string" || input.text.length > 20000) invalid("TEXTO_INVALIDO");
   if (!validDate(input.date) || input.date > today) invalid("DATA_INVALIDA");
   if (input.kind === "capsule") {
     if (!validDate(input.unlockDate) || input.unlockDate <= today) invalid("ABERTURA_INVALIDA");
@@ -35,12 +35,17 @@ function normalize(input, today) {
   if (typeof aromaText !== "string" || aromaText.length > 100 || /[\u0000-\u001f\u007f]/.test(aromaText)) invalid("AROMA_INVALIDO");
   if (!FONTS.includes(font)) invalid("CALIGRAFIA_INVALIDA");
   if (!WEATHER.includes(weather)) invalid("CLIMA_INVALIDO");
+  const text = input.text.trim();
+  const feelings = [...new Set(input.feelings)];
+  const tags = [...new Set(input.tags.map(value => value.replace(/^#/, "").trim()).filter(Boolean))];
+  const customAroma = aroma ? "" : aromaText.trim();
+  const hasMemory = Boolean(text || feelings.length || tags.length || aroma || customAroma || weather || font !== "hand");
+  if (input.kind === "capsule" && !text) invalid("TEXTO_INVALIDO");
+  if (input.kind !== "capsule" && !hasMemory && input.version === 0) invalid("TEXTO_INVALIDO");
   return {
-    kind: input.kind, text: input.text.trim(), date: input.date,
+    kind: input.kind, text, date: input.date,
     unlockDate: input.kind === "capsule" ? input.unlockDate : null,
-    feelings: [...new Set(input.feelings)],
-    tags: [...new Set(input.tags.map(value => value.replace(/^#/, "").trim()).filter(Boolean))],
-    aroma, aromaText: aroma ? "" : aromaText.trim(), font, weather,
+    feelings, tags, aroma, aromaText: customAroma, font, weather,
   };
 }
 
