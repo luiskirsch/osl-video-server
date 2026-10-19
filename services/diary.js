@@ -28,9 +28,11 @@ function normalize(input, today) {
   if (!Array.isArray(input.feelings) || input.feelings.length > 3 || input.feelings.some(value => !FEELINGS.includes(value))) invalid("SENTIMENTO_INVALIDO");
   if (!Array.isArray(input.tags) || input.tags.length > 6 || input.tags.some(value => typeof value !== "string" || value.length > 30)) invalid("MARCADORES_INVALIDOS");
   const aroma = input.aroma === undefined ? "" : input.aroma;
+  const aromaText = input.aromaText === undefined ? "" : input.aromaText;
   const font = input.font === undefined ? "hand" : input.font;
   const weather = input.weather === undefined ? "" : input.weather;
   if (!AROMAS.includes(aroma)) invalid("AROMA_INVALIDO");
+  if (typeof aromaText !== "string" || aromaText.length > 100 || /[\u0000-\u001f\u007f]/.test(aromaText)) invalid("AROMA_INVALIDO");
   if (!FONTS.includes(font)) invalid("CALIGRAFIA_INVALIDA");
   if (!WEATHER.includes(weather)) invalid("CLIMA_INVALIDO");
   return {
@@ -38,7 +40,7 @@ function normalize(input, today) {
     unlockDate: input.kind === "capsule" ? input.unlockDate : null,
     feelings: [...new Set(input.feelings)],
     tags: [...new Set(input.tags.map(value => value.replace(/^#/, "").trim()).filter(Boolean))],
-    aroma, font, weather,
+    aroma, aromaText: aroma ? "" : aromaText.trim(), font, weather,
   };
 }
 

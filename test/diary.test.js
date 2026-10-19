@@ -166,9 +166,24 @@ test("stored content is encrypted per account with fresh IVs and authenticated t
   assert.deepEqual(result.body, { ok: false, error: "DIARIO_INDISPONIVEL" });
 });
 
+test("custom aromas are encrypted, restored and replaced by a preset without stale text", async t => {
+  const f = await fixture(t);
+  const aromaText = 'Bolo de fubá da minha avó <3';
+  const created = await f.call("PUT", "/aroma", entry({ aroma: "", aromaText: `  ${aromaText}  ` }));
+  assert.equal(created.status, 200);
+  assert.equal(created.body.item.aromaText, aromaText);
+  assert.equal((await f.call()).body.items[0].aromaText, aromaText);
+  const stored = [...f.db.data.values()][0];
+  assert.equal(JSON.stringify(stored).includes(aromaText), false);
+  assert.equal(diary.open("owner", stored.payload, SECRET).aromaText, aromaText);
+  const replaced = await f.call("PUT", "/aroma", entry({ version: 1, aroma: "lavanda", aromaText }));
+  assert.equal(replaced.body.item.aroma, "lavanda");
+  assert.equal(replaced.body.item.aromaText, "");
+});
+
 test("capsules omit every content field until the Sao Paulo unlock date and remain immutable", async t => {
   const f = await fixture(t);
-  const capsule = entry({ kind: "capsule", unlockDate: "2026-10-20" });
+  const capsule = entry({ kind: "capsule", unlockDate: "2026-10-20", aroma: "", aromaText: "Perfume de uma lembrança futura" });
   const created = await f.call("PUT", "/future", capsule);
   assert.equal(created.status, 200);
   const expectedKeys = ["id", "kind", "date", "unlockDate", "version", "createdAt", "updatedAt", "locked"].sort();
@@ -183,6 +198,7 @@ test("capsules omit every content field until the Sao Paulo unlock date and rema
   const opened = (await f.call()).body.items[0];
   assert.equal(opened.locked, false);
   assert.equal(opened.text, capsule.text);
+  assert.equal(opened.aromaText, capsule.aromaText);
   assert.equal((await f.call("PUT", "/future", entry({ version: 1 }))).body.error, "CAPSULA_SELADA");
   assert.equal((await f.call("DELETE", "/future?version=1")).status, 200);
 });
@@ -225,7 +241,7 @@ test("entry validation rejects malformed dates, oversized fields, invalid enums 
     { kind: "capsule", unlockDate: "2026-10-18" }, { kind: "capsule", unlockDate: "2026-02-30" },
     { version: -1 }, { version: "0" }, { version: 1.1 }, { version: Number.MAX_SAFE_INTEGER },
     { feelings: null }, { feelings: ["invalid"] }, { feelings: ["serenidade", "alegria", "gratidao", "nostalgia"] }, { tags: ["a".repeat(31)] }, { tags: Array(7).fill("tag") },
-    { tags: [null] }, { aroma: "rosas" }, { font: "serif" }, { weather: "sun" },
+    { tags: [null] }, { aroma: "rosas" }, { aromaText: null }, { aromaText: 12 }, { aromaText: "a".repeat(101) }, { aromaText: "duas\nlinhas" }, { font: "serif" }, { weather: "sun" },
   ];
   for (const change of invalid) {
     const response = await f.call("PUT", "/invalid", entry(change));
