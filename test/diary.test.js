@@ -222,6 +222,37 @@ test("sealing a day is an explicit choice that is encrypted, restored and revers
   assert.equal(wrong.body.error, "SELO_INVALIDO");
 });
 
+test("the cover name is encrypted, scoped to the account and follows it to another device", async t => {
+  const f = await fixture(t);
+  assert.deepEqual((await f.call("GET", "/ajustes/capa")).body.cover, { title: "" }, "a capa comeca sem nome escolhido");
+  const saved = await f.call("PUT", "/ajustes/capa", { title: "  Meus   dias  de outono " });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.cover.title, "Meus dias de outono", "espacos sobrando sao aparados");
+  const stored = [...f.db.data.values()][0];
+  assert.equal(JSON.stringify(stored).includes("outono"), false, "o nome viaja cifrado");
+  // Outro aparelho e outra sessao: o nome chega pela conta, nao pelo navegador.
+  assert.equal((await f.call("GET", "/ajustes/capa")).body.cover.title, "Meus dias de outono");
+  assert.equal((await f.call("GET", "/ajustes/capa", undefined, "intruder")).body.cover.title, "", "o nome nao vaza para outra conta");
+  const cleared = await f.call("PUT", "/ajustes/capa", { title: "   " });
+  assert.equal(cleared.body.cover.title, "", "apagar o nome devolve a capa ao padrao");
+  assert.equal((await f.call("GET", "/ajustes/capa")).body.cover.title, "");
+  for (const bad of [{ title: "x".repeat(41) }, { title: "quebra" + String.fromCharCode(10) + "linha" }, { title: 7 }, []]) {
+    const response = await f.call("PUT", "/ajustes/capa", bad);
+    assert.equal(response.status, 400, JSON.stringify(bad));
+    assert.equal(response.body.error, "CAPA_INVALIDA");
+  }
+  assert.equal((await f.call("GET", "/ajustes/capa", undefined, "")).status, 401, "sem login nao se le a capa");
+});
+
+test("deleting an account also erases the cover name", async t => {
+  const f = await fixture(t);
+  await f.call("PUT", "/ajustes/capa", { title: "Meus dias" });
+  f.seed("uma-pagina");
+  assert.ok([...f.db.data.keys()].some(key => !key.includes("/entries/")), "o diario tem documento proprio");
+  await diary.deleteForAccount(f.db, "owner");
+  assert.deepEqual([...f.db.data.keys()], [], "nada do diario sobrevive a exclusao da conta");
+});
+
 test("capsules omit every content field until the Sao Paulo unlock date and remain immutable", async t => {
   const f = await fixture(t);
   const capsule = entry({ kind: "capsule", unlockDate: "2026-10-20", aroma: "", aromaText: "Perfume de uma lembrança futura" });

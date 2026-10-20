@@ -86,9 +86,29 @@ function view(uid, id, record, secret, today) {
   return { ...payload, ...common, locked: false };
 }
 
+const COVER_TITLE_MAX = 40;
+
+// O nome da capa é escrita da pessoa, não configuração: viaja cifrado como
+// o resto do diário e mora no documento do próprio diário.
+function normalizeCover(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) invalid("CAPA_INVALIDA");
+  const raw = input.title === undefined || input.title === null ? "" : input.title;
+  if (typeof raw !== "string" || /[\u0000-\u001f\u007f]/.test(raw)) invalid("CAPA_INVALIDA");
+  const title = raw.replace(/\s+/g, " ").trim();
+  if (title.length > COVER_TITLE_MAX) invalid("CAPA_INVALIDA");
+  return { title };
+}
+
+function ownerOf(uid) {
+  return crypto.createHash("sha256").update(uid).digest("hex");
+}
+
+function diaryFor(db, uid) {
+  return db.collection("therapy_diaries").doc(ownerOf(uid));
+}
+
 function entriesFor(db, uid) {
-  const owner = crypto.createHash("sha256").update(uid).digest("hex");
-  return db.collection("therapy_diaries").doc(owner).collection("entries");
+  return diaryFor(db, uid).collection("entries");
 }
 
 async function deleteForAccount(db, uid) {
@@ -97,12 +117,17 @@ async function deleteForAccount(db, uid) {
   // Firestore retains subcollections when their parent document is removed.
   for (;;) {
     const snapshot = await entries.limit(400).get();
-    if (!snapshot.docs.length) return deleted;
+    if (!snapshot.docs.length) break;
     const batch = db.batch();
     for (const doc of snapshot.docs) batch.delete(doc.ref);
     await batch.commit();
     deleted += snapshot.docs.length;
   }
+  // O documento do diário guarda o nome da capa cifrado: some junto.
+  const cover = db.batch();
+  cover.delete(diaryFor(db, uid));
+  await cover.commit();
+  return deleted;
 }
 
-module.exports = { normalize, seal, open, view, validDate, entriesFor, deleteForAccount };
+module.exports = { normalize, normalizeCover, seal, open, view, validDate, diaryFor, entriesFor, deleteForAccount, COVER_TITLE_MAX };

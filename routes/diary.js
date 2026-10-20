@@ -55,6 +55,27 @@ module.exports = function createDiaryRouter({ verifyFirebaseToken, ensureDb, get
     res.json({ ok: true, items, nextCursor });
   }));
 
+  // Nome da capa. Fica sob /ajustes/ para nunca colidir com um id de
+  // página, que é sempre um segmento só.
+  router.get(base + "/ajustes/capa", handle(async (req, res) => {
+    const snapshot = await diary.diaryFor(getDb(), req.diaryUid).get();
+    const stored = snapshot.exists ? snapshot.data().cover : null;
+    res.json({ ok: true, cover: stored ? diary.open(req.diaryUid, stored, secret) : { title: "" } });
+  }));
+
+  router.put(base + "/ajustes/capa", handle(async (req, res) => {
+    let cover;
+    try { cover = diary.normalizeCover(req.body); }
+    catch (error) { return sendError(res, 400, error.message); }
+    const ref = diary.diaryFor(getDb(), req.diaryUid);
+    const sealed = cover.title ? diary.seal(req.diaryUid, cover, secret) : null;
+    await getDb().runTransaction(async transaction => {
+      const snapshot = await transaction.get(ref);
+      transaction.set(ref, { ...(snapshot.exists ? snapshot.data() : {}), cover: sealed, updatedAt: Date.now() });
+    });
+    res.json({ ok: true, cover });
+  }));
+
   router.put(base + "/:id", handle(async (req, res) => {
     if (!ENTRY_ID.test(req.params.id)) return sendError(res, 400, "ID_INVALIDO");
     let payload;

@@ -83,4 +83,10 @@ async function main() {
   console.log("OK");
 }
 
-main().catch(error => { console.error("Erro:", error.message); process.exitCode = 1; });
+// Executado direto é a ronda; exigido como módulo, entrega as peças para o
+// teste conferir a ronda com a MESMA descoberta de rotas que ela usa.
+if (require.main === module) {
+  main().catch(error => { console.error("Erro:", error.message); process.exitCode = 1; });
+}
+
+module.exports = { listRoutes, toProbePath, DENY_STATUS };
