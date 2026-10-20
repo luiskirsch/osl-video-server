@@ -202,6 +202,26 @@ test("metadata-only pages persist encrypted and can be restored or cleared", asy
   assert.equal(cleared.body.item.weather, "");
 });
 
+test("sealing a day is an explicit choice that is encrypted, restored and reversible", async t => {
+  const f = await fixture(t);
+  const open = await f.call("PUT", "/sealed-day", entry());
+  assert.equal(open.status, 200);
+  assert.equal(open.body.item.sealed, false, "uma pagina salva nao nasce selada");
+  const sealed = await f.call("PUT", "/sealed-day", entry({ version: 1, sealed: true }));
+  assert.equal(sealed.status, 200);
+  assert.equal(sealed.body.item.sealed, true);
+  const stored = [...f.db.data.values()][0];
+  assert.equal(JSON.stringify(stored).includes("sealed"), false, "o selo viaja dentro do texto cifrado");
+  assert.equal((await f.call()).body.items[0].sealed, true, "o selo volta ao reabrir o diario");
+  const reopened = await f.call("PUT", "/sealed-day", entry({ version: 2, sealed: false }));
+  assert.equal(reopened.body.item.sealed, false, "a pessoa pode reabrir o dia");
+  const empty = await f.call("PUT", "/sealed-day", entry({ version: 3, text: "", sealed: true }));
+  assert.equal(empty.body.item.sealed, false, "sem escrita nao ha dia para selar");
+  const wrong = await f.call("PUT", "/sealed-day", entry({ version: 4, sealed: "sim" }));
+  assert.equal(wrong.status, 400);
+  assert.equal(wrong.body.error, "SELO_INVALIDO");
+});
+
 test("capsules omit every content field until the Sao Paulo unlock date and remain immutable", async t => {
   const f = await fixture(t);
   const capsule = entry({ kind: "capsule", unlockDate: "2026-10-20", aroma: "", aromaText: "Perfume de uma lembrança futura" });

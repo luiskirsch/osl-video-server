@@ -31,6 +31,8 @@ function normalize(input, today) {
   const aromaText = input.aromaText === undefined ? "" : input.aromaText;
   const font = input.font === undefined ? "hand" : input.font;
   const weather = input.weather === undefined ? "" : input.weather;
+  const sealed = input.sealed === undefined ? false : input.sealed;
+  if (typeof sealed !== "boolean") invalid("SELO_INVALIDO");
   if (!AROMAS.includes(aroma)) invalid("AROMA_INVALIDO");
   if (typeof aromaText !== "string" || aromaText.length > 100 || /[\u0000-\u001f\u007f]/.test(aromaText)) invalid("AROMA_INVALIDO");
   if (!FONTS.includes(font)) invalid("CALIGRAFIA_INVALIDA");
@@ -46,6 +48,9 @@ function normalize(input, today) {
     kind: input.kind, text, date: input.date,
     unlockDate: input.kind === "capsule" ? input.unlockDate : null,
     feelings, tags, aroma, aromaText: customAroma, font, weather,
+    // Guardar o dia é um gesto da pessoa, não consequência de ter salvo:
+    // sem escrita não há dia para selar.
+    sealed: sealed && Boolean(text),
   };
 }
 
