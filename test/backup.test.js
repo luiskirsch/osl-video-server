@@ -125,3 +125,77 @@ test("backupConfig exige todas as variáveis", () => {
   assert.ok(backup.backupConfig({ BACKUP_R2_ENDPOINT: "e", BACKUP_R2_BUCKET: "b", BACKUP_R2_ACCESS_KEY_ID: "i",
     BACKUP_R2_SECRET_ACCESS_KEY: "s", BACKUP_ENCRYPTION_KEY: key.toString("base64") }));
 });
+
+function tickFixture(docs = { "therapists/a": { name: "synthetic" } }) {
+  const db = fakeDb(docs), locks = new Map(), r2 = memoryR2();
+  db.collection = name => {
+    assert.equal(name, "ops_backups");
+    return { doc: date => ({
+      async get() { return { exists: locks.has(date), data: () => ({ ...locks.get(date) }) }; },
+      async create(value) { if (locks.has(date)) throw new Error("ALREADY_EXISTS"); locks.set(date, { ...value }); },
+      async update(value) { locks.set(date, { ...locks.get(date), ...value }); }
+    }) };
+  };
+  return { db, locks, r2, run: (now, extra = {}) => backup.tick({ db, getBucket: () => null,
+    config: { encryptionKey: key.toString("base64") }, r2Factory: () => r2, now: new Date(now), ...extra }) };
+}
+
+test("backup esgotado por cota não repete a varredura na próxima tentativa do dia", async () => {
+  const f = tickFixture(); let scans = 0;
+  f.db.listCollections = async () => { scans++; throw Object.assign(new Error("RESOURCE_EXHAUSTED: Quota exceeded."), { code: 8 }); };
+  await assert.rejects(f.run("2026-10-21T05:00:00Z"), /Quota exceeded/);
+  assert.equal(f.locks.get("2026-10-21").status, "quota_exhausted");
+  assert.deepEqual(await f.run("2026-10-21T06:00:00Z"), { skipped: "cota_esgotada" });
+  assert.equal(scans, 1);
+});
+
+test("backup não recomeça após consumir o orçamento, inclusive com locks da versão anterior", async () => {
+  const f = tickFixture(); let scans = 0;
+  const list = f.db.listCollections;
+  f.db.listCollections = async () => { scans++; return list(); };
+  await assert.rejects(f.run("2026-10-21T05:00:00Z", { maxReads: 2 }), /ORCAMENTO/);
+  assert.equal(f.locks.get("2026-10-21").status, "quota_exhausted");
+  assert.deepEqual(await f.run("2026-10-21T06:00:00Z"), { skipped: "cota_esgotada" });
+  assert.equal(scans, 1);
+  f.locks.set("2026-10-22", { status: "failed", error: "BACKUP_ORCAMENTO_LEITURAS_EXCEDIDO", attempts: 1 });
+  assert.deepEqual(await f.run("2026-10-22T05:00:00Z"), { skipped: "cota_esgotada" });
+  assert.equal(scans, 1);
+});
+
+test("backup reserva leituras antes de buscar os documentos e não publica dump incompleto", async () => {
+  const f = tickFixture(); let lookups = 0;
+  const getAll = f.db.getAll;
+  f.db.getAll = async (...refs) => { lookups++; return getAll(...refs); };
+  await assert.rejects(f.run("2026-10-21T05:00:00Z", { maxReads: 2 }), /ORCAMENTO/);
+  assert.equal(lookups, 0);
+  assert.equal(f.r2.objects.size, 0);
+});
+
+test("falha no armazenamento externo mantém o consumo no orçamento das próximas tentativas", async () => {
+  const f = tickFixture();
+  f.r2.put = async () => { throw new Error("R2_UNAVAILABLE"); };
+  await assert.rejects(f.run("2026-10-21T05:00:00Z", { maxReads: 6 }), /R2_UNAVAILABLE/);
+  const used = f.locks.get("2026-10-21").readsUsed;
+  assert.ok(used > 0 && used <= 6);
+  await assert.rejects(f.run("2026-10-21T06:00:00Z", { maxReads: 6 }), /ORCAMENTO/);
+  assert.ok(f.locks.get("2026-10-21").readsUsed <= 6);
+  assert.equal(f.locks.get("2026-10-21").status, "quota_exhausted");
+});
+
+test("backup não inicia fora da janela nem consome a franquia renovada após 07 UTC", async () => {
+  const f = tickFixture();
+  for (const hour of ["00:00", "04:59", "07:00", "08:00", "15:00", "23:59"]) {
+    assert.deepEqual(await f.run("2026-10-21T" + hour + ":00Z"), { skipped: "fora_da_janela" });
+  }
+  assert.equal(f.locks.size, 0);
+});
+
+test("um novo dia permite backup completo e preserva a verificação de integridade", async () => {
+  const f = tickFixture();
+  f.locks.set("2026-10-21", { status: "quota_exhausted", attempts: 1 });
+  const result = await f.run("2026-10-22T05:00:00Z");
+  assert.equal(result.documents, 1);
+  assert.equal(f.locks.get("2026-10-22").status, "done");
+  assert.equal(f.locks.get("2026-10-22").readsUsed, result.reads);
+  assert.deepEqual(await f.run("2026-10-22T06:00:00Z"), { skipped: "ja_executado" });
+});

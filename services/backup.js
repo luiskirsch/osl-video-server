@@ -17,8 +17,8 @@
 //
 // Orçamento: o projeto está no plano gratuito do Firebase (50k leituras/dia,
 // 1 GB/dia de download do Storage). Estourar a cota derruba o app até o reset,
-// então o job aborta ao atingir o orçamento e roda perto do reset diário
-// (~07-08 UTC), para que um eventual excesso afete no máximo ~2h.
+// então o orçamento vale para todas as tentativas do dia. O job só inicia
+// antes do reset diário (~07-08 UTC); cota/orçamento esgotado não é repetido.
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
 const { Timestamp, GeoPoint, DocumentReference } = require("firebase-admin/firestore");
@@ -31,6 +31,7 @@ const DEFAULT_MAX_READS = 30_000;
 const DEFAULT_MAX_STORAGE_BYTES = 700 * 1024 * 1024;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 const RUN_HOUR_UTC = 5;
+const STOP_HOUR_UTC = 7;
 const STALE_LOCK_MS = 3 * 60 * 60 * 1000;
 const LOCKS = "ops_backups";
 
@@ -94,34 +95,42 @@ function decodeValue(value, db) {
 async function exportFirestore(db, { maxReads = DEFAULT_MAX_READS } = {}) {
   const lines = [];
   let reads = 0;
-  const spend = n => {
+  const spend = (n, alreadyRead = false) => {
+    if (reads + n > maxReads) {
+      if (alreadyRead) reads += n;
+      throw Object.assign(new Error("BACKUP_ORCAMENTO_LEITURAS_EXCEDIDO"), { reads });
+    }
     reads += n;
-    if (reads > maxReads) throw Object.assign(new Error("BACKUP_ORCAMENTO_LEITURAS_EXCEDIDO"), { reads });
   };
   // listDocuments() inclui "documentos ausentes": pais apagados cujas
   // subcoleções continuam com dados. Uma consulta comum não os alcança, e o
   // que está embaixo deles ficaria fora do backup.
   async function walkCollection(collection) {
     const refs = await collection.listDocuments();
-    spend(Math.max(1, refs.length));
+    spend(Math.max(1, refs.length), true);
     for (let i = 0; i < refs.length; i += 100) {
       const chunk = refs.slice(i, i + 100);
-      const snaps = await db.getAll(...chunk);
       spend(chunk.length);
+      const snaps = await db.getAll(...chunk);
       for (const snap of snaps) {
         if (snap.exists) lines.push(JSON.stringify({ path: snap.ref.path, data: encodeValue(snap.data()) }));
       }
     }
     for (const ref of refs) {
-      const subs = await ref.listCollections();
       spend(1);
+      const subs = await ref.listCollections();
       for (const sub of subs) await walkCollection(sub);
     }
   }
-  const roots = await db.listCollections();
   spend(1);
-  for (const collection of roots) await walkCollection(collection);
-  return { ndjson: lines.join("\n") + (lines.length ? "\n" : ""), documents: lines.length, reads };
+  try {
+    const roots = await db.listCollections();
+    for (const collection of roots) await walkCollection(collection);
+    return { ndjson: lines.join("\n") + (lines.length ? "\n" : ""), documents: lines.length, reads };
+  } catch (error) {
+    error.backupReads = reads;
+    throw error;
+  }
 }
 
 // ─── R2 (S3) ────────────────────────────────────────────────────────────
@@ -230,50 +239,62 @@ function backupConfig(env = process.env) {
 async function runBackup({ db, bucket, r2, key, now = new Date(), maxReads, maxStorageBytes }) {
   const date = now.toISOString().slice(0, 10);
   const dump = await exportFirestore(db, { maxReads });
-  const dumpKey = `firestore/${date}.ndjson.gz.enc`;
-  const compressed = zlib.gzipSync(dump.ndjson);
-  await r2.put(dumpKey, encrypt(key, compressed, dumpKey));
-  // Verifica o que foi gravado: baixa, decifra e confere o hash.
-  const stored = await r2.get(dumpKey);
-  if (!stored || !crypto.timingSafeEqual(
-    crypto.createHash("sha256").update(zlib.gunzipSync(decrypt(key, stored, dumpKey))).digest(),
-    crypto.createHash("sha256").update(dump.ndjson).digest())) throw new Error("BACKUP_VERIFICACAO_FALHOU");
-  // Falha no Storage não invalida o dump do Firestore, já gravado e verificado.
-  let storage = null;
   try {
-    if (bucket) storage = await backupStorage(bucket, r2, key, { maxBytes: maxStorageBytes, now });
-  } catch (error) {
-    // Plano Spark não tem bucket: os arquivos privados ficam no Firestore
-    // (services/private-files.js) e já estão no dump acima.
-    if (error?.code === 404) storage = { skipped: "SEM_BUCKET" };
-    else {
-      storage = { error: String(error.message || error).slice(0, 200) };
-      logError("backup_storage_falhou", error);
+    const dumpKey = `firestore/${date}.ndjson.gz.enc`;
+    const compressed = zlib.gzipSync(dump.ndjson);
+    await r2.put(dumpKey, encrypt(key, compressed, dumpKey));
+    // Verifica o que foi gravado: baixa, decifra e confere o hash.
+    const stored = await r2.get(dumpKey);
+    if (!stored || !crypto.timingSafeEqual(
+      crypto.createHash("sha256").update(zlib.gunzipSync(decrypt(key, stored, dumpKey))).digest(),
+      crypto.createHash("sha256").update(dump.ndjson).digest())) throw new Error("BACKUP_VERIFICACAO_FALHOU");
+    // Falha no Storage não invalida o dump do Firestore, já gravado e verificado.
+    let storage = null;
+    try {
+      if (bucket) storage = await backupStorage(bucket, r2, key, { maxBytes: maxStorageBytes, now });
+    } catch (error) {
+      // Plano Spark não tem bucket: os arquivos privados ficam no Firestore
+      // (services/private-files.js) e já estão no dump acima.
+      if (error?.code === 404) storage = { skipped: "SEM_BUCKET" };
+      else {
+        storage = { error: String(error.message || error).slice(0, 200) };
+        logError("backup_storage_falhou", error);
+      }
     }
+    const expired = expiredDumps(await r2.list("firestore/"), now);
+    if (expired.length) await r2.remove(expired);
+    return { date, dumpKey, documents: dump.documents, reads: dump.reads, dumpBytes: compressed.length, storage, expired: expired.length };
+  } catch (error) {
+    error.backupReads = dump.reads;
+    throw error;
   }
-  const expired = expiredDumps(await r2.list("firestore/"), now);
-  if (expired.length) await r2.remove(expired);
-  return { date, dumpKey, documents: dump.documents, reads: dump.reads, dumpBytes: compressed.length, storage, expired: expired.length };
+}
+
+function quotaFailure(error) {
+  return error?.code === 8 || /RESOURCE_EXHAUSTED|quota exceeded|BACKUP_ORCAMENTO_LEITURAS_EXCEDIDO/i.test(String(error?.message || error || ""));
 }
 
 // Lock idempotente por dia (create() é atômico: só uma réplica executa).
-async function tick({ db, getBucket, config, now = new Date(), r2Factory = createR2 }) {
+async function tick({ db, getBucket, config, now = new Date(), r2Factory = createR2, maxReads = DEFAULT_MAX_READS }) {
+  // An hourly retry after the reset was consuming the new day's entire quota.
+  // Never start a scan outside this window, including the first backup.
+  if (now.getUTCHours() < RUN_HOUR_UTC || now.getUTCHours() >= STOP_HOUR_UTC) return { skipped: "fora_da_janela" };
   const date = now.toISOString().slice(0, 10);
   const lockRef = db.collection(LOCKS).doc(date);
   const existing = await lockRef.get();
   if (existing.exists) {
     const lock = existing.data();
     if (lock.status === "done") return { skipped: "ja_executado" };
+    // Also recognize old failed locks written before this fix.
+    if (lock.status === "quota_exhausted" || quotaFailure(lock.error)) return { skipped: "cota_esgotada" };
     if (lock.status === "running" && now - Number(lock.startedAtMs || 0) < STALE_LOCK_MS) return { skipped: "em_execucao" };
   }
-  if (now.getUTCHours() < RUN_HOUR_UTC) {
-    // Antes da janela só roda se nunca houve backup bem-sucedido.
-    const anyDone = await db.collection(LOCKS).where("status", "==", "done").limit(1).get();
-    if (!anyDone.empty) return { skipped: "fora_da_janela" };
-  }
+  const readsUsed = Math.max(0, Number(existing.exists ? existing.data().readsUsed || 0 : 0));
+  const remainingReads = Math.max(0, maxReads - readsUsed);
+  if (!remainingReads) return { skipped: "cota_esgotada" };
   const attempt = Number(existing.exists ? existing.data().attempts || 0 : 0) + 1;
   if (attempt > 3) return { skipped: "tentativas_esgotadas" };
-  const lock = { status: "running", startedAtMs: now.getTime(), attempts: attempt };
+  const lock = { status: "running", startedAtMs: now.getTime(), attempts: attempt, readsUsed };
   try {
     if (existing.exists) await lockRef.update(lock); else await lockRef.create(lock);
   } catch (error) {
@@ -283,12 +304,13 @@ async function tick({ db, getBucket, config, now = new Date(), r2Factory = creat
     let bucket = null;
     try { bucket = getBucket(); } catch { /* sem Storage configurado: só Firestore */ }
     const result = await runBackup({ db, bucket, r2: r2Factory(config),
-      key: parseKey(config.encryptionKey), now });
-    await lockRef.update({ status: "done", finishedAtMs: Date.now(), result });
+      key: parseKey(config.encryptionKey), now, maxReads: remainingReads });
+    await lockRef.update({ status: "done", finishedAtMs: Date.now(), readsUsed: readsUsed + result.reads, result });
     logInfo("backup_concluido", result);
     return result;
   } catch (error) {
-    await lockRef.update({ status: "failed", finishedAtMs: Date.now(), error: String(error.message || error).slice(0, 200) }).catch(() => {});
+    await lockRef.update({ status: quotaFailure(error) ? "quota_exhausted" : "failed", finishedAtMs: Date.now(),
+      readsUsed: readsUsed + Math.max(0, Number(error.backupReads || 0)), error: String(error.message || error).slice(0, 200) }).catch(() => {});
     logError("backup_falhou", error, { date, attempt });
     throw error;
   }
