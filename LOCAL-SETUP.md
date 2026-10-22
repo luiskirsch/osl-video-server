@@ -3,6 +3,10 @@
 Fallback pra quando Railway cair. Backend roda no teu notebook, frontend
 remoto aponta pra ele via tunnel HTTPS (ou tudo local se preferir 100% offline).
 
+> **Railway no ar, mas sem construir versões novas?** Não precisa disto:
+> `npm run publicar` entrega uma imagem pronta ao Railway — veja
+> [Publicar com imagem pronta](#publicar-com-imagem-pronta-railway-sem-builder).
+
 ## TL;DR — 3 cenários
 
 ### Cenário A — Bare bones (só `/health` responde, sem secrets)
@@ -141,6 +145,30 @@ OU abre `?backend=https://osl-video-server-staging.up.railway.app` na URL.
   reconfigurar URL no MP dashboard → tunnel temporário. Não vale a pena pra fallback curto.
 - **Cron jobs (lembretes, reverificação anual)** rodam no servidor local — funcionam
   enquanto ele tiver up.
+
+---
+
+## Publicar com imagem pronta (Railway sem builder)
+
+No incidente de 2026-10-21/22 o Railway seguiu rodando o servidor, mas pausou
+os builds do plano Hobby. O workflow **Imagem do backend** monta a imagem a cada
+push no GitHub Container Registry (sem segredos: `.dockerignore` exclui `.env` e
+chaves), e o comando abaixo a entrega pronta ao Railway — staging primeiro,
+confere o `/health`, depois produção:
+
+```powershell
+npm run publicar                     # staging e produção
+npm run publicar -- --so-staging     # só staging
+npm run publicar -- --voltar-github  # Railway normalizou: volta ao deploy automático
+```
+
+Requer `gh` e `railway` logados. `railway login` só funciona numa janela de
+terminal de verdade (abre o navegador para aprovar).
+
+**Atenção:** com a origem em imagem, push no branch **não publica sozinho** —
+rode `npm run publicar` depois de cada push do backend, até usar
+`--voltar-github`. A origem atual aparece no painel do Railway (serviço →
+Settings → Source).
 
 ---
 
