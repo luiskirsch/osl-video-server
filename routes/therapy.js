@@ -21991,5 +21991,6 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
 router.use(require("./diary")({ verifyFirebaseToken, ensureDb, getDb, secret: require("../config").EMPRESA_JWT_SECRET }));
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./workplace-support")({ verifyAdminTherapy, verificarEmpresaToken }));
+router.use(require("./admin-notifications")({ verifyAdminTherapy, ensureDb, getDb, secret: EMPRESA_JWT_SECRET }));
 router._test = { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

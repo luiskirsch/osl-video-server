@@ -153,9 +153,37 @@ module.exports = function createWorkplaceSupportRouter({ verifyAdminTherapy, ver
         if (!support.validId(req.query.companyId)) support.fail("EMPRESA_INVALIDA");
         query = collection().where("careInboxKey", "==", req.query.companyId);
       }
-      const { docs, nextCursor } = await listPage(query, req);
+      let docs, nextCursor, queueSummary;
+      if (actor.role === "care") {
+        const paging = page(req);
+        const all = await query.limit(5001).get();
+        if (all.docs.length > 5000) support.fail("FILA_REQUER_PROCESSAMENTO", 409);
+        const attention = require("../services/admin-notifications").needsAttention;
+        const now = Date.now();
+        const ordered = all.docs.filter(doc => authorized(actor, doc.data())).map(doc => ({ doc, item: readItem(actor, doc) }));
+        const overdue = item => !["closed", "cancelled", "resolved"].includes(item.status) && item.dueAt < now;
+        queueSummary = { total:ordered.length, attention:ordered.filter(e=>attention(e.item)).length,
+          overdue:ordered.filter(e=>attention(e.item) && overdue(e.item)).length,
+          companies:new Set(ordered.filter(e=>attention(e.item)).map(e=>e.item.companyId)).size };
+        ordered.sort((a, b) => Number(attention(b.item)) - Number(attention(a.item))
+          || Number(overdue(b.item)) - Number(overdue(a.item)) || a.item.createdAt - b.item.createdAt || a.doc.id.localeCompare(b.doc.id));
+        const start = paging.cursor ? ordered.findIndex(e => e.doc.id === paging.cursor) + 1 : 0;
+        docs = ordered.slice(start, start + paging.limit).map(e => e.doc);
+        nextCursor = ordered.length > start + paging.limit ? docs.at(-1).id : null;
+      } else ({ docs, nextCursor } = await listPage(query, req));
       const items = docs.filter(doc => authorized(actor, doc.data())).map(doc => support.view(readItem(actor, doc)));
-      res.json({ ok: true, items, nextCursor });
+      if (actor.role === "care") {
+        const names = new Map();
+        await Promise.all([...new Set(items.map(item => item.companyId))].map(async id => {
+          const tenant = await companyRef(id).get();
+          names.set(id, tenant.exists ? tenant.data().nome || "Empresa" : "Empresa indisponível");
+        }));
+        for (const item of items) {
+          item.companyName = names.get(item.companyId);
+          item.needsAttention = require("../services/admin-notifications").needsAttention(item);
+        }
+      }
+      res.json({ ok: true, items, nextCursor, ...(queueSummary ? { queue:queueSummary } : {}) });
     }));
     router.get(`${base}/requests/:id`, wrap(async (req, res) => {
       const actor = await authenticate(req, res);

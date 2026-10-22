@@ -101,6 +101,23 @@ test("HTTP support isolates company, care team and employee while preserving own
   const stored = db.records.get(`${s.COLLECTION}/${care.id}`);
   assert.ok(!JSON.stringify(stored).includes("Preciso conversar"));
 });
+test("admin inbox spans companies, prioritizes unanswered requests and paginates without company selection", async t => {
+  const {db,set,call,create}=await setup(t);
+  const original=(await create()).body.item;
+  const template=s.open(original.id,db.records.get(`${s.COLLECTION}/${original.id}`),secret);
+  await set("therapy_empresas","another",{status:"ativa",nome:"Outra empresa"});
+  await set(s.COLLECTION, "waiting", s.seal({...template,id:"waiting",status:"waiting_employee",companyId:"another"},secret));
+  await set(s.COLLECTION, "urgent", s.seal({...template,id:"urgent",companyId:"another",dueAt:1},secret));
+  const first=await call("/therapy/admin/apoio/requests?limit=1",{admin:true});
+  assert.equal(first.status,200);assert.equal(first.body.items[0].id,"urgent");
+  assert.equal(first.body.items[0].companyName,"Outra empresa");assert.equal(first.body.queue.attention,2);
+  assert.equal(first.body.queue.companies,2);assert.equal(first.body.queue.total,3);
+  const second=await call(`/therapy/admin/apoio/requests?limit=1&cursor=${first.body.nextCursor}`,{admin:true});
+  assert.equal(second.body.items[0].id,original.id);
+  const filtered=await call("/therapy/admin/apoio/requests?companyId=another",{admin:true});
+  assert.equal(filtered.body.items.length,2);assert.ok(filtered.body.items.every(item=>item.companyId==="another"));
+});
+
 test("HTTP support create is idempotent and concurrent writes reject stale versions", async t => {
   const { call, create } = await setup(t);
   const requestId = crypto.randomUUID();
