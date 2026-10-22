@@ -57,7 +57,9 @@ async function railway(query, variables) {
     body: JSON.stringify({ query, variables }),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.errors?.length) throw new Error(data.errors?.[0]?.message || `HTTP ${response.status}`);
+  const message = data.errors?.[0]?.message || (response.ok ? "" : `HTTP ${response.status}`);
+  if (/not authorized|unauthorized/i.test(message)) stop("O login do Railway expirou. Rode `railway login` numa janela do terminal, aprove no navegador e tente de novo.");
+  if (message) throw new Error(message);
   return data.data;
 }
 

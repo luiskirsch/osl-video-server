@@ -3,9 +3,9 @@
 Fallback pra quando Railway cair. Backend roda no teu notebook, frontend
 remoto aponta pra ele via tunnel HTTPS (ou tudo local se preferir 100% offline).
 
-> **Railway no ar, mas sem construir versões novas?** Não precisa disto:
-> `npm run publicar` entrega uma imagem pronta ao Railway — veja
-> [Publicar com imagem pronta](#publicar-com-imagem-pronta-railway-sem-builder).
+> **Publicar versões novas do backend:** sempre `npm run publicar`, depois do push
+> (ver `AGENTS.md` e [Publicar com imagem pronta](#publicar-com-imagem-pronta-railway-sem-builder)).
+> Este guia é só para quando o Railway cai de vez.
 
 ## TL;DR — 3 cenários
 
@@ -165,10 +165,11 @@ npm run publicar -- --voltar-github  # Railway normalizou: volta ao deploy autom
 Requer `gh` e `railway` logados. `railway login` só funciona numa janela de
 terminal de verdade (abre o navegador para aprovar).
 
-**Atenção:** com a origem em imagem, push no branch **não publica sozinho** —
-rode `npm run publicar` depois de cada push do backend, até usar
-`--voltar-github`. A origem atual aparece no painel do Railway (serviço →
-Settings → Source).
+**Regra desde 2026-10-22:** a publicação é sempre por este comando — push no
+branch **não publica sozinho**. Quem fizer o push (Claude ou Codex) roda
+`npm run publicar` em seguida, sem pedir confirmação (ver `AGENTS.md`).
+`--voltar-github` só serve se um dia o dono quiser voltar ao builder
+automático do Railway.
 
 ---
 
