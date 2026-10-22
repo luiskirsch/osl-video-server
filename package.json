@@ -25,7 +25,8 @@
     "lint": "node scripts/check-syntax.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "npm run lint && npm test",
-    "audit:prod": "node scripts/audit-prod.js"
+    "audit:prod": "node scripts/audit-prod.js",
+    "publicar": "node scripts/publicar.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.0",

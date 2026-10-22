@@ -16,9 +16,14 @@ RUN npm ci --omit=dev --ignore-scripts \
 
 COPY --chown=node:node . .
 
+# Imagens montadas fora do Railway (workflow "Imagem do backend") informam o
+# commit; nas montagens do próprio Railway fica vazio e vale RAILWAY_GIT_COMMIT_SHA.
+ARG GIT_COMMIT_SHA=""
+
 ENV NODE_ENV=production \
     LOG_FILE=/tmp/server.log \
-    TRANSFORMERS_CACHE_DIR=/tmp/huggingface-transformers
+    TRANSFORMERS_CACHE_DIR=/tmp/huggingface-transformers \
+    GIT_COMMIT_SHA=$GIT_COMMIT_SHA
 
 USER node
 

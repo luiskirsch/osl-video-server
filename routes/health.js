@@ -68,10 +68,10 @@ router.get("/", (req, res) => {
 });
 
 router.get("/health", (req, res) => {
-  // Build info: Railway injeta RAILWAY_GIT_COMMIT_SHA automaticamente
-  // quando faz deploy. Útil pra confirmar exatamente qual commit está
-  // rodando (debug de auto-deploy stale).
-  const commitSha = process.env.RAILWAY_GIT_COMMIT_SHA || null;
+  // Build info: Railway injeta RAILWAY_GIT_COMMIT_SHA quando constrói a partir
+  // do GitHub; a imagem pronta de `npm run publicar` traz GIT_COMMIT_SHA.
+  // Útil pra confirmar exatamente qual commit está rodando.
+  const commitSha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || null;
   const commitShort = commitSha ? commitSha.substring(0, 7) : null;
   const privileged = checkPanelToken(req);
   return res.status(200).json({

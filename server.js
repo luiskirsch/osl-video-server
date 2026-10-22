@@ -22,7 +22,7 @@ if (process.env.SENTRY_DSN) {
     Sentry.init({
       dsn: process.env.SENTRY_DSN,
       environment: process.env.APP_ENV || process.env.NODE_ENV || "production",
-      release: process.env.RAILWAY_GIT_COMMIT_SHA || undefined,
+      release: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || undefined,
       tracesSampleRate: 0,
       // Não envia dados pessoais por default — só erro stack.
       sendDefaultPii: false
