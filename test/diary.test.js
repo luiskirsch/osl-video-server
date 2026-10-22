@@ -409,6 +409,7 @@ test("account deletion purges personal entries before removing authentication an
           async getUserByEmail() { return { uid: "owner" }; },
           async deleteUser(uid) { calls.push("auth:" + uid); },
         }) },
+        async deleteSupportForAccount() { return 0; },
         async deleteDiaryForAccount(receivedDb, uid) {
           assert.equal(receivedDb, db);
           assert.equal(uid, "owner");

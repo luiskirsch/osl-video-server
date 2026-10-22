@@ -13,6 +13,7 @@ const liveService   = require("../services/liveService");
 const worldState    = require("../services/worldState");
 const discoveriesSvc = require("../services/discoveries");
 const { deleteForAccount: deleteDiaryForAccount } = require("../services/diary");
+const { deleteForAccount: deleteSupportForAccount } = require("../services/workplace-support");
 
 const router = express.Router();
 
@@ -156,6 +157,12 @@ router.post("/admin/delete-user", adminLimiter, requireAdmin, asyncHandler(async
     if (deleted) summary.deletedFrom.push(`therapy_diaries (${deleted} docs)`);
   } catch {
     return sendError(res, 503, "DIARIO_EXCLUSAO_FALHOU");
+  }
+  try {
+    const deleted = await deleteSupportForAccount(db, uid);
+    if (deleted) summary.deletedFrom.push(`workplace_support (${deleted} docs)`);
+  } catch {
+    return sendError(res, 503, "APOIO_EXCLUSAO_FALHOU");
   }
   // 5. Deletar do Firebase Auth (irrev)
   try {
