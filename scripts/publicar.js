@@ -135,5 +135,5 @@ async function backToGithub(sha) {
   if (args.has("--voltar-github")) { await backToGithub(sha); return; }
   await waitForImage(sha);
   for (const environment of args.has("--so-staging") ? ENVIRONMENTS.slice(0, 1) : ENVIRONMENTS) await publishImage(environment, sha);
-  say("Publicação concluída. Quando o Railway voltar ao normal: npm run publicar -- --voltar-github");
+  say("Publicação concluída.");
 })().catch(error => stop(error.message));
