@@ -21869,48 +21869,6 @@ function openMoodNote(uid, sealed) {
   } catch { return null; }
 }
 
-// POST /therapy/paciente/humor  { mood: 1-5, note?: string }
-// A data é sempre definida pelo servidor em America/Sao_Paulo. Aceitar uma
-// data do cliente permitiria retroagir/antecipar registros e recriaria o bug
-// da virada UTC em aparelhos com relógio ou fuso incorretos.
-router.post("/therapy/paciente/humor", asyncHandler(async (req, res) => {
-  if (!ensureDb(res)) return;
-  const uid = await verifyFirebaseToken(req, res);
-  if (!uid) return;
-
-  const mood = Number(req.body?.mood);
-  if (!Number.isInteger(mood) || mood < 1 || mood > 5) return sendError(res, 400, "MOOD_INVALIDO");
-  const noteText = String(req.body?.note ?? "").trim();
-  if (noteText.length > MOOD_NOTE_MAX) return sendError(res, 400, "NOTA_MUITO_LONGA");
-  let noteSealed = null;
-  if (noteText) {
-    try { noteSealed = sealMoodNote(uid, noteText); }
-    catch { return sendError(res, 503, "NOTA_INDISPONIVEL"); }
-  }
-
-  const date = publicProgram.dateInSaoPaulo();
-
-  const db  = getDb();
-  const docId = `${uid}_${date}`;
-  const currentRef = db.collection("therapy_humor").doc(docId);
-  const historyRef = db.collection("therapy_humor_history").doc();
-  const batch = db.batch();
-  batch.set(currentRef, {
-    uid, date, mood,
-    note: noteSealed || admin.firestore.FieldValue.delete(),
-    at: admin.firestore.FieldValue.serverTimestamp(),
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-  batch.set(historyRef, {
-    uid, date, mood,
-    type: "mood_recorded",
-    at: admin.firestore.FieldValue.serverTimestamp()
-  });
-  await batch.commit();
-
-  return res.json({ ok: true, date, mood });
-}));
-
 // GET /therapy/paciente/humor?days=30
 router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
@@ -21997,6 +21955,6 @@ router.use(require("./diary")({ verifyFirebaseToken, ensureDb, getDb, secret: re
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./workplace-support")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./admin-notifications")({ verifyAdminTherapy, ensureDb, getDb, secret: EMPRESA_JWT_SECRET }));
-router.use(require("./wellbeing")({ verifyFirebaseToken, ensureDb, getDb, secret: EMPRESA_JWT_SECRET, today: publicProgram.dateInSaoPaulo }));
+router.use(require("./wellbeing")({ verifyFirebaseToken, ensureDb, getDb, secret: EMPRESA_JWT_SECRET, today: publicProgram.dateInSaoPaulo, sealMoodNote, fieldValue: admin.firestore.FieldValue }));
 router._test = { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;

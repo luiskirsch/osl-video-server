@@ -23,3 +23,24 @@ test("well-being update requires owner's daily mood and preserves mood, notes an
  assert.equal((await call({anxiety:null,energy:null,sleep:null})).status,200);
  assert.equal(wellbeing.open("owner","2026-10-22",data.get("owner_2026-10-22").wellbeing,secret).sleep,null);
 });
+
+test("daily check-in validates all answers and commits mood, encrypted wellbeing and note together",async t=>{
+ const stored=new Map();let failCommit=false,commits=0;
+ const db={collection:name=>({doc:id=>({key:`${name}/${id||"history"}`})}),batch:()=>{
+  const writes=[];return {set:(ref,value)=>writes.push([ref.key,value]),commit:async()=>{if(failCommit)throw Error("offline");commits++;for(const [key,value] of writes)stored.set(key,value);}};
+ }};
+ const app=express();app.use(express.json());app.use(require("../routes/wellbeing")({getDb:()=>db,ensureDb:()=>true,secret,today:()=>"2026-10-22",sealMoodNote:(uid,note)=>({encryptedFor:uid,textLength:note.length}),fieldValue:{delete:()=>"delete",serverTimestamp:()=>123},verifyFirebaseToken:async(req,res)=>{const uid=req.get("authorization");if(!uid)res.status(401).json({ok:false});return uid;}}));
+ const server=app.listen(0,"127.0.0.1");await once(server,"listening");t.after(()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+ const call=(body,uid="owner")=>fetch(`http://127.0.0.1:${server.address().port}/therapy/paciente/humor`,{method:"POST",headers:{"Content-Type":"application/json",...(uid?{Authorization:uid}:{})},body:JSON.stringify(body)});
+ const body={mood:4,note:"private observation",wellbeing:{anxiety:0,energy:8,sleep:5}};
+ assert.equal((await call(body,null)).status,401);
+ for(const invalid of [{...body,mood:9},{...body,wellbeing:{sleep:8}},{...body,wellbeing:{anxiety:0,energy:11,sleep:5}},{...body,note:"x".repeat(601)}])assert.equal((await call(invalid)).status,400);
+ assert.equal(stored.size,0);assert.equal(commits,0);
+ failCommit=true;assert.equal((await call(body)).status,503);assert.equal(stored.size,0);
+ failCommit=false;const result=await call(body);assert.equal(result.status,200);assert.deepEqual((await result.json()).wellbeing,body.wellbeing);
+ const current=stored.get("therapy_humor/owner_2026-10-22");assert.equal(current.uid,"owner");assert.equal(current.mood,4);assert.equal(commits,1);
+ assert.deepEqual(wellbeing.open("owner","2026-10-22",current.wellbeing,secret),body.wellbeing);
+ assert.equal(JSON.stringify(current).includes(body.note),false);assert.equal(stored.size,2);
+ // Cached older clients remain compatible without deleting existing metrics.
+ assert.equal((await call({mood:3})).status,200);
+});
