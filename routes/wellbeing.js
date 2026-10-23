@@ -23,17 +23,18 @@ module.exports=function({verifyFirebaseToken,ensureDb,getDb,secret,today,sealMoo
     extra.wellbeingUpdatedAt=Date.now();
    }
    let encryptedNote;
-   try{encryptedNote=note?sealMoodNote(uid,note):fieldValue.delete();}
+   try{encryptedNote=note?sealMoodNote(uid,note):null;}
    catch{return sendError(res,503,"NOTA_INDISPONIVEL");}
-   const db=getDb(),batch=db.batch();
-   batch.set(db.collection("therapy_humor").doc(`${uid}_${date}`),{
-    uid,date,mood,note:encryptedNote,...extra,
-    at:fieldValue.serverTimestamp(),updatedAt:fieldValue.serverTimestamp()
-   },{merge:true});
-   batch.set(db.collection("therapy_humor_history").doc(),{
-    uid,date,mood,type:"mood_recorded",at:fieldValue.serverTimestamp()
+   const db=getDb(),ref=db.collection("therapy_humor").doc(`${uid}_${date}`),history=db.collection("therapy_humor_history").doc();
+   await db.runTransaction(async tx=>{
+    const snap=await tx.get(ref);
+    if(snap.exists)throw Object.assign(Error("REGISTRO_JA_SALVO"),{status:409});
+    tx.create(ref,{
+     uid,date,mood,...(encryptedNote?{note:encryptedNote}:{}),...extra,
+     at:fieldValue.serverTimestamp(),updatedAt:fieldValue.serverTimestamp()
+    });
+    tx.create(history,{uid,date,mood,type:"mood_recorded",at:fieldValue.serverTimestamp()});
    });
-   await batch.commit();
    return res.json({ok:true,date,mood,...(metrics?{wellbeing:metrics}:{})});
   }catch(error){sendError(res,error.status||503,error.status?error.message:"REGISTRO_INDISPONIVEL");}
  });
@@ -42,15 +43,11 @@ module.exports=function({verifyFirebaseToken,ensureDb,getDb,secret,today,sealMoo
   try{
    if(!ensureDb(res))return;
    const uid=await verifyFirebaseToken(req,res);if(!uid)return;
-   const metrics=wellbeing.normalize(req.body);const date=today();
+   const date=today();
    const ref=getDb().collection("therapy_humor").doc(`${uid}_${date}`);
-   const payload=wellbeing.seal(uid,date,metrics,secret);
-   await getDb().runTransaction(async tx=>{
-    const snap=await tx.get(ref);
-    if(!snap.exists||snap.data().uid!==uid||snap.data().date!==date)throw Object.assign(Error("REGISTRE_HUMOR_HOJE"),{status:409});
-    tx.update(ref,{wellbeing:payload,wellbeingUpdatedAt:Date.now()});
-   });
-   res.json({ok:true,date,metrics});
+   const snap=await ref.get();
+   if(!snap.exists||snap.data().uid!==uid||snap.data().date!==date)return sendError(res,409,"REGISTRE_HUMOR_HOJE");
+   return sendError(res,409,"REGISTRO_JA_SALVO");
   }catch(error){sendError(res,error.status||503,error.status?error.message:"BEM_ESTAR_INDISPONIVEL");}
  });return router;
 };
