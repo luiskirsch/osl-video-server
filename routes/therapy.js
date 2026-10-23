@@ -21951,7 +21951,12 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
         });
       }
       const note = x.note ? openMoodNote(uid, x.note) : null;
-      return note ? { date, mood: x.mood, at, note } : { date, mood: x.mood, at };
+      const item = note ? { date, mood: x.mood, at, note } : { date, mood: x.mood, at };
+      if (x.wellbeing) {
+        try { item.wellbeing = require("../services/wellbeing").open(uid, x.date, x.wellbeing, EMPRESA_JWT_SECRET); }
+        catch { item.wellbeingUnavailable = true; }
+      }
+      return item;
     })
     .filter(i => includeAll || i.date >= cutoffStr)
     .sort((a, b) => b.date.localeCompare(a.date) || (b.at || 0) - (a.at || 0));
@@ -21992,5 +21997,6 @@ router.use(require("./diary")({ verifyFirebaseToken, ensureDb, getDb, secret: re
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./workplace-support")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./admin-notifications")({ verifyAdminTherapy, ensureDb, getDb, secret: EMPRESA_JWT_SECRET }));
+router.use(require("./wellbeing")({ verifyFirebaseToken, ensureDb, getDb, secret: EMPRESA_JWT_SECRET, today: publicProgram.dateInSaoPaulo }));
 router._test = { evaluatePlanAccess, mpPreapprovalErrorInfo, professionalTrialStartDate };
 module.exports = router;
