@@ -181,6 +181,41 @@ test("custom aromas are encrypted, restored and replaced by a preset without sta
   assert.equal(replaced.body.item.aromaText, "");
 });
 
+test("colored bookmarks retain exact text ranges, remain encrypted and follow the account", async t => {
+  const f = await fixture(t);
+  const bookmarks = [
+    { id: "mark-red", label: "Uma conversa", color: "red", start: 2, end: 7 },
+    { id: "mark-blue", label: " Voltar aqui ", color: "blue", start: 12, end: 12 },
+  ];
+  const text = "  Hoje fomos caminhar.  ";
+  const created = await f.call("PUT", "/marked", entry({ text, bookmarks }));
+  assert.equal(created.status, 200);
+  const expected = [{ ...bookmarks[0], start: 0, end: 5 }, { ...bookmarks[1], label: "Voltar aqui", start: 10, end: 10 }];
+  assert.deepEqual(created.body.item.bookmarks, expected, "aparar a escrita ajusta as posicoes junto");
+  const stored = [...f.db.data.values()][0];
+  assert.equal(JSON.stringify(stored).includes("Uma conversa"), false);
+  assert.deepEqual(diary.open("owner", stored.payload, SECRET).bookmarks, expected);
+  assert.deepEqual((await f.call()).body.items[0].bookmarks, expected);
+  assert.deepEqual((await f.call("GET", "", undefined, "other")).body.items, []);
+  const removed = await f.call("PUT", "/marked", entry({ text: text.trim(), version: 1, bookmarks: [] }));
+  assert.deepEqual(removed.body.item.bookmarks, []);
+  const legacy = await f.call("PUT", "/legacy", entry());
+  assert.deepEqual(legacy.body.item.bookmarks, [], "clientes antigos continuam podendo salvar");
+});
+
+test("bookmark validation rejects malformed ranges, duplicate IDs and untrusted colors", async t => {
+  const f = await fixture(t);
+  const mark = { id: "mark-one", label: "Lembrar", color: "green", start: 0, end: 5 };
+  for (const bookmarks of [null, {}, [null], [mark, mark], Array.from({ length: 33 }, (_, i) => ({ ...mark, id: `mark-${i}` })),
+    ...[{ id: "../escape" }, { id: 1 }, { label: "" }, { label: "a".repeat(81) }, { label: "duas\nlinhas" },
+      { color: "url(evil)" }, { start: -1 }, { end: 99999 }, { start: 10, end: 5 }, { end: 1.5 }, { start: "0" }].map(change => [{ ...mark, ...change }])]) {
+    const result = await f.call("PUT", "/invalid-mark", entry({ bookmarks }));
+    assert.equal(result.status, 400, JSON.stringify(bookmarks));
+    assert.equal(result.body.error, "MARCADORES_INVALIDOS");
+  }
+  assert.equal(f.db.data.size, 0);
+});
+
 test("metadata-only pages persist encrypted and can be restored or cleared", async t => {
   const f = await fixture(t);
   const metadata = entry({ text: "", feelings: ["serenidade"], tags: ["chuva"], aroma: "lavanda", font: "classic", weather: "rain" });

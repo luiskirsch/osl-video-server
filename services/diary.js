@@ -6,6 +6,26 @@ const FEELINGS = ["serenidade", "nostalgia", "alegria", "gratidao", "tristeza", 
 const AROMAS = ["", "lavanda", "cafe", "chuva", "laranja", "madeira"];
 const FONTS = ["hand", "classic", "simple"];
 const WEATHER = ["", "clear", "cloudy", "rain", "storm", "snow", "fog"];
+const BOOKMARK_COLORS = ["red", "blue", "green", "gold", "purple", "rose"];
+
+function normalizeBookmarks(value, rawText) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) invalid("MARCADORES_INVALIDOS");
+  const ids = new Set();
+  const leading = rawText.length - rawText.trimStart().length;
+  const length = rawText.trim().length;
+  return value.map(mark => {
+    if (!mark || typeof mark !== "object" || Array.isArray(mark) ||
+        typeof mark.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(mark.id) || ids.has(mark.id) ||
+        typeof mark.label !== "string" || !mark.label.trim() || mark.label.length > 80 || /[\u0000-\u001f\u007f]/.test(mark.label) ||
+        !BOOKMARK_COLORS.includes(mark.color) || !Number.isSafeInteger(mark.start) || !Number.isSafeInteger(mark.end) ||
+        mark.start < 0 || mark.end < mark.start || mark.end > rawText.length) invalid("MARCADORES_INVALIDOS");
+    ids.add(mark.id);
+    return { id: mark.id, label: mark.label.trim(), color: mark.color,
+      start: Math.max(0, Math.min(length, mark.start - leading)),
+      end: Math.max(0, Math.min(length, mark.end - leading)) };
+  });
+}
 
 function invalid(message = "REGISTRO_INVALIDO") {
   throw Object.assign(new Error(message), { status: 400 });
@@ -38,6 +58,7 @@ function normalize(input, today) {
   if (!FONTS.includes(font)) invalid("CALIGRAFIA_INVALIDA");
   if (!WEATHER.includes(weather)) invalid("CLIMA_INVALIDO");
   const text = input.text.trim();
+  const bookmarks = normalizeBookmarks(input.bookmarks, input.text);
   const feelings = [...new Set(input.feelings)];
   const tags = [...new Set(input.tags.map(value => value.replace(/^#/, "").trim()).filter(Boolean))];
   const customAroma = aroma ? "" : aromaText.trim();
@@ -47,7 +68,7 @@ function normalize(input, today) {
   return {
     kind: input.kind, text, date: input.date,
     unlockDate: input.kind === "capsule" ? input.unlockDate : null,
-    feelings, tags, aroma, aromaText: customAroma, font, weather,
+    feelings, tags, aroma, aromaText: customAroma, font, weather, bookmarks,
     // Guardar o dia é um gesto da pessoa, não consequência de ter salvo:
     // sem escrita não há dia para selar.
     sealed: sealed && Boolean(text),
