@@ -14,16 +14,8 @@
 const { execSync } = require("node:child_process");
 const fs = require("node:fs");
 
-const EXCEPTIONS = {
-  "GHSA-86w9-cpqp-85rv": {
-    package: "node-forge",
-    reviewBy: "2027-01-11",
-    reason:
-      "Falha na verificação de assinatura RSA PKCS#1 v1.5. O backend usa node-forge só para abrir o .pfx " +
-      "(PKCS#12) do profissional em services/tiss-submitters/_signer.js; quem assina é o xml-crypto e nenhuma " +
-      "verificação RSA passa pelo node-forge. Sem versão corrigida publicada (última: 1.4.0, em 11/10/2026).",
-  },
-};
+// Formato: { "GHSA-xxxx-xxxx-xxxx": { package, reviewBy: "AAAA-MM-DD", reason } }
+const EXCEPTIONS = {};
 
 const BLOCKING = new Set(["high", "critical"]);
 const advisoryId = url => (String(url || "").match(/GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}/i) || [])[0] || String(url || "");
