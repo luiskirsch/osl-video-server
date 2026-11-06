@@ -182,6 +182,8 @@ async function changeMember(db, companyId, actor, id, input) {
       Object.assign(after, { status: "inativo", benefitEligible: false, eligibilityVerifiedAt: null,
         eligibilityVerifiedBy: null, departureDate, departureReason: input.departureReason });
     }
+    if (after.status === "ativo" && after.eligibilityVerifiedAt && after.benefitEligible !== false
+        && !normalizeEmploymentType(after.employmentType)) fail("TIPO_VINCULO_OBRIGATORIO");
     // Generic updates cannot alter status, account UID, scope, company or clinical fields.
     tx.set(ref, after);
     tx.update(companyRef, { rosterUpdatedAt: now });

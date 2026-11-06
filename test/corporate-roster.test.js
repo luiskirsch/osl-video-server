@@ -73,6 +73,7 @@ test("admission, approval, offboarding and readmission preserve account, history
   assert.equal((await patch({ action: "approve" })).status, 400);
   item = (await patch({ action: "approve", employmentType: "clt", confirmEligibility: true })).body.item;
   assert.equal(item.benefitEligible, true);
+  assert.equal((await patch({ employmentType: "" })).status, 400);
   const stale = item.version;
   await set("therapy_sessions", "existing", { status: "scheduled", colaboradorId: item.id });
   await set("therapy_patient_accounts", "patient", { name: "Ana", privateHistory: "preserved" });
