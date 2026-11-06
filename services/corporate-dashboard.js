@@ -194,5 +194,6 @@ function getCachedCorporateDashboard(db, empresaId, empresa) {
 }
 
 module.exports = {
-  buildCorporateDashboard, getCachedCorporateDashboard, calendarMonthBounds, companyDocuments
+  buildCorporateDashboard, getCachedCorporateDashboard, calendarMonthBounds, companyDocuments,
+  invalidateCorporateDashboard: empresaId => dashboardCache.delete(empresaId)
 };

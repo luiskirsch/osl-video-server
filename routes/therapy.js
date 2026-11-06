@@ -18244,13 +18244,16 @@ router.get("/public/empresa/:slug", asyncHandler(async (req, res) => {
   if (e.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
   if (e.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
 
+  const rosterSnap = await db.collection("therapy_colaboradores")
+    .where("empresaId", "==", snap.docs[0].id).select("status").get();
+
   return res.json({
     ok: true,
     id: snap.docs[0].id,
     nome: e.nome,
     segmento: e.segmento || null,
     limiteColaboradores: e.limiteColaboradores || null,
-    totalColaboradores: e.totalColaboradores || 0
+    totalColaboradores: rosterSnap.docs.filter(doc => doc.data().status !== "inativo").length
   });
 }));
 
@@ -18275,11 +18278,6 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
   const empresa = empDoc.data();
   if (empresa.status !== "ativa") return sendError(res, 403, "EMPRESA_INATIVA");
   if (empresa.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
-
-  // Verifica limite de colaboradores
-  if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
-    return sendError(res, 403, "LIMITE_COLABORADORES_ATINGIDO");
-  }
 
   // Verifica se e-mail já cadastrado nesta empresa
   const dupSnap = await db.collection("therapy_colaboradores")
@@ -18307,12 +18305,16 @@ router.post("/public/colaborador-cadastro", asyncHandler(async (req, res) => {
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   };
 
-  const colabRef = await db.collection("therapy_colaboradores").add(doc);
-
-  // Incrementa contador na empresa
-  await empDoc.ref.update({
-    totalColaboradores: admin.firestore.FieldValue.increment(1)
-  });
+  let colabRef;
+  try {
+    const result = await require("../services/corporate-roster").createMembers(db, empDoc.id,
+      "Autocadastro pelo link da empresa", [doc], { metadata: { cpf: doc.cpf, origem: "autocadastro" } });
+    colabRef = db.collection("therapy_colaboradores").doc(result.items[0].id);
+    require("../services/corporate-dashboard").invalidateCorporateDashboard(empDoc.id);
+  } catch (error) {
+    if (error.status) return sendError(res, error.status, error.message);
+    throw error;
+  }
 
   // E-mail de boas-vindas
   try {
@@ -18377,10 +18379,6 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
   if (empresa.benefitStatus !== "active") return sendError(res, 403, "BENEFICIO_INATIVO");
   const empresaId = empSnap.docs[0].id;
 
-  if (empresa.limiteColaboradores && (empresa.totalColaboradores || 0) >= empresa.limiteColaboradores) {
-    return sendError(res, 403, "LIMITE_COLABORADORES_ATINGIDO");
-  }
-
   // Cria/atualiza patient account com info de empresa
   const patRef = db.collection("therapy_patient_accounts").doc(uid);
   const patDoc = await patRef.get();
@@ -18413,23 +18411,17 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
     .limit(1).get();
 
   if (colabSnap.empty) {
-    await db.collection("therapy_colaboradores").add({
-      nome,
-      email,
-      empresaId,
-      empresaNome:        empresa.nome,
-      empresaSlug:        codigoEmpresa,
-      patientAccountUid:  uid,
-      status:             "pendente",
-      employmentType:     null,
-      benefitEligible:    false,
-      nr1Scope:            "technical_review",
-      createdAt:          admin.firestore.FieldValue.serverTimestamp()
-    });
-    await empSnap.docs[0].ref.update({
-      totalColaboradores: admin.firestore.FieldValue.increment(1)
-    });
+    try {
+      await require("../services/corporate-roster").createMembers(db, empresaId,
+        "Cadastro pelo aplicativo", [{ nome, email }], { metadata: { patientAccountUid: uid, origem: "mobile-colaborador" } });
+    } catch (error) {
+      if (error.status) return sendError(res, error.status, error.message);
+      throw error;
+    }
   } else {
+    if (colabSnap.docs[0].data().patientAccountUid && colabSnap.docs[0].data().patientAccountUid !== uid) {
+      return sendError(res, 409, "VINCULO_CORPORATIVO_DIVERGENTE");
+    }
     await colabSnap.docs[0].ref.update({
       patientAccountUid: uid,
       nome,
@@ -18437,6 +18429,7 @@ router.post("/public/mobile/colaborador-registrar", asyncHandler(async (req, res
     });
   }
 
+  require("../services/corporate-dashboard").invalidateCorporateDashboard(empresaId);
   await logAudit({ type: "colaborador_registrado_mobile", uid, empresaId, empresaNome: empresa.nome });
 
   return res.json({ ok: true, empresaNome: empresa.nome });
@@ -18542,6 +18535,7 @@ router.patch("/therapy/admin/colaboradores/:id", asyncHandler(async (req, res) =
     }
   }
   await ref.update(updates);
+  require("../services/corporate-dashboard").invalidateCorporateDashboard(currentSnap.data().empresaId);
   return res.json({ ok: true });
 }));
 
@@ -21953,6 +21947,7 @@ router.get("/therapy/paciente/humor", asyncHandler(async (req, res) => {
 
 router.use(require("./diary")({ verifyFirebaseToken, ensureDb, getDb, secret: require("../config").EMPRESA_JWT_SECRET }));
 router.use(require("./nr1")({ verifyAdminTherapy, verificarEmpresaToken }));
+router.use(require("./corporate-roster")({ verificarEmpresaToken }));
 router.use(require("./workplace-support")({ verifyAdminTherapy, verificarEmpresaToken }));
 router.use(require("./admin-notifications")({ verifyAdminTherapy, ensureDb, getDb, secret: EMPRESA_JWT_SECRET }));
 router.use(require("./wellbeing")({ verifyFirebaseToken, ensureDb, getDb, secret: EMPRESA_JWT_SECRET, today: publicProgram.dateInSaoPaulo, sealMoodNote, fieldValue: admin.firestore.FieldValue }));
