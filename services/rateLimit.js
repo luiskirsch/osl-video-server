@@ -60,7 +60,7 @@ async function requestIdentity(req) {
 // clients share only that route's IP budget, not the entire API's budget.
 const globalLimiter = rateLimit({
   windowMs: 60_000,
-  limit: req => req.firebaseUid ? 600 : req.path.startsWith("/public/") ? 120 : 300,
+  limit: req => req.firebaseUid ? 600 : /^\/public\/profissionais\/[^/]+\/foto$/.test(req.path) ? 1200 : req.path.startsWith("/public/") ? 120 : 300,
   keyGenerator: async req => routeBucket(req) + ":" + await requestIdentity(req),
   standardHeaders: true,
   legacyHeaders: false,
