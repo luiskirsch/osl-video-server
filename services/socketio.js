@@ -27,6 +27,7 @@ let _io = null;
 
 function initSocketIo(httpServer, allowedOrigins) {
   _io = new Server(httpServer, {
+    allowRequest: (req, done) => done(null, require("../config").APP_ENV !== "staging" || require("../middleware/stagingAccess").hasStagingAccess(req)),
     cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
     pingTimeout:  60_000,
     pingInterval: 25_000,
@@ -38,7 +39,7 @@ function initSocketIo(httpServer, allowedOrigins) {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("AUTH_REQUIRED"));
     try {
-      const decoded = await admin.auth().verifyIdToken(token);
+      const decoded = await admin.auth().verifyIdToken(token, true);
       socket.uid = decoded.uid;
       if (!GAME_ENABLED) return next();
 

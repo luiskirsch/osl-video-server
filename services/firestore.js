@@ -35,6 +35,7 @@ function initFirebaseAdmin() {
   if (getApps().length) return getFirestore();
   const serviceAccount = parseServiceAccountFromEnv();
   const projectId = serviceAccount.project_id || serviceAccount.projectId;
+  require("./firebase-isolation").assertFirebaseIsolation(projectId);
   const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`;
   const app = initializeApp({
     credential: cert({
@@ -54,6 +55,7 @@ try {
   logInfo("firebase_admin_initialized");
 } catch (error) {
   logWarn("firebase_admin_not_configured", { detail: error.message });
+  if (process.env.RAILWAY_DEPLOYMENT_ID && process.env.FIREBASE_EXPECTED_PROJECT_ID) process.exit(1);
 }
 
 function getDb() { return db; }

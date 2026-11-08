@@ -13,9 +13,8 @@ const CRITICAL = [
   "EMPRESA_JWT_SECRET",
   "LIVEKIT_API_KEY",
   "LIVEKIT_API_SECRET",
-  "MP_ACCESS_TOKEN_JOGO",
-  "MP_WEBHOOK_SECRET_JOGO",
   "FIREBASE_SERVICE_ACCOUNT_JSON",
+  ...(process.env.GAME_ENABLED === "true" ? ["MP_ACCESS_TOKEN_JOGO", "MP_WEBHOOK_SECRET_JOGO"] : []),
 ];
 
 // Ausência degrada funcionalidade mas não compromete segurança

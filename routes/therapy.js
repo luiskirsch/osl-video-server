@@ -57,6 +57,7 @@ const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const tiss     = require("../services/tiss");
 const { prepareClinicalSignature, persistClinicalSignature, validateTissXml } = require("../services/clinical-signatures");
+const { photoLink, photoGrant, photoVersion } = require("../services/public-profile-photo");
 const smsService = require("../services/sms");
 const supportBot = require("../services/support-bot");
 const { createSupportTools } = require("../services/support-tools");
@@ -1864,7 +1865,8 @@ router.patch("/therapy/profissional/perfil", asyncHandler(async (req, res) => {
     }
   }
   if (req.body?.publicSchedulingEnabled !== undefined) {
-    updates.publicSchedulingEnabled = Boolean(req.body.publicSchedulingEnabled);
+    if (typeof req.body.publicSchedulingEnabled !== "boolean") return sendError(res, 400, "PUBLICACAO_INVALIDA");
+    updates.publicSchedulingEnabled = req.body.publicSchedulingEnabled;
   }
   // Opt-in: profissional habilita transcrição IA + resumo de suas sessões.
   // Feature ainda exige consentimento separado do paciente — backend valida
@@ -6717,12 +6719,13 @@ router.get("/therapy/documento/publica", asyncHandler(async (req, res) => {
 router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
   const uid = String(req.params.uid || "").trim();
-  if (!uid) return sendError(res, 400, "UID_OBRIGATORIO");
-
-  const therapist = await loadTherapist(uid);
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const publicSnap = await getDb().collection("therapists").where("publicSchedulingEnabled", "==", true)
+    .where(admin.firestore.FieldPath.documentId(), "==", uid).limit(1).get();
+  const therapist = publicSnap.docs[0]?.data();
   if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   if (therapist.verificationStatus !== "verified") {
-    return sendError(res, 404, "PROFISSIONAL_NAO_VERIFICADO");
+    return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   }
 
   // Sumariza consultório (omite dados desnecessários — endereço sumarizado).
@@ -6752,7 +6755,6 @@ router.get("/therapy/profissional/publico/:uid", asyncHandler(async (req, res) =
   return res.json({
     ok: true,
     profissional: {
-      uid,
       displayName:     therapist.displayName || "",
       crp:             therapist.crp || "",
       crm:             therapist.crm || "",
@@ -10156,7 +10158,7 @@ const publicInstitutionLeadLimiter = rateLimit({
   message: { ok: false, error: "RATE_LIMIT_EXCEDIDO", hint: "Muitas solicitações. Aguarde 1h e tente novamente." }
 });
 
-function summarizeTherapistForPublicScheduling(therapist) {
+function summarizeTherapistForPublicScheduling(therapist, audience = "pacientes") {
   const c = therapist.consultorio || {};
   const conselhoSigla = resolveSiglaFromTherapist(therapist);
   const conselhoMeta  = getConselho(conselhoSigla);
@@ -10164,8 +10166,7 @@ function summarizeTherapistForPublicScheduling(therapist) {
     displayName:    therapist.displayName || "",
     especialidade:  therapist.especialidade || "",
     bio:            therapist.bio || "",
-    photoBase64:    therapist.photoBase64 || "",
-    photoMime:      therapist.photoMime || "",
+    photoUrl:       photoLink(therapist, audience),
     conselhoLabel:  conselhoMeta?.label || "",
     numeroConselho: therapist.numeroConselho || therapist.crp || therapist.crm || "",
     isInternacional: isConselhoInternacional(conselhoSigla),
@@ -10175,7 +10176,7 @@ function summarizeTherapistForPublicScheduling(therapist) {
     uf:             c.uf || "",
     // Pagamento pela plataforma só no plano institucional (R$ 60 fixo);
     // pagantes da mensalidade mostram o próprio valor e cobram por fora.
-    pixConfigured:  isInstitutionalProfessional(therapist) && !!(therapist.pixKey),
+    paymentFlow:    isInstitutionalProfessional(therapist) && therapist.pixKey ? "platform_pix" : "professional",
     valorConsulta:  isInstitutionalProfessional(therapist) ? 6000 : (therapist.valorConsulta || null)
   };
 }
@@ -10353,13 +10354,14 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   const limit               = Math.min(100, Math.max(1, Number(req.query?.limit) || 50));
 
   const db = getDb();
-  const snap = await db.collection("therapists").limit(500).get();
+  const snap = await db.collection("therapists").where("publicSchedulingEnabled", "==", true).limit(500).get();
 
   const items = [];
   const availableEspecialidades = new Set();
   snap.forEach(d => {
     const t = d.data();
     if (!isDirectoryEligibleFor(audience, t, directoryNow)) return;
+    if (!isValidPublicSlug(String(t.publicSchedulingSlug || ""))) return;
 
     if (t.especialidade) availableEspecialidades.add(String(t.especialidade).trim());
 
@@ -10381,12 +10383,10 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
     const conselhoMeta  = getConselho(conselhoSigla);
 
     items.push({
-      uid:            d.id,
-      slug:           t.publicSchedulingSlug || d.id,
+      slug:           t.publicSchedulingSlug,
       displayName:    t.displayName || "",
       especialidade:  t.especialidade || "",
-      photoBase64:    t.photoBase64 || "",
-      photoMime:      t.photoMime || "",
+      photoUrl:       photoLink(t, audience),
       conselhoLabel:  conselhoMeta?.label || "",
       numeroConselho: t.numeroConselho || t.crp || t.crm || "",
       isInternacional: isConselhoInternacional(conselhoSigla),
@@ -10403,7 +10403,7 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   // Ordena alfabético (nome). Limit aplicado por último.
   items.sort((a, b) => a.displayName.localeCompare(b.displayName, "pt-BR"));
 
-  res.set("Vary", "Authorization");
+  res.vary("Authorization");
   return res.json({
     ok: true,
     audience,
@@ -10413,20 +10413,36 @@ router.get("/public/profissionais", asyncHandler(async (req, res) => {
   });
 }));
 
-// GET /public/profissionais/:uid — perfil público completo de um profissional
-// que foi liberado pelo admin para aparecer na Rede de Psicologia. Essa rota
-// não depende de o profissional aceitar agendamentos online.
-router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
+// Public detail and photo require explicit publication consent in the query.
+async function findPublishedTherapistBySlug(slug) {
+  if (!isValidPublicSlug(slug)) return null;
+  const snap = await getDb().collection("therapists")
+    .where("publicSchedulingEnabled", "==", true).where("publicSchedulingSlug", "==", slug).limit(1).get();
+  return snap.empty ? null : { ...snap.docs[0].data(), uid: snap.docs[0].id };
+}
+
+router.get("/public/profissionais/:slug/foto", asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
-  const uid = String(req.params.uid || "").trim();
-  if (!/^[A-Za-z0-9_-]{6,128}$/.test(uid)) {
-    return sendError(res, 400, "PROFISSIONAL_INVALIDO");
+  const slug = String(req.params.slug || "");
+  const grant = photoGrant(String(req.query?.t || ""), slug);
+  if (!grant) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
+  const therapist = await findPublishedTherapistBySlug(slug);
+  if (!therapist || !isDirectoryEligibleFor(grant.audience, therapist) || !therapist.photoBase64
+      || !/^image\/(?:png|jpeg|webp|gif)$/.test(therapist.photoMime || "") || photoVersion(therapist) !== grant.version) {
+    return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   }
+  res.setHeader("Cache-Control", "private, no-cache");
+  const etag = '"' + grant.version + '"';
+  res.setHeader("ETag", etag);
+  if (req.headers["if-none-match"] === etag) return res.status(304).end();
+  res.type(therapist.photoMime);
+  return res.send(Buffer.from(therapist.photoBase64, "base64"));
+}));
 
-  const doc = await getDb().collection("therapists").doc(uid).get();
-  if (!doc.exists) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
-
-  const therapist = doc.data();
+router.get("/public/profissionais/:slug", asyncHandler(async (req, res) => {
+  if (!ensureDb(res)) return;
+  const therapist = await findPublishedTherapistBySlug(String(req.params.slug || ""));
+  if (!therapist) return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
   const audience = await resolveDirectoryAudience(req);
   if (!isDirectoryEligibleFor(audience, therapist)) {
     return sendError(res, 404, "PROFISSIONAL_NAO_ENCONTRADO");
@@ -10441,7 +10457,7 @@ router.get("/public/profissionais/:uid", asyncHandler(async (req, res) => {
 
   return res.json({
     ok: true,
-    profissional: summarizeTherapistForPublicScheduling(therapist),
+    profissional: summarizeTherapistForPublicScheduling(therapist, audience),
     publicSchedulingEnabled,
     publicSchedulingSlug: publicSchedulingEnabled ? publicSchedulingSlug : "",
     ...(publicSchedulingEnabled ? {
@@ -12426,14 +12442,7 @@ router.post("/therapy/agendamentos/solicitacoes/:id/rejeitar", asyncHandler(asyn
 
 // GET /therapy/health — diagnóstico isolado
 router.get("/therapy/health", (req, res) => {
-  res.json({
-    ok: true,
-    livekitConfigured: !!(LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
-    livekitUrl: LIVEKIT_URL,
-    mpAccessTokenConfigured:   !!MP_ACCESS_TOKEN_THERAPY,
-    mpWebhookSecretConfigured: !!MP_WEBHOOK_SECRET_THERAPY,
-    docValidatorProvider: String(process.env.DOC_VALIDATOR_PROVIDER || "claude").toLowerCase()
-  });
+  res.json({ ok: true });
 });
 
 // ═════════════════════════════════════════════════════════════════════════

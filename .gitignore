@@ -20,7 +20,7 @@ Thumbs.db
 .idea/
 .claude/
 .cdp-audit-profile/
-.codex-cdp-*.js
+.codex-cdp-*
 local-pids.txt
 local-server.err.log
 local-tunnel.err.log

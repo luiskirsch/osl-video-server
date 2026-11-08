@@ -5,7 +5,7 @@ const path = require("node:path");
 const { CORS_ALLOWED_HEADERS } = require("../config");
 
 // Inseridos pelo proxy do Railway, nunca enviados pelo navegador.
-const PROXY_HEADERS = new Set(["x-forwarded-for", "x-forwarded-proto"]);
+const PROXY_HEADERS = new Set(["x-forwarded-for", "x-forwarded-proto", "x-staging-token"]);
 
 function sourceFiles(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {

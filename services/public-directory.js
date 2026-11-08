@@ -49,6 +49,7 @@ function isProgramNetworkMember(therapist = {}) {
 }
 
 function isDirectoryEligibleFor(audience, therapist = {}, now = Date.now()) {
+  if (therapist.publicSchedulingEnabled !== true) return false;
   if (audience === "programa") return isProgramNetworkMember(therapist);
   return therapist.verificationStatus === "verified"
     && therapist.adminPatientDirectoryHidden !== true
@@ -56,10 +57,9 @@ function isDirectoryEligibleFor(audience, therapist = {}, now = Date.now()) {
     && isPayingProfessional(therapist, now);
 }
 
-// Agendamento pelo link público: pagante tem automaticamente; quem marcou a
-// opção antiga continua ativo (compatibilidade com contas de programa).
+// Publication requires explicit consent. Billing never overrides this choice.
 function isPublicSchedulingOn(therapist = {}, now = Date.now()) {
-  return therapist.publicSchedulingEnabled === true || isPayingProfessional(therapist, now);
+  return therapist.publicSchedulingEnabled === true;
 }
 
 // Institucional = plano liberado pelo admin, sem mensalidade. Só nesse caso o

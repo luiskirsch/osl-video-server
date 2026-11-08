@@ -137,7 +137,7 @@ service cloud.firestore {
 
     // ── Config pública (temas, etc.) ───────────────────────────────────────
     match /config/{document=**} {
-      allow read: if true;
+      allow read: if false;
       allow write: if false;
     }
 

@@ -103,14 +103,6 @@ function timingSafeStringEqual(a, b) {
 }
 
 function requireGameAccess(req, res, next) {
-  if (ADMIN_SECRET) {
-    const adminKey = String(req.headers["x-admin-secret"] || "").trim();
-    if (adminKey && timingSafeStringEqual(adminKey, ADMIN_SECRET)) {
-      req.gameAccess = { token_type: "game_access", product: PRODUCT_ID, bypass: true };
-      return next();
-    }
-  }
-
   const accessToken = getBearerToken(req);
   if (!accessToken) return sendError(res, 401, "ACESSO_NAO_INFORMADO");
 
@@ -150,11 +142,7 @@ function _isPanelToken(req) {
 function requireAdmin(req, res, next) {
   if (!ADMIN_SECRET) return sendError(res, 503, "ADMIN_NAO_CONFIGURADO");
 
-  // Caminho 1: x-admin-secret header (acesso direto / ferramentas externas)
-  const provided = String(req.headers["x-admin-secret"] || "").trim();
-  if (provided && timingSafeStringEqual(provided, ADMIN_SECRET)) return next();
-
-  // Caminho 2: Bearer panel session token (painel web)
+  // Only the expiring, purpose-bound admin session is accepted.
   if (_isPanelToken(req)) return next();
 
   return sendError(res, 403, "ADMIN_SECRET_INVALIDO");

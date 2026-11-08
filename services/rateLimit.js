@@ -31,11 +31,37 @@ function makeHandler(errorCode) {
   };
 }
 
-// Global: 300 req/min por IP — proteção base contra flood
+function configureRouteBuckets(app) {
+  const routes = [];
+  const walk = stack => { for (const layer of stack || []) {
+    if (layer.route) routes.push({ regexp: layer.regexp, methods: layer.route.methods, path: String(layer.route.path) });
+    else if (layer.handle?.stack) walk(layer.handle.stack);
+  } };
+  walk(app._router?.stack);
+  app.securityRateRoutes = routes;
+}
+function routeBucket(req) {
+  const method = req.method === "HEAD" ? "GET" : req.method;
+  const route = req.app?.securityRateRoutes?.find(r => r.methods[method.toLowerCase()] && r.regexp.test(req.path));
+  return method + ":" + (route?.path || "unregistered");
+}
+async function requestIdentity(req) {
+  const token = String(req.headers?.authorization || "");
+  if (token.startsWith("Bearer ") && token.length <= 8192) {
+    try {
+      const decoded = await require("firebase-admin").auth().verifyIdToken(token.slice(7), true);
+      req.verifiedFirebaseToken = decoded; req.firebaseRevocationChecked = true; req.firebaseUid = decoded.uid;
+      return "uid:" + decoded.uid;
+    } catch { /* Invalid/unverified claims never create a new identity bucket. */ }
+  }
+  return "ip:" + ipKey(req);
+}
+// Independent counters per matched route and verified identity. Anonymous
+// clients share only that route's IP budget, not the entire API's budget.
 const globalLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 300,
-  keyGenerator: ipKey,
+  limit: req => req.firebaseUid ? 600 : req.path.startsWith("/public/") ? 120 : 300,
+  keyGenerator: async req => routeBucket(req) + ":" + await requestIdentity(req),
   standardHeaders: true,
   legacyHeaders: false,
   handler: makeHandler("RATE_LIMIT_EXCEDIDO"),
@@ -121,4 +147,4 @@ const sessaoCriarLimiter = rateLimit({
   handler: makeHandler("SESSOES_LIMITE_EXCEDIDO"),
 });
 
-module.exports = { globalLimiter, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter, joinLimiter, sessaoCriarLimiter };
+module.exports = { globalLimiter, configureRouteBuckets, routeBucket, requestIdentity, authLimiter, voteLimiter, photoLimiter, reportLimiter, roomLimiter, panelLoginLimiter, joinLimiter, sessaoCriarLimiter };

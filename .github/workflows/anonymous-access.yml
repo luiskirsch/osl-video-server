@@ -41,7 +41,10 @@ jobs:
         run: node scripts/security/wait-for-deploy.js "$API" "$GITHUB_SHA"
         env:
           API: ${{ matrix.api }}
+          DEPLOYMENT_HEALTH_SECRET: ${{ matrix.api == 'https://api-staging.espacopreludio.com.br' && secrets.STAGING_DEPLOYMENT_HEALTH_SECRET || secrets.PRODUCTION_DEPLOYMENT_HEALTH_SECRET }}
+          STAGING_ACCESS_TOKEN: ${{ matrix.api == 'https://api-staging.espacopreludio.com.br' && secrets.STAGING_ACCESS_TOKEN || '' }}
       - name: Rotas clínicas negam chamador anônimo
         run: node scripts/security/check-anonymous-access.js "$API"
         env:
           API: ${{ matrix.api }}
+          STAGING_ACCESS_TOKEN: ${{ matrix.api == 'https://api-staging.espacopreludio.com.br' && secrets.STAGING_ACCESS_TOKEN || '' }}

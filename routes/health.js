@@ -4,7 +4,7 @@ const crypto  = require("crypto");
 const { APP_START_TIME, LOG_FILE } = require("../logger");
 const { PORT, APP_ENV, IS_PRODUCTION, LIVEKIT_API_KEY, LIVEKIT_URL, ADMIN_SECRET } = require("../config");
 const { getDb } = require("../services/firestore");
-const { activeStreams, activeRecordings } = require("../game/state");
+const { canReadHealth } = require("../services/deployment-health");
 const { verifySignedToken } = require("../services/auth");
 
 const router = express.Router();
@@ -58,22 +58,22 @@ function readLogTail(maxBytes = 512 * 1024) {
 }
 
 router.get("/", (req, res) => {
-  return res.status(200).json({
-    ok: true,
-    service: "espaco-preludio-api",
-    message: "Servidor do O SextoLugar está online.",
-    appEnv: APP_ENV,
-    port: PORT
-  });
+  return res.status(200).json({ ok: true });
 });
 
 router.get("/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.status(200).json({ ok: true });
+});
+
+router.get("/internal/health", (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  if (!checkPanelToken(req) && !canReadHealth(req)) return res.status(401).json({ ok: false, error: "AUTH_REQUIRED" });
   // Build info: Railway injeta RAILWAY_GIT_COMMIT_SHA quando constrói a partir
   // do GitHub; a imagem pronta de `npm run publicar` traz GIT_COMMIT_SHA.
   // Útil pra confirmar exatamente qual commit está rodando.
   const commitSha = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || null;
   const commitShort = commitSha ? commitSha.substring(0, 7) : null;
-  const privileged = checkPanelToken(req);
   return res.status(200).json({
     ok: true,
     service: "espaco-preludio-api",
@@ -82,16 +82,13 @@ router.get("/health", (req, res) => {
     startedAt: new Date(APP_START_TIME).toISOString(),
     now: new Date().toISOString(),
     commitSha: commitShort,
-    ...(privileged ? {
       nodeEnv: process.env.NODE_ENV || "development",
       railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
       firebaseConfigured: !!getDb(),
       firebaseProjectId: firebaseProjectId(),
       livekitConfigured: !!LIVEKIT_API_KEY,
       livekitUrl: LIVEKIT_URL || null,
-      activeStreams: activeStreams.size,
-      activeRecordings: activeRecordings.size
-    } : {})
+      gameEnabled: require("../config").GAME_ENABLED
   });
 });
 
@@ -161,7 +158,7 @@ router.get("/panel", (req, res) => {
 
       async function updateStatus() {
         try {
-          const res  = await fetch("/health");
+          const res  = await fetch("/internal/health");
           const data = await res.json();
           statusEl.innerHTML = '<span class="ok">🟢 ONLINE</span> - Porta ${PORT} - Uptime ' + data.uptimeSec + 's';
         } catch (e) {

@@ -37,7 +37,8 @@ function listRoutes() {
 
 async function statusOf(url) {
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" }, redirect: "manual", credentials: "omit" });
+    const headers = { Accept: "application/json", ...(process.env.STAGING_ACCESS_TOKEN ? { "X-Staging-Token": process.env.STAGING_ACCESS_TOKEN } : {}) };
+    const res = await fetch(url, { headers, redirect: "manual", credentials: "omit" });
     return res.status;
   } catch (error) {
     return { error: String(error.message || error).slice(0, 60) };

@@ -204,7 +204,8 @@ const configuredAllowedOrigins = String(process.env.CORS_ALLOWED_ORIGINS || "")
   .map(origin => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
 const ALLOWED_ORIGINS = [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredAllowedOrigins])];
-app.use(cors({
+app.use(require("./middleware/stagingAccess"));
+app.use(cors((req, callback) => callback(null, {
   origin: (origin, cb) => {
     // Sem Origin (server-to-server, ferramentas de teste, MP webhook) → permite
     if (!origin) return cb(null, true);
@@ -213,9 +214,9 @@ app.use(cors({
   },
   credentials: false,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: CORS_ALLOWED_HEADERS,
+  allowedHeaders: require("./services/cors-policy").headersFor(req),
   maxAge: 600
-}));
+})));
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
 app.use(require("./middleware/clinicalSecurity"));
 app.use(waf);
@@ -265,6 +266,8 @@ if (GAME_ENABLED) {
     if (category) app.use(auditLog(category), router); else app.use(router);
   }
 }
+
+require("./services/rateLimit").configureRouteBuckets(app);
 
 // Introspecção de rotas (usada pelo teste de cobertura de autorização
 // test/clinical-route-coverage.test.js). Roda depois de todas as montagens,

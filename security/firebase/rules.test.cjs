@@ -63,9 +63,9 @@ test("published shared rules and dedicated clinical rules deny direct clinical a
           await assertFails(deleteObject(file));
         });
       }
-      // Positive control: the shared snapshot still allows the game's public config.
+      // Configuration is administrative metadata in all environments.
+      await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "config/public-test")));
       if (mode !== "dedicated") {
-        await assertSucceeds(getDoc(doc(env.unauthenticatedContext().firestore(), "config/public-test")));
         await sub.test("legitimate game creation and profile access survive clinical isolation", async () => {
           const gameDb = env.authenticatedContext("game-positive-control").firestore();
           const profile = doc(gameDb, "users/game-positive-control");

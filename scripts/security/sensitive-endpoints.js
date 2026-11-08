@@ -12,7 +12,7 @@
 
 // Prefixos cujas rotas GET devolvem, em geral, dado de paciente/profissional/
 // clínica/admin. Fora destes, o probe não opina.
-const CLINICAL_PREFIX = /^\/(therapy|rt|institution|empresa|public)(\/|$)/;
+const CLINICAL_PREFIX = /^\/(therapy|rt|institution|empresa|public|internal)(\/|$)/;
 
 // Rotas GET sob os prefixos acima que são acessíveis SEM login de propósito:
 // páginas públicas (diretório, health, geo) ou protegidas por um token/slug
@@ -26,7 +26,8 @@ const PUBLIC = [
   "/therapy/geo",
   "/therapy/health",
   // Diretório/verificação por slug ou token no link
-  "/public/profissionais/:uid",
+  "/public/profissionais/:slug",
+  "/public/profissionais/:slug/foto",
   "/public/empresa/:slug",
   "/public/empresa/verificar",
   "/public/aluno-consentimento/:token",

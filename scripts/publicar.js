@@ -32,6 +32,8 @@ const ENVIRONMENTS = [
 ];
 
 const args = new Set(process.argv.slice(2));
+const envConfigCache = new Map();
+const { healthToken } = require("../services/deployment-health");
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const say = message => console.log(`[${new Date().toLocaleTimeString("pt-BR")}] ${message}`);
 function stop(message) { console.error(`\n✖ ${message}`); process.exit(1); }
@@ -63,8 +65,22 @@ async function railway(query, variables) {
   return data.data;
 }
 
-async function liveCommit(url) {
-  try { return (await (await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" })).json()).commitSha || null; }
+async function environmentConfig(environment) {
+  if (!envConfigCache.has(environment.id)) {
+    const data = await railway("query($p:String!,$e:String!,$s:String!){ variables(projectId:$p, environmentId:$e, serviceId:$s) }", { p: PROJECT, e: environment.id, s: SERVICE });
+    envConfigCache.set(environment.id, data.variables);
+  }
+  return envConfigCache.get(environment.id);
+}
+async function liveCommit(environment) {
+  const vars = await environmentConfig(environment);
+  if (!vars.DEPLOYMENT_HEALTH_SECRET) stop("Configure DEPLOYMENT_HEALTH_SECRET para conferir o deploy pela rota interna.");
+  try {
+    const headers = { Authorization: "Bearer " + healthToken(vars.DEPLOYMENT_HEALTH_SECRET),
+      ...(vars.STAGING_ACCESS_TOKEN ? { "X-Staging-Token": vars.STAGING_ACCESS_TOKEN } : {}) };
+    const url = new URL("/internal/health", environment.health);
+    return (await (await fetch(url, { headers, cache: "no-store" })).json()).commitSha || null;
+  }
   catch { return null; }
 }
 
@@ -94,7 +110,7 @@ async function waitForImage(sha) {
 
 async function publishImage(environment, sha) {
   const short = sha.slice(0, 7);
-  if (await liveCommit(environment.health) === short) { say(`${environment.name}: já está em ${short}.`); return; }
+  if (await liveCommit(environment) === short) { say(`${environment.name}: já está em ${short}.`); return; }
   say(`${environment.name}: trocando para a imagem ${short}…`);
   await railway("mutation($s:String!,$e:String!,$i:ServiceInstanceUpdateInput!){ serviceInstanceUpdate(serviceId:$s, environmentId:$e, input:$i) }",
     { s: SERVICE, e: environment.id, i: { source: { image: `${IMAGE}:${sha}` } } });
@@ -102,7 +118,7 @@ async function publishImage(environment, sha) {
   const deadline = Date.now() + 15 * 60 * 1000;
   while (Date.now() < deadline) {
     await sleep(15000);
-    if (await liveCommit(environment.health) === short) { say(`${environment.name}: no ar com ${short}.`); return; }
+    if (await liveCommit(environment) === short) { say(`${environment.name}: no ar com ${short}.`); return; }
   }
   stop(`${environment.name}: o Railway aceitou a imagem, mas ${environment.health} não mostrou ${short} em 15 minutos. Veja os logs no painel do Railway.`);
 }
