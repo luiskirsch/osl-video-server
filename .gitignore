@@ -1,4 +1,6 @@
 node_modules
+.venv-validation/
+__pycache__/
 ..bfg-report/
 .env
 .env.*

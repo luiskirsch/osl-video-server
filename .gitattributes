@@ -1,0 +1,3 @@
+# Preserve official ANS/ITI assets byte-for-byte, including line endings.
+security-assets/icp/** -text -diff
+security-assets/tiss/** -text -diff

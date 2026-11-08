@@ -5,12 +5,15 @@ FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3e
 # @huggingface/transformers usa. Alpine (musl) nao tem ld-linux-x86-64.so.2.
 # node:22 também é requisito mínimo do firebase-admin >=14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    ffmpeg python3 python3-venv ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --chown=node:node package*.json ./
+COPY requirements-validation.txt ./
+RUN python3 -m venv /opt/validation \
+  && /opt/validation/bin/pip install --no-cache-dir -r requirements-validation.txt
 RUN npm ci --omit=dev --ignore-scripts \
   && npm cache clean --force
 
@@ -21,6 +24,7 @@ COPY --chown=node:node . .
 ARG GIT_COMMIT_SHA=""
 
 ENV NODE_ENV=production \
+    VALIDATION_PYTHON=/opt/validation/bin/python \
     LOG_FILE=/tmp/server.log \
     TRANSFORMERS_CACHE_DIR=/tmp/huggingface-transformers \
     GIT_COMMIT_SHA=$GIT_COMMIT_SHA

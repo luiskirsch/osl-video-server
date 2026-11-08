@@ -56,6 +56,7 @@ const {
 const asaas = require("../services/asaas");
 const anamnese = require("../services/anamnese");
 const tiss     = require("../services/tiss");
+const { prepareClinicalSignature, persistClinicalSignature, validateTissXml } = require("../services/clinical-signatures");
 const smsService = require("../services/sms");
 const supportBot = require("../services/support-bot");
 const { createSupportTools } = require("../services/support-tools");
@@ -6062,7 +6063,7 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   if (!pdfBase64) return sendError(res, 400, "PDF_OBRIGATORIO");
   if (pdfBase64.length > RECEITA_PDF_MAX) return sendError(res, 413, "PDF_GRANDE_DEMAIS");
   if (pdfMime !== "application/pdf") return sendError(res, 400, "TIPO_INVALIDO");
-  if (!["a1_inline", "external_upload"].includes(signatureMethod)) {
+  if (!["a1_inline", "a1_server", "external_upload"].includes(signatureMethod)) {
     return sendError(res, 400, "METODO_INVALIDO");
   }
 
@@ -6092,6 +6093,16 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
     });
   }
 
+  let preparedSignature;
+  try {
+    preparedSignature = await prepareClinicalSignature(req.body, therapistDoc);
+  } catch (error) {
+    return sendError(res, error.status || 422, error.message);
+  } finally {
+    delete req.body.certPfxBase64;
+    delete req.body.certPassword;
+  }
+
   // Reutiliza token pré-gerado se ainda válido. Senão fallback (PDF pode estar
   // sem QR ou com QR que não bate, mas a receita continua íntegra).
   let deliveryToken    = r.deliveryToken    || null;
@@ -6107,7 +6118,7 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
   const signedAtMs = Date.now();
   const validadeClinicaAt = signedAtMs + RECEITA_VALIDITY_CLINICAL_MS;
 
-  await ref.set({
+  try { await persistClinicalSignature(db, ref, uid, preparedSignature, {
     status: "signed",
     signatureMethod,
     pdfSignedBase64: pdfBase64,
@@ -6118,13 +6129,15 @@ router.post("/therapy/receitas/:id/assinar", asyncHandler(async (req, res) => {
     validadeClinicaAt,
     signedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  }); } catch (error) { return sendError(res, error.status || 409, error.message); }
 
   await logAudit({
     type: "receita_signed",
     receitaId,
     therapistUid: uid,
-    signatureMethod
+    signatureMethod,
+    documentSha256: preparedSignature.verification.sha256,
+    certificateSha256: preparedSignature.verification.certificateSha256
   });
 
   return res.json({ ok: true, deliveryToken, deliveryTokenExp, validadeClinicaAt });
@@ -6153,6 +6166,7 @@ router.get("/therapy/receitas", asyncHandler(async (req, res) => {
         sessionId: r.sessionId || null,
         status: r.status,
         signatureMethod: r.signatureMethod || null,
+        signatureVerification: r.signatureVerification || null,
         formCiphertext: r.formCiphertext,
         formIv: r.formIv,
         deliveryToken: r.deliveryToken || null,
@@ -6190,6 +6204,7 @@ router.get("/therapy/receitas/:id", asyncHandler(async (req, res) => {
       sessionId: r.sessionId || null,
       status: r.status,
       signatureMethod: r.signatureMethod || null,
+      signatureVerification: r.signatureVerification || null,
       formCiphertext: r.formCiphertext,
       formIv: r.formIv,
       pdfSignedBase64: r.pdfSignedBase64 || null,
@@ -6255,14 +6270,14 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
   // Devolve metadados + PDF base64 + dados do médico pra renderizar
   // a página de verificação como "comprovante de autenticidade".
   const therapist = await loadTherapist(r.therapistUid);
-  const issuer = therapist ? {
+  const issuer = r.issuerSnapshot || (therapist ? {
     displayName:   therapist.displayName || "",
     crm:           therapist.crm || "",
     crp:           therapist.crp || "",
     rqe:           therapist.rqe || "",
     especialidade: therapist.especialidade || "",
     consultorio:   therapist.consultorio || null
-  } : null;
+  } : null);
 
   // Carrega histórico de dispensações pra essa receita (sem dados sensíveis,
   // só identificação profissional do farmacêutico + dados da farmácia + qty).
@@ -6301,6 +6316,7 @@ router.get("/therapy/receita/publica", asyncHandler(async (req, res) => {
       pdfMime: r.pdfSignedMime || "application/pdf",
       signedAt: r.signedAt?.toMillis ? r.signedAt.toMillis() : (r.signedAtMs || null),
       signatureMethod: r.signatureMethod || null,
+      signatureVerification: r.signatureVerification || null,
       deliveryTokenExp: r.deliveryTokenExp || null,
       validadeClinicaAt,
       quantidadePrescrita,
@@ -6486,7 +6502,7 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
   if (!pdfBase64) return sendError(res, 400, "PDF_OBRIGATORIO");
   if (pdfBase64.length > DOCUMENTO_PDF_MAX) return sendError(res, 413, "PDF_GRANDE_DEMAIS");
   if (pdfMime !== "application/pdf") return sendError(res, 400, "TIPO_INVALIDO");
-  if (!["a1_inline", "external_upload"].includes(signatureMethod)) {
+  if (!["a1_inline", "a1_server", "external_upload"].includes(signatureMethod)) {
     return sendError(res, 400, "METODO_INVALIDO");
   }
 
@@ -6504,6 +6520,16 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
   if (!requireCapability(therapistDoc, res, "documentos-clinicos",
     "Apenas CRM, CRP, CREFITO, CRN e CRO podem assinar documentos clínicos.")) return;
 
+  let preparedSignature;
+  try {
+    preparedSignature = await prepareClinicalSignature(req.body, therapistDoc);
+  } catch (error) {
+    return sendError(res, error.status || 422, error.message);
+  } finally {
+    delete req.body.certPfxBase64;
+    delete req.body.certPassword;
+  }
+
   let deliveryToken    = d.deliveryToken    || null;
   let deliveryTokenExp = d.deliveryTokenExp || null;
   if (!deliveryToken || !deliveryTokenExp || deliveryTokenExp < Date.now()) {
@@ -6513,7 +6539,7 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
   }
 
   const signedAtMs = Date.now();
-  await ref.set({
+  try { await persistClinicalSignature(db, ref, uid, preparedSignature, {
     status: "signed",
     signatureMethod,
     pdfSignedBase64: pdfBase64,
@@ -6523,9 +6549,11 @@ router.post("/therapy/documentos/:id/assinar", asyncHandler(async (req, res) => 
     signedAtMs,
     signedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  }); } catch (error) { return sendError(res, error.status || 409, error.message); }
 
-  await logAudit({ type: "documento_signed", documentoId, tipo: d.tipo, therapistUid: uid, signatureMethod });
+  await logAudit({ type: "documento_signed", documentoId, tipo: d.tipo, therapistUid: uid, signatureMethod,
+    documentSha256: preparedSignature.verification.sha256,
+    certificateSha256: preparedSignature.verification.certificateSha256 });
   return res.json({ ok: true, deliveryToken, deliveryTokenExp });
 }));
 
@@ -6555,6 +6583,7 @@ router.get("/therapy/documentos", asyncHandler(async (req, res) => {
         sessionId: x.sessionId || null,
         status: x.status,
         signatureMethod: x.signatureMethod || null,
+        signatureVerification: x.signatureVerification || null,
         formCiphertext: x.formCiphertext,
         formIv: x.formIv,
         deliveryToken: x.deliveryToken || null,
@@ -6595,6 +6624,7 @@ router.get("/therapy/documentos/:id", asyncHandler(async (req, res) => {
       formCiphertext: d.formCiphertext,
       formIv: d.formIv,
       signatureMethod: d.signatureMethod || null,
+      signatureVerification: d.signatureVerification || null,
       deliveryToken: d.deliveryToken || null,
       deliveryTokenExp: d.deliveryTokenExp || null,
       signedAt: d.signedAt?.toMillis ? d.signedAt.toMillis() : (d.signedAtMs || null)
@@ -6650,14 +6680,14 @@ router.get("/therapy/documento/publica", asyncHandler(async (req, res) => {
   });
 
   const therapist = await loadTherapist(d.therapistUid);
-  const issuer = therapist ? {
+  const issuer = d.issuerSnapshot || (therapist ? {
     displayName:   therapist.displayName || "",
     crm:           therapist.crm || "",
     crp:           therapist.crp || "",
     rqe:           therapist.rqe || "",
     especialidade: therapist.especialidade || "",
     consultorio:   therapist.consultorio || null
-  } : null;
+  } : null);
 
   return res.json({
     ok: true,
@@ -6669,6 +6699,7 @@ router.get("/therapy/documento/publica", asyncHandler(async (req, res) => {
       pdfMime: d.pdfSignedMime || "application/pdf",
       signedAt: d.signedAt?.toMillis ? d.signedAt.toMillis() : (d.signedAtMs || null),
       signatureMethod: d.signatureMethod || null,
+      signatureVerification: d.signatureVerification || null,
       deliveryTokenExp: d.deliveryTokenExp || null,
       issuer
     }
@@ -14840,7 +14871,13 @@ router.post("/therapy/profissional/tiss/convenios", asyncHandler(async (req, res
   const plano             = String(req.body?.plano             || "").trim().slice(0, 80) || null;
   const enabled           = req.body?.enabled !== false; // default true
 
-  const entry = { code, nome, registroAns, numeroContratado, plano, enabled, updatedAt: Date.now() };
+  const cnes = String(req.body?.cnes || "").replace(/\D/g, "");
+  const ufConselho = String(req.body?.ufConselho || "").trim().toUpperCase();
+  const cbos = String(req.body?.cbos || "").replace(/\D/g, "");
+  if (cnes && !/^\d{7}$/.test(cnes)) return sendError(res, 400, "CNES_INVALIDO");
+  if (ufConselho && !/^[A-Z]{2}$/.test(ufConselho)) return sendError(res, 400, "UF_CONSELHO_INVALIDA");
+  if (cbos && !/^\d{6}$/.test(cbos)) return sendError(res, 400, "CBO_INVALIDO");
+  const entry = { code, nome, registroAns, numeroContratado, plano, enabled, cnes, ufConselho, cbos, updatedAt: Date.now() };
   const current = Array.isArray(therapist.tissConvenios) ? therapist.tissConvenios.slice() : [];
   const idx = current.findIndex(c => c.code === code);
   if (idx >= 0) current[idx] = { ...current[idx], ...entry };
@@ -14964,33 +15001,57 @@ router.post("/therapy/sessao/:sessionId/tiss/marcar", asyncHandler(async (req, r
   const convenioCode      = String(req.body?.convenioCode || "").trim().toLowerCase();
   const tussCode          = String(req.body?.tussCode     || "").trim().slice(0, 20);
   const tussLabel         = String(req.body?.tussLabel    || "").trim().slice(0, 200);
-  const valorProcedimento = Number(req.body?.valorProcedimento) || 0;
+  const valorProcedimento = Number(req.body?.valorProcedimento);
   if (!convenioCode) return sendError(res, 400, "CONVENIO_CODE_OBRIGATORIO");
   if (!tussCode)     return sendError(res, 400, "TUSS_CODE_OBRIGATORIO");
+  if (!Number.isFinite(valorProcedimento) || valorProcedimento < 0) return sendError(res, 400, "TISS_VALOR_INVALIDO");
 
   // Gera numeroGuiaPrestador sequencial (atomic counter no therapist doc).
   const therapist = await loadTherapist(uid);
-  const seq = (therapist?.tissNextGuiaSeq || 1);
-  const numeroGuiaPrestador = String(seq).padStart(8, "0");
-
-  await db.collection("therapists").doc(uid).set({
-    tissNextGuiaSeq: seq + 1,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  await sref.set({
+  if (session.status !== "completed") return sendError(res, 422, "TISS_SESSAO_NAO_REALIZADA");
+  if (!(therapist?.tissConvenios || []).some(c => c.code === convenioCode && c.enabled !== false)) {
+    return sendError(res, 422, "CONVENIO_NAO_ACEITO");
+  }
+  const tipoGuia = String(req.body?.tipoGuia || (therapist?.crm ? "consulta" : "sadt"));
+  if (!["consulta", "sadt"].includes(tipoGuia)) return sendError(res, 400, "TISS_TIPO_GUIA_INVALIDO");
+  const clean = (value, limit = 100) => String(value || "").trim().slice(0, limit);
+  const solicitante = req.body?.solicitante ? Object.fromEntries(
+    ["nome", "conselho", "numero", "uf", "cbos", "codigoPrestador", "nomeContratado"].map(key => [key, clean(req.body.solicitante[key])])) : null;
+  if (tipoGuia === "sadt" && (!solicitante || ["nome", "conselho", "numero", "uf", "cbos", "codigoPrestador", "nomeContratado"].some(key => !solicitante[key]))) {
+    return sendError(res, 422, "TISS_SOLICITANTE_OBRIGATORIO");
+  }
+  const profileRef = db.collection("therapists").doc(uid);
+  let numeroGuiaPrestador;
+  try { await db.runTransaction(async tx => {
+    const [profile, existing] = await Promise.all([tx.get(profileRef), tx.get(sref)]);
+    const fail = (message, status = 422) => { throw Object.assign(new Error(message), { status }); };
+    if (!profile.exists || !existing.exists || existing.data().therapistUid !== uid) fail("ACESSO_NEGADO", 403);
+    if (existing.data().status !== "completed") fail("TISS_SESSAO_NAO_REALIZADA");
+    if (!(profile.data().tissConvenios || []).some(c => c.code === convenioCode && c.enabled !== false)) fail("CONVENIO_NAO_ACEITO");
+    const previous = existing.data().tiss;
+    if (previous?.numeroGuiaPrestador && previous.status !== "rascunho") fail("GUIA_TISS_JA_ENVIADA", 409);
+    const seq = Number(profile.data().tissNextGuiaSeq) || 1;
+    numeroGuiaPrestador = previous?.numeroGuiaPrestador || String(seq).padStart(8, "0");
+    if (!previous?.numeroGuiaPrestador) tx.set(profileRef, { tissNextGuiaSeq: seq + 1 }, { merge: true });
+    tx.set(sref, {
     tiss: {
       convenioCode,
+      tipoGuia,
+      solicitante,
+      numeroCarteira: clean(req.body?.numeroCarteira, 20),
+      dataAutorizacao: clean(req.body?.dataAutorizacao, 10),
+      senha: clean(req.body?.senha, 20),
       numeroGuiaPrestador,
-      numeroGuiaOperadora: null,
+      numeroGuiaOperadora: clean(req.body?.numeroGuiaOperadora, 20) || previous?.numeroGuiaOperadora || null,
       tussCode,
       tussLabel,
       valorProcedimento,
       status: "rascunho",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: previous?.createdAt || admin.firestore.FieldValue.serverTimestamp()
     },
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+    }, { merge: true });
+  }); } catch (error) { return sendError(res, error.status || 500, error.status ? error.message : "TISS_FALHA_AO_SALVAR"); }
 
   return res.json({ ok: true, numeroGuiaPrestador });
 }));
@@ -15083,6 +15144,25 @@ function _resolveCbos(therapist) {
   return ""; // outros conselhos: terapeuta preenche manualmente se quiser
 }
 
+async function _validatedTissLote(res, options) {
+  try {
+    const all = options.guiasConsulta || [];
+    const guiasSADT = all.filter(guide => guide.tipoGuia === "sadt");
+    if (guiasSADT.some(guide => !guide.profissionalSolicitante)) {
+      return sendError(res, 422, "TISS_SOLICITANTE_OBRIGATORIO"), null;
+    }
+    const result = tiss.buildLoteGuias({ ...options,
+      guiasConsulta: all.filter(guide => guide.tipoGuia !== "sadt"), guiasSADT });
+    await validateTissXml(result.xml);
+    res.setHeader("X-Tiss-Version", tiss.VERSION);
+    res.setHeader("X-Tiss-Xsd-Validated", "true");
+    return result;
+  } catch (error) {
+    sendError(res, error.status || 422, error.message, error.issues ? { issues: error.issues } : {});
+    return null;
+  }
+}
+
 // Monta o objeto da guia a partir de session + therapist + paciente + conv.
 // Reusado por XML e HTML/PDF — mesma fonte de verdade.
 async function _buildGuiaPayload(uid, sessionId) {
@@ -15091,6 +15171,7 @@ async function _buildGuiaPayload(uid, sessionId) {
   if (!ssnap.exists) return { error: "SESSAO_NAO_ENCONTRADA" };
   const session = ssnap.data();
   if (session.therapistUid !== uid) return { error: "ACESSO_NEGADO" };
+  if (session.status !== "completed") return { error: "TISS_SESSAO_NAO_REALIZADA" };
   if (!session.tiss?.numeroGuiaPrestador) return { error: "GUIA_TISS_NAO_EXISTE" };
 
   const therapist = await loadTherapist(uid);
@@ -15110,12 +15191,12 @@ async function _buildGuiaPayload(uid, sessionId) {
   }
 
   // CRP/CRM do prof. — separa em numero/UF (ex: "12/12345" -> {numero:"12345", uf:"12"})
-  const crpcrm = String(therapist.crp || therapist.crm || "").trim();
-  const conselhoSigla = therapist.crp ? "CRP" : therapist.crm ? "CRM" : "";
+  const conselhoSigla = resolveSiglaFromTherapist(therapist);
+  const crpcrm = String(therapist.numeroConselho || (conselhoSigla === "CRM" ? therapist.crm : therapist.crp) || "").trim();
   let numeroConselho = crpcrm;
-  let ufConselho = "";
+  let ufConselho = convenio.ufConselho || therapist.ufConselho || therapist.consultorio?.uf || "";
   const matchCRP = crpcrm.match(/^(\d{2})[\/-](\d+)$/);
-  if (matchCRP) { ufConselho = matchCRP[1]; numeroConselho = matchCRP[2]; }
+  if (matchCRP) { numeroConselho = matchCRP[2]; }
   const matchCRM = crpcrm.match(/^(\d+)[\/-]([A-Z]{2})$/i);
   if (matchCRM) { numeroConselho = matchCRM[1]; ufConselho = matchCRM[2].toUpperCase(); }
 
@@ -15123,19 +15204,25 @@ async function _buildGuiaPayload(uid, sessionId) {
     therapist, session, convenio, carteirinha,
     guia: {
       numeroGuiaPrestador: session.tiss.numeroGuiaPrestador,
+      tipoGuia: session.tiss.tipoGuia || (conselhoSigla === "CRM" ? "consulta" : "sadt"),
+      profissionalSolicitante: session.tiss.solicitante,
+      nomeContratadoSolicitante: session.tiss.solicitante?.nomeContratado,
+      codigoPrestadorSolicitanteNaOperadora: session.tiss.solicitante?.codigoPrestador,
+      dataAutorizacao: session.tiss.dataAutorizacao || null,
+      senha: session.tiss.senha || null,
       numeroGuiaOperadora: session.tiss.numeroGuiaOperadora || null,
-      numeroCarteira: carteirinha?.numeroCarteirinha || "",
+      numeroCarteira: session.tiss.numeroCarteira || carteirinha?.numeroCarteirinha || "",
       atendimentoRN: "N",
       nomeBeneficiario: session.patientName || carteirinha?.titular || "",
       codigoPrestadorNaOperadora: convenio.numeroContratado,
-      cnesContratado: therapist.cnes || null,
+      cnesContratado: convenio.cnes || therapist.cnes || null,
       nomeContratado: therapist.displayName || "",
       nomeProfissional: therapist.displayName || "",
       conselhoProfissional: conselhoSigla,
       numeroConselho,
       ufConselho,
-      cbosProfissional: _resolveCbos(therapist),
-      dataAtendimento: session.scheduledAt || Date.now(),
+      cbosProfissional: convenio.cbos || _resolveCbos(therapist),
+      dataAtendimento: session.scheduledAt,
       tussCodigo: session.tiss.tussCode,
       tussDescricao: session.tiss.tussLabel,
       valorProcedimento: session.tiss.valorProcedimento || 0
@@ -15152,13 +15239,15 @@ router.get("/therapy/tiss/guias/:sessionId/xml", asyncHandler(async (req, res) =
   const built = await _buildGuiaPayload(uid, sessionId);
   if (built.error) return sendError(res, 400, built.error);
 
-  const { xml, hash } = tiss.buildLoteGuias({
-    sequencialTransacao: `${Date.now()}`,
-    numeroLote: `${Date.now()}`,
+  const generatedLote = await _validatedTissLote(res, {
+    sequencialTransacao: String(Date.now() % 1_000_000_000_000),
+    numeroLote: String(Date.now() % 1_000_000_000_000),
     registroAnsOperadora: built.convenio.registroAns || "000000",
     codigoPrestadorNaOperadora: built.convenio.numeroContratado,
     guiasConsulta: [built.guia]
   });
+  if (!generatedLote) return;
+  const { xml, hash } = generatedLote;
 
   res.setHeader("Content-Type", "application/xml; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="guia-${built.guia.numeroGuiaPrestador}.xml"`);
@@ -15192,6 +15281,8 @@ router.post("/therapy/tiss/lote", asyncHandler(async (req, res) => {
   }
   const wantStatus       = String(req.body?.status || "rascunho").trim().toLowerCase();
   const wantConvenioCode = String(req.body?.convenioCode || "").trim().toLowerCase() || null;
+  const wantTipoGuia = String(req.body?.tipoGuia || "").trim();
+  if (wantTipoGuia && !["consulta", "sadt"].includes(wantTipoGuia)) return sendError(res, 400, "TISS_TIPO_GUIA_INVALIDO");
 
   // Filtra sessões com guia TISS no mês solicitado.
   const start = new Date(Date.UTC(ano, mes - 1, 1)).getTime();
@@ -15208,7 +15299,8 @@ router.post("/therapy/tiss/lote", asyncHandler(async (req, res) => {
     .map(d => ({ sessionId: d.id, ...d.data() }))
     .filter(s => !!s.tiss?.numeroGuiaPrestador)
     .filter(s => s.tiss.status === wantStatus)
-    .filter(s => !wantConvenioCode || s.tiss.convenioCode === wantConvenioCode);
+    .filter(s => !wantConvenioCode || s.tiss.convenioCode === wantConvenioCode)
+    .filter(s => !wantTipoGuia || s.tiss.tipoGuia === wantTipoGuia);
 
   if (sessions.length === 0) return sendError(res, 404, "NENHUMA_GUIA_NO_PERIODO");
 
@@ -15224,7 +15316,7 @@ router.post("/therapy/tiss/lote", asyncHandler(async (req, res) => {
   const guiaPayloads = [];
   for (const s of sessions) {
     const built = await _buildGuiaPayload(uid, s.sessionId);
-    if (built.error) continue;
+    if (built.error) return sendError(res, 422, built.error);
     guiaPayloads.push(built.guia);
   }
 
@@ -15232,14 +15324,16 @@ router.post("/therapy/tiss/lote", asyncHandler(async (req, res) => {
   const therapist = await loadTherapist(uid);
   const convenio = (therapist.tissConvenios || []).find(c => c.code === convenioCode);
 
-  const numeroLote = `LOTE-${ano}${String(mes).padStart(2, "0")}-${Date.now().toString(36).toUpperCase()}`;
-  const { xml, hash, totalGuias } = tiss.buildLoteGuias({
-    sequencialTransacao: `${Date.now()}`,
+  const numeroLote = String(Date.now() % 1_000_000_000_000);
+  const generatedLote = await _validatedTissLote(res, {
+    sequencialTransacao: String(Date.now() % 1_000_000_000_000),
     numeroLote,
     registroAnsOperadora: convenio?.registroAns || "000000",
     codigoPrestadorNaOperadora: convenio?.numeroContratado,
     guiasConsulta: guiaPayloads
   });
+  if (!generatedLote) return;
+  const { xml, hash, totalGuias } = generatedLote;
 
   res.setHeader("Content-Type", "application/xml; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${numeroLote}.xml"`);
@@ -15324,7 +15418,7 @@ const TissSigner = require("../services/tiss-submitters/_signer");
 const TISS_SUBMITTERS = {};
 
 // Mock — só liga se env explícita. Útil enquanto profissional não tem cert/credenciais.
-if (String(process.env.TISS_MOCK_ENABLED || "").trim() === "1") {
+if (!IS_PRODUCTION && String(process.env.TISS_MOCK_ENABLED || "").trim() === "1") {
   TISS_SUBMITTERS["mock"] = TissMockSubmitter;
 }
 
@@ -15418,21 +15512,23 @@ router.post("/therapy/tiss/submeter/:convenioCode", asyncHandler(async (req, res
   const guiaPayloads = [];
   for (const s of sessions) {
     const built = await _buildGuiaPayload(uid, s.sessionId);
-    if (built.error) continue;
+    if (built.error) return sendError(res, 422, built.error);
     guiaPayloads.push(built.guia);
   }
 
   const therapist = await loadTherapist(uid);
   const convenio = (therapist.tissConvenios || []).find(c => c.code === convenioCode);
 
-  const numeroLote = `LOTE-${ano}${String(mes).padStart(2,"0")}-${Date.now().toString(36).toUpperCase()}`;
-  const { xml, hash, totalGuias } = tiss.buildLoteGuias({
-    sequencialTransacao: `${Date.now()}`,
+  const numeroLote = String(Date.now() % 1_000_000_000_000);
+  const generatedLote = await _validatedTissLote(res, {
+    sequencialTransacao: String(Date.now() % 1_000_000_000_000),
     numeroLote,
     registroAnsOperadora: convenio?.registroAns || "000000",
     codigoPrestadorNaOperadora: convenio?.numeroContratado,
     guiasConsulta: guiaPayloads
   });
+  if (!generatedLote) return;
+  const { xml, hash, totalGuias } = generatedLote;
 
   // Instancia submitter com config vinda do prof (cert + sandboxMode)
   const submitter = new SubmitterCls({

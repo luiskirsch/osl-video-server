@@ -5,7 +5,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
-const SKIP_DIRS = new Set([".git", "node_modules"]);
+const SKIP_DIRS = new Set([".git", "node_modules", ".venv-validation", "__pycache__"]);
 
 function collectJavaScriptFiles(directory, files = []) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {

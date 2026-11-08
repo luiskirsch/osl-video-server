@@ -9,6 +9,8 @@
 ..bfg-report
 
 node_modules
+.venv-validation
+__pycache__
 **/node_modules
 security
 scripts/security

@@ -72,5 +72,12 @@ jobs:
       - name: Instalar dependências sem executar scripts de terceiros
         run: npm ci --ignore-scripts
 
-      - name: Validar sintaxe e testes
-        run: npm run check
+      - name: Instalar validador criptográfico e XSD
+        run: |
+          python3 -m venv .venv-validation
+          .venv-validation/bin/pip install -r requirements-validation.txt
+
+      - name: Validar sintaxe, XML ANS e assinaturas
+        run: |
+          npm run check
+          .venv-validation/bin/python test/validation_worker_test.py
