@@ -199,3 +199,86 @@ test("um novo dia permite backup completo e preserva a verificação de integrid
   assert.equal(f.locks.get("2026-10-22").readsUsed, result.reads);
   assert.deepEqual(await f.run("2026-10-22T06:00:00Z"), { skipped: "ja_executado" });
 });
+
+// Coleção só-anexo com a API de consulta usada pelo incremental.
+function auditCollection(entries) {
+  const make = (filters = [], after = null, max = Infinity) => ({
+    where: (field, op, value) => { assert.equal(op, "<"); return make([...filters, d => d.data[field] < value], after, max); },
+    orderBy: () => make(filters, after, max),
+    startAfter: (value, id) => make(filters, [value, id], max),
+    limit: n => make(filters, after, n),
+    async get() {
+      const rows = entries.filter(d => filters.every(f => f(d)))
+        .sort((a, b) => a.data.time.localeCompare(b.data.time) || a.id.localeCompare(b.id))
+        .filter(d => !after || d.data.time > after[0] || (d.data.time === after[0] && d.id > after[1]))
+        .slice(0, max)
+        .map(d => ({ id: d.id, ref: { path: "audit_logs/" + d.id }, data: () => d.data, get: k => d.data[k] }));
+      return { size: rows.length, docs: rows };
+    }
+  });
+  return { id: "audit_logs", ...make(), listDocuments: async () => { throw new Error("NAO_DEVE_VARRER_AUDIT"); } };
+}
+function withAudit(db, entries) {
+  const list = db.listCollections;
+  db.listCollections = async () => [...await list(), auditCollection(entries)];
+  return db;
+}
+const auditEntries = n => Array.from({ length: n }, (_, i) =>
+  ({ id: "a" + String(i).padStart(5, "0"), data: { time: new Date(Date.UTC(2026, 10, 1) + i * 1000).toISOString(), path: "/x" } }));
+async function readChunks(r2) {
+  const lines = [];
+  for (const k of [...r2.objects.keys()].filter(k => /^incremental\/audit_logs\/\d/.test(k)).sort()) {
+    lines.push(...zlib.gunzipSync(backup.decrypt(key, r2.objects.get(k), k)).toString().trim().split("\n"));
+  }
+  return lines.map(l => JSON.parse(l).path);
+}
+
+test("audit_logs sai do dump completo e é copiado por cursor, sem repetir nem pular, dentro do orçamento", async () => {
+  const entries = auditEntries(1200);
+  const r2 = memoryR2();
+  const db = withAudit(fakeDb({ "therapists/a": { n: 1 } }), entries);
+  const now = new Date("2026-11-09T05:00:00Z");
+  const first = await backup.runBackup({ db, r2, key, now, incrementMaxReads: 1000 });
+  assert.equal(first.documents, 1, "dump completo só com os dados clínicos");
+  assert.equal(first.incremental.audit_logs.documents, 1000);
+  assert.equal(first.incremental.audit_logs.complete, false);
+  assert.ok(first.reads <= 1000 + 10);
+  const second = await backup.runBackup({ db, r2, key, now: new Date("2026-11-10T05:00:00Z"), incrementMaxReads: 1000 });
+  assert.equal(second.incremental.audit_logs.documents, 200);
+  assert.equal(second.incremental.audit_logs.complete, true);
+  const third = await backup.runBackup({ db, r2, key, now: new Date("2026-11-11T05:00:00Z") });
+  assert.equal(third.incremental.audit_logs.documents, 0);
+  assert.deepEqual(await readChunks(r2), entries.map(e => "audit_logs/" + e.id));
+});
+
+test("incremental não copia o que ainda pode estar chegando e retoma depois", async () => {
+  const now = new Date("2026-11-09T05:00:00Z");
+  const entries = [{ id: "old", data: { time: "2026-11-09T04:00:00.000Z" } }, { id: "fresh", data: { time: "2026-11-09T04:55:00.000Z" } }];
+  const r2 = memoryR2();
+  const db = withAudit(fakeDb({}), entries);
+  await backup.runBackup({ db, r2, key, now });
+  assert.deepEqual(await readChunks(r2), ["audit_logs/old"]);
+  await backup.runBackup({ db, r2, key, now: new Date("2026-11-10T05:00:00Z") });
+  assert.deepEqual(await readChunks(r2), ["audit_logs/old", "audit_logs/fresh"]);
+});
+
+test("falha no incremental preserva o dump e não avança o cursor", async () => {
+  const r2 = memoryR2();
+  const db = withAudit(fakeDb({ "therapists/a": { n: 1 } }), auditEntries(3));
+  const put = r2.put;
+  r2.put = async (k, body) => { if (k.startsWith("incremental/")) throw new Error("R2_UNAVAILABLE"); return put(k, body); };
+  const result = await backup.runBackup({ db, r2, key, now: new Date("2026-11-09T05:00:00Z") });
+  assert.match(result.incremental.audit_logs.error, /R2_UNAVAILABLE/);
+  assert.ok(r2.objects.has(result.dumpKey));
+  assert.equal(await backup.loadCursor(r2, key, "audit_logs"), null);
+  r2.put = put;
+  await backup.runBackup({ db, r2, key, now: new Date("2026-11-10T05:00:00Z") });
+  assert.equal((await readChunks(r2)).length, 3);
+});
+
+test("lotes incrementais expiram em 1 ano; o cursor nunca expira", () => {
+  const now = new Date("2026-11-09T06:00:00Z");
+  const keys = ["incremental/audit_logs/2025-11-01T05-00-00-000Z.ndjson.gz.enc",
+    "incremental/audit_logs/2026-11-01T05-00-00-000Z.ndjson.gz.enc", "incremental/audit_logs/cursor.json.gz.enc"];
+  assert.deepEqual(backup.expiredDumps(keys, now), ["incremental/audit_logs/2025-11-01T05-00-00-000Z.ndjson.gz.enc"]);
+});

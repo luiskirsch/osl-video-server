@@ -7,6 +7,13 @@
 //   storage/objects/<sha256(nome)>-<md5>.enc   cada arquivo, incremental
 //   storage/manifest.json.gz.enc         nome → objeto cifrado + metadados
 //   arquivo/…                            retratos permanentes (nunca rotacionados)
+//   incremental/<coleção>/<carimbo>.ndjson.gz.enc   lotes de coleções só-anexo
+//   incremental/<coleção>/cursor.json.gz.enc        último documento copiado
+//
+// audit_logs (94% do banco em 11/2026) não entra no dump completo: varrê-lo
+// por inteiro todo dia passava do orçamento e o backup inteiro abortava. Ele
+// só recebe inclusões (a limpeza de 6 meses apenas remove), então é copiado
+// por cursor (campo `time` + id), em lotes com orçamento próprio.
 //
 // Retenção: diários por 1 ano; o do dia 1º de cada mês por 5 anos (guarda do
 // prontuário, Resolução CFP 001/2009).
@@ -21,13 +28,20 @@
 // antes do reset diário (~07-08 UTC); cota/orçamento esgotado não é repetido.
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
-const { Timestamp, GeoPoint, DocumentReference } = require("firebase-admin/firestore");
+const { Timestamp, GeoPoint, DocumentReference, FieldPath } = require("firebase-admin/firestore");
 const { logInfo, logError } = require("../logger");
 
 const MAGIC = Buffer.from("EPBK1");
 const DAILY_RETENTION_DAYS = 366;
 const MONTHLY_RETENTION_DAYS = 5 * 366;
 const DEFAULT_MAX_READS = 30_000;
+// Coleções só-anexo, copiadas por cursor: nome → campo de ordenação (ISO).
+const INCREMENTAL_COLLECTIONS = { audit_logs: "time" };
+const DEFAULT_INCREMENT_MAX_READS = 12_000;
+const INCREMENT_PAGE = 500;
+// Gravações chegam com alguns ms de atraso em relação ao `time`; copiar só o
+// que tem mais de 10 min evita pular um documento que ainda não tinha chegado.
+const INCREMENT_SETTLE_MS = 10 * 60 * 1000;
 const DEFAULT_MAX_STORAGE_BYTES = 700 * 1024 * 1024;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 const RUN_HOUR_UTC = 5;
@@ -92,8 +106,9 @@ function decodeValue(value, db) {
 }
 
 // ─── Firestore ──────────────────────────────────────────────────────────
-async function exportFirestore(db, { maxReads = DEFAULT_MAX_READS } = {}) {
+async function exportFirestore(db, { maxReads = DEFAULT_MAX_READS, incremental = INCREMENTAL_COLLECTIONS } = {}) {
   const lines = [];
+  const deferred = [];
   let reads = 0;
   const spend = (n, alreadyRead = false) => {
     if (reads + n > maxReads) {
@@ -125,12 +140,35 @@ async function exportFirestore(db, { maxReads = DEFAULT_MAX_READS } = {}) {
   spend(1);
   try {
     const roots = await db.listCollections();
-    for (const collection of roots) await walkCollection(collection);
-    return { ndjson: lines.join("\n") + (lines.length ? "\n" : ""), documents: lines.length, reads };
+    for (const collection of roots) {
+      if (collection.id && Object.hasOwn(incremental, collection.id)) { deferred.push(collection); continue; }
+      await walkCollection(collection);
+    }
+    return { ndjson: lines.join("\n") + (lines.length ? "\n" : ""), documents: lines.length, reads, deferred };
   } catch (error) {
     error.backupReads = reads;
     throw error;
   }
+}
+
+// Copia, em ordem de `field` e id, o que veio depois do cursor.
+async function exportIncrement(collection, { field, cursor = null, maxReads = DEFAULT_INCREMENT_MAX_READS, now = new Date() }) {
+  const cutoff = new Date(now.getTime() - INCREMENT_SETTLE_MS).toISOString();
+  const lines = [];
+  let reads = 0, last = cursor, complete = false;
+  while (reads + INCREMENT_PAGE <= maxReads) {
+    let query = collection.where(field, "<", cutoff).orderBy(field).orderBy(FieldPath.documentId()).limit(INCREMENT_PAGE);
+    if (last) query = query.startAfter(last.value, last.id);
+    let snap;
+    try { snap = await query.get(); } catch (error) { error.backupReads = reads; throw error; }
+    reads += Math.max(1, snap.size);
+    for (const doc of snap.docs) {
+      lines.push(JSON.stringify({ path: doc.ref.path, data: encodeValue(doc.data()) }));
+      last = { value: doc.get(field), id: doc.id };
+    }
+    if (snap.size < INCREMENT_PAGE) { complete = true; break; }
+  }
+  return { ndjson: lines.join("\n") + (lines.length ? "\n" : ""), documents: lines.length, reads, cursor: last, complete };
 }
 
 // ─── R2 (S3) ────────────────────────────────────────────────────────────
@@ -218,6 +256,9 @@ async function backupStorage(bucket, r2, key, { maxBytes = DEFAULT_MAX_STORAGE_B
 // Diários por 1 ano + o do dia 1º de cada mês por 5 anos.
 function expiredDumps(keys, now = new Date()) {
   return keys.filter(key => {
+    // Lotes incrementais (logs de auditoria): 1 ano, sem retrato mensal.
+    const chunk = /^incremental\/[^/]+\/(\d{4})-(\d{2})-(\d{2})T[^/]*\.ndjson\.gz\.enc$/.exec(key);
+    if (chunk) return (now - Date.UTC(+chunk[1], +chunk[2] - 1, +chunk[3])) / 86_400_000 > DAILY_RETENTION_DAYS;
     const match = /^firestore\/(\d{4})-(\d{2})-(\d{2})\.ndjson\.gz\.enc$/.exec(key);
     if (!match) return false;
     const ageDays = (now - Date.UTC(+match[1], +match[2] - 1, +match[3])) / 86_400_000;
@@ -236,18 +277,60 @@ function backupConfig(env = process.env) {
   return Object.values(config).every(Boolean) ? config : null;
 }
 
-async function runBackup({ db, bucket, r2, key, now = new Date(), maxReads, maxStorageBytes }) {
+// Grava cifrado e confere: baixa, decifra e compara o hash.
+async function putVerified(r2, key, objectKey, text) {
+  const compressed = zlib.gzipSync(text);
+  await r2.put(objectKey, encrypt(key, compressed, objectKey));
+  const stored = await r2.get(objectKey);
+  if (!stored || !crypto.timingSafeEqual(
+    crypto.createHash("sha256").update(zlib.gunzipSync(decrypt(key, stored, objectKey))).digest(),
+    crypto.createHash("sha256").update(text).digest())) throw new Error("BACKUP_VERIFICACAO_FALHOU");
+  return compressed.length;
+}
+
+const incrementalCursorKey = name => `incremental/${name}/cursor.json.gz.enc`;
+async function loadCursor(r2, key, name) {
+  const objectKey = incrementalCursorKey(name);
+  const blob = await r2.get(objectKey);
+  return blob ? JSON.parse(zlib.gunzipSync(decrypt(key, blob, objectKey)).toString("utf8")) : null;
+}
+
+async function backupIncrement(collection, { r2, key, now, maxReads }) {
+  const name = collection.id;
+  const cursor = await loadCursor(r2, key, name);
+  const part = await exportIncrement(collection, { field: INCREMENTAL_COLLECTIONS[name], cursor, maxReads, now });
+  if (!part.documents) return { documents: 0, reads: part.reads, complete: part.complete };
+  const chunkKey = `incremental/${name}/${now.toISOString().replace(/[:.]/g, "-")}.ndjson.gz.enc`;
+  try {
+    await putVerified(r2, key, chunkKey, part.ndjson);
+    // O cursor só avança depois do lote conferido no bucket.
+    await putVerified(r2, key, incrementalCursorKey(name), JSON.stringify(part.cursor));
+  } catch (error) { error.backupReads = part.reads; throw error; }
+  return { chunkKey, documents: part.documents, reads: part.reads, complete: part.complete };
+}
+
+async function runBackup({ db, bucket, r2, key, now = new Date(), maxReads = DEFAULT_MAX_READS, maxStorageBytes, incrementMaxReads = DEFAULT_INCREMENT_MAX_READS }) {
   const date = now.toISOString().slice(0, 10);
   const dump = await exportFirestore(db, { maxReads });
+  let reads = dump.reads;
   try {
     const dumpKey = `firestore/${date}.ndjson.gz.enc`;
-    const compressed = zlib.gzipSync(dump.ndjson);
-    await r2.put(dumpKey, encrypt(key, compressed, dumpKey));
-    // Verifica o que foi gravado: baixa, decifra e confere o hash.
-    const stored = await r2.get(dumpKey);
-    if (!stored || !crypto.timingSafeEqual(
-      crypto.createHash("sha256").update(zlib.gunzipSync(decrypt(key, stored, dumpKey))).digest(),
-      crypto.createHash("sha256").update(dump.ndjson).digest())) throw new Error("BACKUP_VERIFICACAO_FALHOU");
+    const dumpBytes = await putVerified(r2, key, dumpKey, dump.ndjson);
+    // Falha num incremental não invalida o dump, já gravado e verificado.
+    const incremental = {};
+    for (const collection of dump.deferred) {
+      const budget = Math.min(incrementMaxReads, maxReads - reads);
+      try {
+        incremental[collection.id] = budget >= INCREMENT_PAGE
+          ? await backupIncrement(collection, { r2, key, now, maxReads: budget })
+          : { skipped: "sem_orcamento" };
+        reads += incremental[collection.id].reads || 0;
+      } catch (error) {
+        reads += Math.max(0, Number(error.backupReads || 0));
+        incremental[collection.id] = { error: String(error.message || error).slice(0, 200) };
+        logError("backup_incremental_falhou", error, { collection: collection.id });
+      }
+    }
     // Falha no Storage não invalida o dump do Firestore, já gravado e verificado.
     let storage = null;
     try {
@@ -261,11 +344,11 @@ async function runBackup({ db, bucket, r2, key, now = new Date(), maxReads, maxS
         logError("backup_storage_falhou", error);
       }
     }
-    const expired = expiredDumps(await r2.list("firestore/"), now);
+    const expired = expiredDumps([...await r2.list("firestore/"), ...await r2.list("incremental/")], now);
     if (expired.length) await r2.remove(expired);
-    return { date, dumpKey, documents: dump.documents, reads: dump.reads, dumpBytes: compressed.length, storage, expired: expired.length };
+    return { date, dumpKey, documents: dump.documents, reads, dumpBytes, incremental, storage, expired: expired.length };
   } catch (error) {
-    error.backupReads = dump.reads;
+    error.backupReads = reads;
     throw error;
   }
 }
@@ -338,7 +421,7 @@ function startBackupLoop({ getDb, getStorageBucket, appEnv }) {
 function stopBackupLoop() { if (timer) { clearInterval(timer); timer = null; } }
 
 module.exports = {
-  parseKey, encrypt, decrypt, encodeValue, decodeValue, exportFirestore, backupStorage,
+  parseKey, encrypt, decrypt, encodeValue, decodeValue, exportFirestore, exportIncrement, loadCursor, backupStorage,
   storageObjectKey, loadManifest, expiredDumps, backupConfig, createR2, runBackup, tick,
   startBackupLoop, stopBackupLoop, MANIFEST_KEY
 };

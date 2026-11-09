@@ -14,6 +14,8 @@
 //       --service-account <arquivo.json> ou FIREBASE_SERVICE_ACCOUNT_JSON
 //   node scripts/backup/restore.js storage --target-project <id> [--prefix path/]
 //       recria os arquivos do Storage no bucket do projeto alvo
+//   node scripts/backup/restore.js incremental --target-project <id> [--collection audit_logs]
+//       grava todos os lotes incrementais (audit_logs não está no dump diário)
 //
 // Restaurar em produção exige --allow-production: o padrão é restaurar em
 // homologação, conferir e só então decidir.
@@ -62,6 +64,30 @@ function targetApp(opts) {
   }, "restore");
 }
 
+async function incrementalLines(r2, key, collection) {
+  const prefix = `incremental/${collection}/`;
+  const chunks = (await r2.list(prefix)).filter(k => !k.endsWith("/cursor.json.gz.enc")).sort();
+  const lines = [];
+  for (const chunk of chunks) {
+    const blob = await r2.get(chunk);
+    lines.push(...zlib.gunzipSync(decrypt(key, blob, chunk)).toString("utf8").split("\n").filter(Boolean));
+  }
+  return { chunks: chunks.length, lines };
+}
+
+async function writeLines(db, lines, prefix = "") {
+  const writer = db.bulkWriter();
+  let count = 0;
+  for (const line of lines) {
+    const { path: docPath, data } = JSON.parse(line);
+    if (!docPath.startsWith(prefix)) continue;
+    writer.set(db.doc(docPath), decodeValue(data, db));
+    count++;
+  }
+  await writer.close();
+  return count;
+}
+
 async function main() {
   const opts = args(process.argv.slice(2));
   const command = opts._[0];
@@ -73,6 +99,7 @@ async function main() {
 
   if (command === "list") {
     for (const item of (await r2.list("firestore/")).sort()) console.log(item);
+    for (const item of (await r2.list("incremental/")).sort()) console.log(item);
     const manifest = await loadManifest(r2, key);
     console.log(`storage: ${Object.keys(manifest.files).length} arquivos no manifesto`);
     return;
@@ -92,17 +119,19 @@ async function main() {
     const ndjson = await fetchDump(r2, key, opts.date);
     const { getFirestore } = require("firebase-admin/firestore");
     const db = getFirestore(targetApp(opts));
-    const writer = db.bulkWriter();
-    let count = 0;
-    for (const line of ndjson.split("\n")) {
-      if (!line) continue;
-      const { path: docPath, data } = JSON.parse(line);
-      if (!docPath.startsWith(prefix)) continue;
-      writer.set(db.doc(docPath), decodeValue(data, db));
-      count++;
-    }
-    await writer.close();
+    const count = await writeLines(db, ndjson.split("\n").filter(Boolean), prefix);
     console.log(`${count} documentos restaurados em ${opts["target-project"]}.`);
+    console.log("audit_logs fica fora do dump diário: use o comando incremental.");
+    return;
+  }
+
+  if (command === "incremental") {
+    const collection = typeof opts.collection === "string" ? opts.collection : "audit_logs";
+    if (!/^[A-Za-z0-9_]+$/.test(collection)) fail("Coleção inválida.");
+    const { chunks, lines } = await incrementalLines(r2, key, collection);
+    const { getFirestore } = require("firebase-admin/firestore");
+    const count = await writeLines(getFirestore(targetApp(opts)), lines, prefix);
+    console.log(`${count} documentos de ${chunks} lotes restaurados em ${opts["target-project"]}.`);
     return;
   }
 
@@ -122,7 +151,7 @@ async function main() {
     return;
   }
 
-  fail("Comandos: list | download | firestore | storage");
+  fail("Comandos: list | download | firestore | incremental | storage");
 }
 
 main().catch(error => fail(`Falhou: ${error.message}`));
