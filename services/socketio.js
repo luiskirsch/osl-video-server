@@ -27,7 +27,7 @@ let _io = null;
 
 function initSocketIo(httpServer, allowedOrigins) {
   _io = new Server(httpServer, {
-    allowRequest: (req, done) => done(null, require("../config").APP_ENV !== "staging" || require("../middleware/stagingAccess").hasStagingAccess(req)),
+    allowRequest: (req, done) => done(null, !require("../middleware/clinicalMaintenance").isClinicalMaintenance() && (require("../config").APP_ENV !== "staging" || require("../middleware/stagingAccess").hasStagingAccess(req))),
     cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
     pingTimeout:  60_000,
     pingInterval: 25_000,

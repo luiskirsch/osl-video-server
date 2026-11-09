@@ -32,4 +32,25 @@ A API do App Check estava desabilitada nos projetos em uso e o frontend não con
 
 ## Verificação
 
+## Incidente na preparação da migração
+
+Em 08/11, a leitura para backup encontrou `RESOURCE_EXHAUSTED` no projeto
+gratuito de produção. A consulta pública passou a retornar erro de banco.
+A cópia foi interrompida; não houve troca do projeto nem exclusão de dados.
+O backup completo do Firestore **não foi concluído**. Apenas os arquivos
+cifrados de configuração e Auth concluídos podem ser considerados disponíveis.
+
+Foi acrescentado `CLINICAL_MAINTENANCE=true`: responde `503` com `Retry-After`,
+interrompe as rotas antes de webhooks/auditoria e impede a inicialização dos
+jobs e de conexões Socket.IO. Health permanece mínimo e o diagnóstico interno
+autenticado informa a manutenção. Isso não recupera a cota do Firebase.
+
+Todas as contas de faturamento acessíveis estavam encerradas. A retomada
+depende de reativação/vinculação pelo titular ou da renovação da cota. Antes
+de outra leitura em massa, conferir franquia restante e capacidade de escrita
+do destino; o histórico supera a franquia diária gratuita de gravações.
+Não publicar uma troca de Firebase com cópia parcial ou sem validar Auth.
+
+## Testes
+
 Os testes HTTP exercitam as rotas reais com transporte Firestore substituído: filtro obrigatório, ausência de UID/base64/configuração financeira, `404` consistente, assinatura de fotos e revogação antes de cache. Os testes de borda conferem desafio de homologação, cookie, proxy sem vazamento da chave e exclusão de arquivos privados. Conferir as mesmas condições após o deploy. Não interpretar controles client-side de redirecionamento/anti-clone como autorização da API.

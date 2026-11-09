@@ -84,6 +84,7 @@ router.get("/internal/health", (req, res) => {
     commitSha: commitShort,
       nodeEnv: process.env.NODE_ENV || "development",
       railwayDeploymentId: process.env.RAILWAY_DEPLOYMENT_ID || null,
+      maintenance: require("../middleware/clinicalMaintenance").isClinicalMaintenance(),
       firebaseConfigured: !!getDb(),
       firebaseProjectId: firebaseProjectId(),
       livekitConfigured: !!LIVEKIT_API_KEY,

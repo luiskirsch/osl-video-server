@@ -220,6 +220,9 @@ app.use(cors((req, callback) => callback(null, {
 // WAF: bloqueia scanners conhecidos e path traversal antes do body parsing.
 app.use(require("./middleware/clinicalSecurity"));
 app.use(waf);
+// Antes de qualquer router, webhook ou auditoria: durante o corte nenhum
+// cliente pode ler ou alterar a base que está sendo copiada.
+app.use(require("./middleware/clinicalMaintenance"));
 
 // Bloqueia floods antes de alocar/parsing de corpos potencialmente grandes.
 app.use(globalLimiter);
@@ -382,6 +385,10 @@ function initializeService(name, service) {
 
 const server = httpServer.listen(PORT, "0.0.0.0", () => {
   logInfo("server_started", { port: PORT, appEnv: APP_ENV });
+  if (require("./middleware/clinicalMaintenance").isClinicalMaintenance()) {
+    logInfo("clinical_maintenance_enabled", { backgroundJobsPaused: true });
+    return;
+  }
   startCleanupLoop();
   startSchedulerLoop();
   startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
