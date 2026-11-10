@@ -17,6 +17,8 @@ const { getAuth } = require("firebase-admin/auth");
 
 const studentPortalEmail = String(process.argv[2] || "luishenriquekirsch@hotmail.com").trim().toLowerCase();
 const presenterEmail = String(process.argv[3] || process.env.PUBLIC_PROGRAM_DEMO_PRESENTER_EMAIL || "contato@espacopreludio.com.br").trim().toLowerCase();
+// Quem apresenta a demonstração também entra no portal institucional como gestor do programa fictício.
+const managerEmail = String(process.argv[4] || process.env.PUBLIC_PROGRAM_DEMO_MANAGER_EMAIL || presenterEmail).trim().toLowerCase();
 const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "null");
 if (!sa) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON não configurado.");
 require("./confirm-firebase-project").assertFirebaseProjectConfirmed(sa, "seed-programa-publico-demo");
@@ -106,7 +108,7 @@ async function main() {
     milestones: "M1 preparação; M2 cadastro; M3 triagem; M4 cuidado; M5 avaliação.", startDate: "2026-01-01", endDate: "2027-12-31",
     targetDescription: "Estudantes da rede municipal fictícia, com consentimento e avaliação individual de viabilidade.", minAge: 12, maxAge: 21,
     maxStudents: 120, maxSessionsPerStudent: 8, maxMonthlySessions: 160, sessionDurationMinutes: 50,
-    publicManagerName: "Marina de Almeida — gestora fictícia", publicManagerEmail: "gestora@aurora.invalid", publicManagerPhone: "(48) 99999-0101",
+    publicManagerName: "Marina de Almeida — gestora fictícia", publicManagerEmail: managerEmail, publicManagerPhone: "(48) 99999-0101",
     publicDpoName: "Paulo Nunes — DPO fictício", publicDpoEmail: "dpo.prefeitura@aurora.invalid",
     controllerRoleDescription: "Município fictício como controlador das finalidades administrativas e de elegibilidade.",
     processorRoleDescription: "Prestadora fictícia como operadora dos dados necessários à execução assistencial simulada.",
