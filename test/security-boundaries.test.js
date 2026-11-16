@@ -45,3 +45,22 @@ test("clinical service rejects the wrong Firebase project or activation of game 
  assert.throws(()=>assertFirebaseIsolation("osextolugar-game",{SERVICE_PRODUCT:"preludio",APP_ENV:"staging",FIREBASE_EXPECTED_PROJECT_ID:"osextolugar-game"}),/NOT_ALLOWED/);
  assert.doesNotThrow(()=>assertFirebaseIsolation("espaco-preludio-clinico",{FIREBASE_EXPECTED_PROJECT_ID:"espaco-preludio-clinico",SERVICE_PRODUCT:"preludio"}));
 });
+test("game service only opens the game Firebase project",()=>{
+ for(const clinical of ["osextolugar-game","espaco-preludio-clinico","sextolugar-staging","espaco-preludio-hml"]){
+  assert.throws(()=>assertFirebaseIsolation(clinical,{SERVICE_PRODUCT:"sextolugar",GAME_ENABLED:"true"}),/CANNOT_USE_CLINICAL_PROJECT/);
+  assert.throws(()=>assertFirebaseIsolation(clinical,{SERVICE_PRODUCT:"sextolugar",APP_ENV:"staging"}),/CANNOT_USE_CLINICAL_PROJECT/);
+ }
+ assert.throws(()=>assertFirebaseIsolation("outro",{SERVICE_PRODUCT:"sextolugar"}),/NOT_ALLOWED/);
+ assert.doesNotThrow(()=>assertFirebaseIsolation("osextolugar-jogo",{SERVICE_PRODUCT:"sextolugar",GAME_ENABLED:"true",FIREBASE_EXPECTED_PROJECT_ID:"osextolugar-jogo"}));
+});
+test("game routes only load in the game service",()=>{
+ const load=env=>{
+  const saved={...process.env};Object.assign(process.env,env);
+  delete require.cache[require.resolve("../config")];
+  try{return require("../config");}finally{for(const k of Object.keys(env))if(k in saved)process.env[k]=saved[k];else delete process.env[k];delete require.cache[require.resolve("../config")];}
+ };
+ assert.equal(load({SERVICE_PRODUCT:"preludio",GAME_ENABLED:"true"}).GAME_ENABLED,false);
+ assert.equal(load({SERVICE_PRODUCT:"sextolugar",GAME_ENABLED:"false"}).GAME_ENABLED,false);
+ const game=load({SERVICE_PRODUCT:"sextolugar",GAME_ENABLED:"true"});
+ assert.equal(game.GAME_ENABLED,true);assert.equal(game.IS_GAME_SERVICE,true);
+});

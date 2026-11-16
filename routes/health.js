@@ -76,7 +76,7 @@ router.get("/internal/health", (req, res) => {
   const commitShort = commitSha ? commitSha.substring(0, 7) : null;
   return res.status(200).json({
     ok: true,
-    service: "espaco-preludio-api",
+    service: require("../config").IS_GAME_SERVICE ? "sextolugar-api" : "espaco-preludio-api",
     appEnv: APP_ENV,
     uptimeSec: Math.round(process.uptime()),
     startedAt: new Date(APP_START_TIME).toISOString(),

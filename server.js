@@ -52,19 +52,26 @@ const helmet  = require("helmet");
 const cors    = require("cors");
 const morgan  = require("morgan");
 
-const { PORT, APP_ENV, IS_PRODUCTION, CORS_ALLOWED_HEADERS, GAME_ENABLED } = require("./config");
+const { PORT, APP_ENV, IS_PRODUCTION, CORS_ALLOWED_HEADERS, GAME_ENABLED, IS_GAME_SERVICE } = require("./config");
 const { createRequestId, safeRequestPath } = require("./utils");
 
 // --- Rotas ---
 const healthRouter    = require("./routes/health");
-const i18nRouter      = require("./routes/i18n");
-const { router: stripeRouter, webhookRouter: stripeWebhookRouter } = require("./routes/stripe");
-const therapyRouter   = require("./routes/therapy");
-const clinicalPrivacyRouter = require("./routes/clinicalPrivacy")();
-const clinicalMfaRouter = require("./routes/clinicalMfa")();
-const accountRouter         = require("./routes/account")();
-const institutionRouter     = require("./routes/institution");
-const rtRouter              = require("./routes/rt");
+// Rotas do Espaço Prelúdio. No serviço do jogo (SERVICE_PRODUCT=sextolugar)
+// nem são importadas: alguns módulos abrem timers e conexões no require.
+const EP = IS_GAME_SERVICE ? null : (() => {
+  const i18nRouter = require("./routes/i18n");
+  const { router: stripeRouter, webhookRouter: stripeWebhookRouter } = require("./routes/stripe");
+  return {
+    i18nRouter, stripeRouter, stripeWebhookRouter,
+    therapyRouter:         require("./routes/therapy"),
+    clinicalPrivacyRouter: require("./routes/clinicalPrivacy")(),
+    clinicalMfaRouter:     require("./routes/clinicalMfa")(),
+    accountRouter:         require("./routes/account")(),
+    institutionRouter:     require("./routes/institution"),
+    rtRouter:              require("./routes/rt"),
+  };
+})();
 
 // Módulos do O SextoLugar (ver GAME_ENABLED em config.js). Carregados sob
 // demanda: alguns iniciam timers ao serem importados (ex.: game/rooms.js).
@@ -188,14 +195,20 @@ app.use((req, res, next) => {
 });
 
 // CORS restrito (security fix #8)
-// Só o Espaço Prelúdio. Os sites do O SextoLugar (preludiojogos.*,
-// luiskirsch.github.io) saíram com o jogo; GAME_ENABLED não os reativa.
-const DEFAULT_ALLOWED_ORIGINS = [
+// Cada serviço aceita só os sites do próprio produto: a API do Espaço
+// Prelúdio nunca responde ao site do jogo, e vice-versa.
+const LOCAL_ORIGINS = ["http://localhost:3000", "http://localhost:8080", "http://localhost:5173"];
+const DEFAULT_ALLOWED_ORIGINS = IS_GAME_SERVICE ? [
+  "https://preludiojogos.com",
+  "https://www.preludiojogos.com",
+  "https://preludiojogos.com.br",
+  "https://www.preludiojogos.com.br",
+  "https://luiskirsch.github.io",
+  ...LOCAL_ORIGINS,
+] : [
   "https://espacopreludio.com.br",
   "https://www.espacopreludio.com.br",
-  "http://localhost:3000",
-  "http://localhost:8080",
-  "http://localhost:5173",
+  ...LOCAL_ORIGINS,
   "https://api.espacopreludio.com.br",
   "https://osl-video-server-production.up.railway.app"
 ];
@@ -229,7 +242,7 @@ app.use(globalLimiter);
 
 // Stripe webhook ANTES do express.json() — precisa de raw body para validar HMAC.
 // express.raw() aplicado só na rota /stripe/webhook dentro do router.
-app.use(stripeWebhookRouter);
+if (EP) app.use(EP.stripeWebhookRouter);
 
 // 6MB: permite upload de comprovante de matrícula (PDF/imagem em base64)
 // para validação automática do tier estudante. Outros endpoints continuam
@@ -238,7 +251,7 @@ app.use(express.json({ limit: "6mb" }));
 app.use(express.urlencoded({ extended: false, limit: "1mb", parameterLimit: 1000 }));
 
 // Demais rotas Stripe (create-checkout, portal) — precisam do body JSON parseado.
-app.use(stripeRouter);
+if (EP) app.use(EP.stripeRouter);
 
 // --- Disclosure responsável ---
 app.get("/.well-known/security.txt", (req, res) => {
@@ -252,17 +265,19 @@ app.get("/.well-known/security.txt", (req, res) => {
 
 // --- Montagem de rotas ---
 app.use(healthRouter);
-app.use(i18nRouter);
-app.use(auditLog("conta", { matches: req => /^\/conta\//i.test(req.path) }), accountRouter);
-app.use(auditLog("clinical", {
-  includeSuccessfulReads: true,
-  matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
-}));
-app.use(clinicalMfaRouter);
-app.use(clinicalPrivacyRouter);
-app.use(auditLog("therapy"), therapyRouter);
-app.use(auditLog("institution"), institutionRouter);
-app.use(auditLog("responsavel-tecnico"), rtRouter);
+if (EP) {
+  app.use(EP.i18nRouter);
+  app.use(auditLog("conta", { matches: req => /^\/conta\//i.test(req.path) }), EP.accountRouter);
+  app.use(auditLog("clinical", {
+    includeSuccessfulReads: true,
+    matches: req => /^\/(?:therapy|institution|rt|empresa|public)(?:\/|$)/i.test(req.path)
+  }));
+  app.use(EP.clinicalMfaRouter);
+  app.use(EP.clinicalPrivacyRouter);
+  app.use(auditLog("therapy"), EP.therapyRouter);
+  app.use(auditLog("institution"), EP.institutionRouter);
+  app.use(auditLog("responsavel-tecnico"), EP.rtRouter);
+}
 if (GAME_ENABLED) {
   for (const [category, path] of GAME_ROUTERS) {
     const router = require(path);
@@ -390,8 +405,11 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
     return;
   }
   startCleanupLoop();
-  startSchedulerLoop();
-  startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
+  // Lembretes de sessão e backup R2 são do Espaço Prelúdio.
+  if (EP) {
+    startSchedulerLoop();
+    startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
+  }
   scheduleAuditLogCleanup();
   // Motor do jogo (EventBus): só com GAME_ENABLED — grava em salas, users,
   // daily_ritual, world_state etc.
@@ -413,7 +431,7 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
   // boot evita que o primeiro colaborador de cada deploy fique sem clima.
   setTimeout(() => require("./services/ambient-weather").warmUp(), 20_000).unref();
   // Resumos IA presos em "processing" por queda brusca do processo anterior.
-  setTimeout(() => therapyRouter.sweepStaleAiSummaries?.(), 30_000).unref();
+  if (EP) setTimeout(() => EP.therapyRouter.sweepStaleAiSummaries?.(), 30_000).unref();
 });
 
 async function gracefullyStopAllEgress() {
@@ -443,7 +461,7 @@ async function shutdown(signal) {
   await gracefullyStopAllEgress();
   // Resumos IA em andamento morrem com o processo: marca "interrompido" para
   // o prontuário oferecer reenvio (o áudio fica guardado no aparelho).
-  await therapyRouter.interruptActiveAiSummaries?.().catch(e => logError("shutdown_ai_summary_error", e));
+  await EP?.therapyRouter.interruptActiveAiSummaries?.().catch(e => logError("shutdown_ai_summary_error", e));
 
   server.close((err) => {
     if (err) { logError("shutdown_error", err, { signal }); process.exit(1); }

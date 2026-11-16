@@ -30,11 +30,18 @@ const APP_ENV = normalizeAppEnv(process.env.APP_ENV);
 const IS_STAGING    = APP_ENV === "staging";
 const IS_PRODUCTION = APP_ENV === "production";
 
-// O SextoLugar (jogo, Encontro e administração da plataforma) está parado e
-// seus dados foram movidos para o projeto Firebase osextolugar-jogo. Os
-// módulos continuam no código, mas só carregam com GAME_ENABLED=true — e,
-// ligados, voltariam a gravar no Firestore do Espaço Prelúdio.
-const GAME_ENABLED = process.env.GAME_ENABLED === "true";
+// Produto servido por este processo. O mesmo código (e a mesma imagem) roda
+// em dois serviços Railway separados:
+//   "preludio"   → Espaço Prelúdio (projeto espaco-preludio). Nunca carrega o jogo.
+//   "sextolugar" → O SextoLugar (projeto sextolugar-legado, Firebase
+//                  osextolugar-jogo). Monta só as rotas e jobs do jogo.
+// Os dados de um nunca passam pelo processo do outro: cada serviço tem a sua
+// credencial Firebase, e services/firebase-isolation.js recusa o boot se o
+// projeto não corresponder ao produto.
+const SERVICE_PRODUCT = String(process.env.SERVICE_PRODUCT || "preludio").trim().toLowerCase();
+const IS_GAME_SERVICE = SERVICE_PRODUCT === "sextolugar";
+// O jogo só liga no serviço dele, e só com o interruptor explícito.
+const GAME_ENABLED = IS_GAME_SERVICE && process.env.GAME_ENABLED === "true";
 
 const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || "";
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || "";
@@ -373,7 +380,8 @@ const CORS_ALLOWED_HEADERS = [
 
 module.exports = {
   PORT,
-  APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv, GAME_ENABLED,
+  APP_ENV, IS_STAGING, IS_PRODUCTION, normalizeAppEnv,
+  SERVICE_PRODUCT, IS_GAME_SERVICE, GAME_ENABLED,
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
   S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
   RECORDING_LAYOUT_URL,

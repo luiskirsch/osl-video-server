@@ -6,8 +6,9 @@
 // primeiro no staging, confere o /health e só então na produção.
 //
 // Uso (na pasta do projeto, depois do push):
-//   npm run publicar                     staging e produção
+//   npm run publicar                     staging, produção e o serviço do jogo
 //   npm run publicar -- --so-staging     só o staging
+//   npm run publicar -- --so-jogo        só o serviço do O SextoLugar
 //   npm run publicar -- --voltar-github  devolve os dois ambientes ao deploy
 //                                        automático pelo GitHub (Railway normal)
 //
@@ -27,9 +28,13 @@ const BRANCH = "luiskirsch.github.io";
 const IMAGE = `ghcr.io/${REPOSITORY}`;
 const WORKFLOW = "backend-image.yml";
 const ENVIRONMENTS = [
-  { name: "staging", id: "796bde59-e2cf-434b-a12e-aa4cb6dfe6cb", health: "https://api-staging.espacopreludio.com.br/health" },
-  { name: "produção", id: "692963fc-d597-456c-b524-0daeb3035aef", health: "https://api.espacopreludio.com.br/health" },
+  { name: "staging", project: PROJECT, service: SERVICE, id: "796bde59-e2cf-434b-a12e-aa4cb6dfe6cb", health: "https://api-staging.espacopreludio.com.br/health" },
+  { name: "produção", project: PROJECT, service: SERVICE, id: "692963fc-d597-456c-b524-0daeb3035aef", health: "https://api.espacopreludio.com.br/health" },
 ];
+// O SextoLugar: mesma imagem, serviço próprio (projeto Railway sextolugar-legado,
+// SERVICE_PRODUCT=sextolugar, Firebase osextolugar-jogo). Só por imagem.
+const GAME = { name: "jogo", project: "621aa87d-4592-4893-8c16-62c4561a0a5c", service: "0c0b99a4-391f-4953-ba8f-f7c96152d0d8",
+  id: "593578ac-12d2-49c5-8eac-e11f5292625f", health: "https://sextolugar-backend-legado-production.up.railway.app/health" };
 
 const args = new Set(process.argv.slice(2));
 const envConfigCache = new Map();
@@ -67,7 +72,7 @@ async function railway(query, variables) {
 
 async function environmentConfig(environment) {
   if (!envConfigCache.has(environment.id)) {
-    const data = await railway("query($p:String!,$e:String!,$s:String!){ variables(projectId:$p, environmentId:$e, serviceId:$s) }", { p: PROJECT, e: environment.id, s: SERVICE });
+    const data = await railway("query($p:String!,$e:String!,$s:String!){ variables(projectId:$p, environmentId:$e, serviceId:$s) }", { p: environment.project, e: environment.id, s: environment.service });
     envConfigCache.set(environment.id, data.variables);
   }
   return envConfigCache.get(environment.id);
@@ -113,8 +118,8 @@ async function publishImage(environment, sha) {
   if (await liveCommit(environment) === short) { say(`${environment.name}: já está em ${short}.`); return; }
   say(`${environment.name}: trocando para a imagem ${short}…`);
   await railway("mutation($s:String!,$e:String!,$i:ServiceInstanceUpdateInput!){ serviceInstanceUpdate(serviceId:$s, environmentId:$e, input:$i) }",
-    { s: SERVICE, e: environment.id, i: { source: { image: `${IMAGE}:${sha}` } } });
-  await railway("mutation($s:String!,$e:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e) }", { s: SERVICE, e: environment.id });
+    { s: environment.service, e: environment.id, i: { source: { image: `${IMAGE}:${sha}` } } });
+  await railway("mutation($s:String!,$e:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e) }", { s: environment.service, e: environment.id });
   const deadline = Date.now() + 15 * 60 * 1000;
   while (Date.now() < deadline) {
     await sleep(15000);
@@ -150,6 +155,9 @@ async function backToGithub(sha) {
   }
   if (args.has("--voltar-github")) { await backToGithub(sha); return; }
   await waitForImage(sha);
-  for (const environment of args.has("--so-staging") ? ENVIRONMENTS.slice(0, 1) : ENVIRONMENTS) await publishImage(environment, sha);
+  const targets = args.has("--so-staging") ? ENVIRONMENTS.slice(0, 1)
+    : args.has("--so-jogo") ? [GAME]
+    : [...ENVIRONMENTS, GAME];
+  for (const environment of targets) await publishImage(environment, sha);
   say("Publicação concluída.");
 })().catch(error => stop(error.message));
