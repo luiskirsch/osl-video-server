@@ -91,7 +91,7 @@ const GAME_ROUTERS = [
 
 const { globalLimiter } = require("./services/rateLimit");
 const waf = require("./middleware/waf");
-const { auditLog } = require("./middleware/auditLog");
+const { auditLog, auditedRouter } = require("./middleware/auditLog");
 const { scheduleAuditLogCleanup } = require("./jobs/auditLogCleanup");
 
 // Valida secrets críticos no startup — exit em prod se ausentes, warn em dev
@@ -274,14 +274,14 @@ if (EP) {
   }));
   app.use(EP.clinicalMfaRouter);
   app.use(EP.clinicalPrivacyRouter);
-  app.use(auditLog("therapy"), EP.therapyRouter);
-  app.use(auditLog("institution"), EP.institutionRouter);
-  app.use(auditLog("responsavel-tecnico"), EP.rtRouter);
+  app.use(auditedRouter("therapy", EP.therapyRouter));
+  app.use(auditedRouter("institution", EP.institutionRouter));
+  app.use(auditedRouter("responsavel-tecnico", EP.rtRouter));
 }
 if (GAME_ENABLED) {
   for (const [category, path] of GAME_ROUTERS) {
     const router = require(path);
-    if (category) app.use(auditLog(category), router); else app.use(router);
+    app.use(category ? auditedRouter(category, router) : router);
   }
 }
 

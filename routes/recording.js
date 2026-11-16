@@ -125,8 +125,19 @@ router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   }
 }));
 
-// POST /recording/discard — para e descarta a gravação (sem salvar URL) [admin only]
-router.post("/recording/discard", requireAdmin, asyncHandler(async (req, res) => {
+// POST /recording/discard — para e descarta a gravação (sem salvar URL).
+// Host da sala (hostToken) ou sessão do painel admin. Antes era só admin, mas
+// quem chama é o botão "Sair sem salvar" do host — que sempre recebia 403 e
+// deixava o egress da LiveKit gravando (e cobrando) até o fim da sala.
+function requireHostOrAdmin(req, res, next) {
+  const roomId = normalizeRoomId(req.body?.roomId);
+  if (roomId && verifyHostTokenRecording(req, roomId)) return next();
+  if (getBearerToken(req)) return requireAdmin(req, res, next); // sessão do painel
+  // Código que o cliente (js/api.js) usa para renovar o hostToken e repetir.
+  return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
+}
+
+router.post("/recording/discard", requireHostOrAdmin, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
