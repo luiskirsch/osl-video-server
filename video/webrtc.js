@@ -107,26 +107,31 @@ async function startRoomRecording(roomId, type, ref, email) {
   const filepath = `recordings/${roomId}/${ts}-${type}.mp4`;
   const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
 
-  // SDK v2: primeiro arg é a URL. Antes passávamos roomId aqui — a SDK aceitava
-  // silenciosamente, mas o egress browser tentava carregar "SL-XXXX" como URL
-  // e renderizava em branco (causava o "layout bugado" do recording).
+  // SDK v2: startWebEgress(url, output, opts). O formato antigo (opções e
+  // fileOutputs num objeto só, no lugar do output) era recusado pela LiveKit
+  // com "request has missing or invalid field: output" — a gravação nunca
+  // chegava a começar. Layout vertical 1080x1920 (recording-layout.html).
+  const { EncodedFileOutput, EncodedFileType, S3Upload, EncodingOptions } = require("livekit-server-sdk");
+  const s3 = recordingS3Config();
+  const file = new EncodedFileOutput({
+    fileType: EncodedFileType.MP4,
+    filepath,
+    output: {
+      case: "s3",
+      value: new S3Upload({
+        accessKey: s3.accessKey, secret: s3.secret, region: s3.region || "auto",
+        endpoint: s3.endpoint || "", bucket: s3.bucket, forcePathStyle: s3.forcePathStyle,
+      }),
+    },
+  });
   let egress;
   try {
-    egress = await egressClient.startWebEgress(
-      layoutUrl,
-      {
-        audioOnly: false,
-        videoOnly: false,
-        awaitStartSignal: false,
-        videoWidth: 1080,
-        videoHeight: 1920,
-        fileOutputs: [{
-          fileType: 1,
-          filepath,
-          s3: recordingS3Config()
-        }]
-      }
-    );
+    egress = await egressClient.startWebEgress(layoutUrl, { file }, {
+      audioOnly: false,
+      videoOnly: false,
+      awaitStartSignal: false,
+      encodingOptions: new EncodingOptions({ width: 1080, height: 1920, framerate: 30, videoBitrate: 3000, audioBitrate: 128 }),
+    });
   } finally {
     recordingStartsInFlight.delete(roomId);
   }
