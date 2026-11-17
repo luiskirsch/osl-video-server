@@ -1,11 +1,12 @@
 "use strict";
 // Gravação de segurança das sessões do O SextoLugar.
 //
-// Decisão do produto (2026-11-17): toda sala é gravada enquanto há sessão ou
-// vídeo ativo, independentemente de compra. O vídeo fica no bucket PRIVADO de
-// gravações por 30 dias e então é apagado — pela regra de ciclo de vida do R2
-// (prefixo recordings/) e, por garantia, por jobs/sessionRecordingCleanup.js.
-// Os participantes veem o aviso de gravação na sala (sala.html).
+// Decisão do produto (2026-11-17): toda SESSÃO DO JOGO é gravada, do início
+// (/game/session/start) ao fim (/game/session/end ou fechamento da sala),
+// independentemente de compra. Lobby e vídeo fora da sessão não são gravados.
+// O vídeo fica no bucket PRIVADO de gravações por 30 dias e então é apagado —
+// pela regra de ciclo de vida do R2 (prefixo recordings/) e, por garantia, por
+// jobs/sessionRecordingCleanup.js.
 //
 // O mapa activeRecordings vive só na memória. Este registro no Firestore
 // (session_recordings/{egressId}) é o que permite localizar uma gravação dias
@@ -112,21 +113,21 @@ async function ensureSessionRecording(roomId, reason = "session") {
   }
 }
 
-// Reabre a gravação só se a sala ainda tem sessão ou vídeo (ex.: depois que
-// a compra de "Salvar Sessão" fechou o arquivo do comprador).
+// Reabre a gravação só se a sessão do jogo continua (ex.: depois que a
+// compra de "Salvar Sessão" fechou o arquivo do comprador).
 async function ensureSessionRecordingIfActive(roomId, reason) {
   const { panelRooms } = require("../game/state");
   const room = panelRooms.get(roomId);
-  if (!room || !(room.sessionActive || room.videoActive)) return null;
+  if (!room || !room.sessionActive) return null;
   return ensureSessionRecording(roomId, reason);
 }
 
-// Encerra a gravação quando a sala não tem mais sessão nem vídeo.
-async function endSessionRecordingIfIdle(roomId) {
+// Encerra a gravação no fim da sessão do jogo (o vídeo pode seguir no lobby).
+async function endSessionRecording(roomId) {
   const { activeRecordings, panelRooms } = require("../game/state");
   if (!activeRecordings.has(roomId)) return null;
   const room = panelRooms.get(roomId);
-  if (room && (room.sessionActive || room.videoActive)) return null;
+  if (room && room.sessionActive) return null;
   try {
     const { stopRoomRecording } = require("../video/webrtc");
     return await stopRoomRecording(roomId);
@@ -139,5 +140,5 @@ async function endSessionRecordingIfIdle(roomId) {
 module.exports = {
   COLLECTION, RETENTION_MS, SECURITY_TYPE,
   recordStarted, recordStopped, listForRoom, rehydrate,
-  ensureSessionRecording, ensureSessionRecordingIfActive, endSessionRecordingIfIdle, storageConfigured,
+  ensureSessionRecording, ensureSessionRecordingIfActive, endSessionRecording, storageConfigured,
 };

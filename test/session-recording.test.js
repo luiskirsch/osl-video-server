@@ -134,3 +134,22 @@ test("backup can live under a prefix of a shared bucket; callers see unprefixed 
   assert.equal(backup.backupConfig({ ...base, BACKUP_R2_PREFIX: "backups" }).prefix, "backups/");
   assert.throws(() => backup.backupConfig({ ...base, BACKUP_R2_PREFIX: "../fora" }), /PREFIX_INVALIDO/);
 });
+
+test("recording follows the game session only: the lobby video does not keep it running", async t => {
+  const state = require("../game/state");
+  const webrtc = require("../video/webrtc");
+  const stops = [];
+  t.mock.method(webrtc, "stopRoomRecording", async roomId => { stops.push(roomId); return { egressStopOk: true }; });
+  state.activeRecordings.set("SESS1", { egressId: "EG_S1" });
+  state.panelRooms.set("SESS1", { sessionActive: true, videoActive: true });
+  t.after(() => { state.activeRecordings.delete("SESS1"); state.panelRooms.delete("SESS1"); });
+
+  assert.equal(await sessionRecording.endSessionRecording("SESS1"), null, "sessão ainda ativa: não para");
+  assert.deepEqual(stops, []);
+
+  state.panelRooms.get("SESS1").sessionActive = false; // fim da partida; vídeo do lobby segue ligado
+  await sessionRecording.endSessionRecording("SESS1");
+  assert.deepEqual(stops, ["SESS1"]);
+
+  assert.equal(await sessionRecording.ensureSessionRecordingIfActive("SESS1", "test"), null, "sem sessão, não reabre");
+});

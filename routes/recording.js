@@ -111,7 +111,7 @@ router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
 
   const room = panelRooms.get(roomId);
-  if (!room || !(room.sessionActive || room.videoActive)) return sendError(res, 403, "SALA_SEM_SESSAO_ATIVA");
+  if (!room || !room.sessionActive) return sendError(res, 403, "SALA_SEM_SESSAO_ATIVA");
 
   const already = activeRecordings.has(roomId);
   const job = await sessionRecording.ensureSessionRecording(roomId, "client_auto_start");
@@ -175,8 +175,8 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
           hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
         });
       }
-      // O arquivo comprado fecha aqui; se a sala segue ativa, a gravação de
-      // segurança recomeça num arquivo novo.
+      // O arquivo comprado fecha aqui; se a sessão do jogo continua, a
+      // gravação de segurança recomeça num arquivo novo.
       sessionRecording.ensureSessionRecordingIfActive(roomId, "after_claim");
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
     } catch (err) {

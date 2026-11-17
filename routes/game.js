@@ -457,8 +457,9 @@ router.post("/game/session/end", (req, res) => {
     room.videoActive    = false;
     room.updatedAt = nowIso();
     broadcastPanelUpdate();
-    // stopRoomRecording zera recordingActive quando o egress realmente para.
-    sessionRecording.endSessionRecordingIfIdle(roomId);
+    // Fim da sessão do jogo = fim da gravação (stopRoomRecording zera
+    // recordingActive quando o egress realmente para).
+    sessionRecording.endSessionRecording(roomId);
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
     logError("game_session_end_error", error);
@@ -477,9 +478,6 @@ router.post("/game/video", (req, res) => {
     room.videoActive = active;
     room.updatedAt   = nowIso();
     broadcastPanelUpdate();
-    // Vídeo na sala também é gravado (inclui o lobby, antes do ritual).
-    if (active) sessionRecording.ensureSessionRecording(roomId, "video_on");
-    else sessionRecording.endSessionRecordingIfIdle(roomId);
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
     logError("game_video_error", error);
