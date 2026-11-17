@@ -3,7 +3,8 @@ const { logError, logInfo } = require("../logger");
 const { asyncHandler, sendError, nowIso, normalizePathEmail } = require("../utils");
 const { activeRecordings, completedRecordings, pagamentosAprovados, panelRooms, broadcastPanelUpdate } = require("../game/state");
 const { normalizeRoomId } = require("../game/rooms");
-const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken } = require("../video/webrtc");
+const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken, recordingDownloadUrl } = require("../video/webrtc");
+const sessionRecording = require("../services/sessionRecording");
 const { getDb } = require("../services/firestore");
 const entitlements = require("../services/entitlements");
 const { requireAdmin, verifySignedToken, getBearerToken } = require("../services/auth");
@@ -100,35 +101,29 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
   return res.json({ ok: true, active: ent.hasRecordingPass, expiresAt: ent.recordingPassExpiresAt, type: "gravacao-mensal" });
 }));
 
-// POST /recording/auto-start — inicia gravação automaticamente quando o ritual começa
+// POST /recording/auto-start — reforço do cliente quando o ritual começa. O
+// servidor já inicia a gravação de segurança em /game/session/start; esta rota
+// cobre salas cuja sessão começou antes de um reinício do servidor.
 // Requer hostToken da sala para evitar que qualquer pessoa dispare Egress LiveKit.
 router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
-  if (!egressClient) return sendError(res, 503, "EGRESS_NAO_CONFIGURADO");
 
   const room = panelRooms.get(roomId);
-  if (!room || !room.sessionActive) return sendError(res, 403, "SALA_SEM_SESSAO_ATIVA");
+  if (!room || !(room.sessionActive || room.videoActive)) return sendError(res, 403, "SALA_SEM_SESSAO_ATIVA");
 
-  if (activeRecordings.has(roomId)) {
-    const job = activeRecordings.get(roomId);
-    return res.json({ ok: true, already: true, egressId: job.egressId, startedAt: job.startedAt });
-  }
-
-  try {
-    const job = await startRoomRecording(roomId, "pending", null, null);
-    return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
-  } catch (err) {
-    logError("recording_auto_start_error", err, { roomId });
-    return sendError(res, 500, "ERRO_INICIAR_GRAVACAO_AUTO");
-  }
+  const already = activeRecordings.has(roomId);
+  const job = await sessionRecording.ensureSessionRecording(roomId, "client_auto_start");
+  if (!job) return sendError(res, 503, "GRAVACAO_INDISPONIVEL");
+  return res.json({ ok: true, already, egressId: job.egressId, startedAt: job.startedAt });
 }));
 
-// POST /recording/discard — para e descarta a gravação (sem salvar URL).
-// Host da sala (hostToken) ou sessão do painel admin. Antes era só admin, mas
-// quem chama é o botão "Sair sem salvar" do host — que sempre recebia 403 e
-// deixava o egress da LiveKit gravando (e cobrando) até o fim da sala.
+// POST /recording/discard — botão "Sair sem salvar" do host. Desde 2026-11-17 a
+// gravação é de segurança e obrigatória: recusar a compra NÃO interrompe nem
+// apaga o vídeo — ele segue até o fim da sessão e expira em 30 dias. A rota
+// continua existindo para o cliente atual (e responde o que aconteceu).
+// Host da sala (hostToken) ou sessão do painel admin.
 function requireHostOrAdmin(req, res, next) {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (roomId && verifyHostTokenRecording(req, roomId)) return next();
@@ -140,22 +135,9 @@ function requireHostOrAdmin(req, res, next) {
 router.post("/recording/discard", requireHostOrAdmin, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-
-  const job = activeRecordings.get(roomId);
-  if (!job) return res.json({ ok: true, was_active: false });
-
-  try {
-    const { egressClient: client } = require("../video/webrtc");
-    await client.stopEgress(job.egressId);
-  } catch (err) {
-    logError("recording_discard_stop_error", err, { roomId });
-  }
-
-  activeRecordings.delete(roomId);
-  const room = panelRooms.get(roomId);
-  if (room) { room.recordingActive = false; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
-  logInfo("recording_discarded", { roomId, egressId: job.egressId });
-  return res.json({ ok: true, was_active: true });
+  const active = activeRecordings.has(roomId);
+  logInfo("recording_purchase_declined", { roomId, securityRecordingActive: active });
+  return res.json({ ok: true, was_active: active, kept_for_security: active });
 }));
 
 // POST /recording/claim — para a gravação e libera URL de download após pagamento confirmado
@@ -193,6 +175,9 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
           hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
         });
       }
+      // O arquivo comprado fecha aqui; se a sala segue ativa, a gravação de
+      // segurança recomeça num arquivo novo.
+      sessionRecording.ensureSessionRecordingIfActive(roomId, "after_claim");
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
     } catch (err) {
       logError("recording_claim_stop_error", err, { roomId });
@@ -253,6 +238,16 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
     authorizedType  = "gravacao-download";
   }
 
+  // A gravação de segurança normalmente já está rodando: a compra passa a
+  // valer para ela (o arquivo é o mesmo), em vez de abrir um segundo egress.
+  const running = activeRecordings.get(roomId);
+  if (running) {
+    running.type  = authorizedType;
+    running.ref   = ref || null;
+    running.email = authorizedEmail;
+    return res.json({ ok: true, egressId: running.egressId, startedAt: running.startedAt, attached: true });
+  }
+
   try {
     const job = await startRoomRecording(roomId, authorizedType, ref, authorizedEmail);
     return res.json({ ok: true, egressId: job.egressId, startedAt: job.startedAt });
@@ -281,6 +276,24 @@ router.post("/recording/stop", requireAdmin, asyncHandler(async (req, res) => {
     logError("recording_stop_error", err, { roomId });
     return sendError(res, 500, "ERRO_PARAR_GRAVACAO");
   }
+}));
+
+// GET /recording/session/:roomId — gravações de segurança da sala (painel
+// admin). Para apuração de denúncia: lista as que ainda não expiraram, com
+// link assinado de 1 hora. O acesso fica no audit_logs (categoria "recording").
+router.get("/recording/session/:roomId", requireAdmin, asyncHandler(async (req, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
+  const now = Date.now();
+  const items = (await sessionRecording.listForRoom(roomId)).filter(r => (r.expiresAtMs || 0) > now);
+  const recordings = await Promise.all(items.map(async r => ({
+    egressId: r.egressId, status: r.status, type: r.type,
+    startedAt: r.startedAtMs ? new Date(r.startedAtMs).toISOString() : null,
+    stoppedAt: r.stoppedAtMs ? new Date(r.stoppedAtMs).toISOString() : null,
+    expiresAt: new Date(r.expiresAtMs).toISOString(),
+    downloadUrl: r.status === "recording" ? null : await recordingDownloadUrl(r.filepath, 60 * 60).catch(() => null),
+  })));
+  return res.json({ ok: true, roomId, recordings });
 }));
 
 // GET /recording/status/:roomId — requer panel token (expõe downloadUrl)

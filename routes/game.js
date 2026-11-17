@@ -2,7 +2,7 @@ const express = require("express");
 const { logError, logInfo, logWarn } = require("../logger");
 const { asyncHandler, sendError, nowIso } = require("../utils");
 const {
-  panelRooms, panelClients, roomHostSseClients, pendingJoinRequests,
+  panelRooms, panelClients, roomHostSseClients, pendingJoinRequests, activeRecordings,
   serializePanelRoom, broadcastPanelUpdate, notifyRoomHost
 } = require("../game/state");
 const {
@@ -15,6 +15,7 @@ const { roomLimiter, joinLimiter } = require("../services/rateLimit");
 const { verifySignedToken, signHostToken, requireAdmin, getBearerToken } = require("../services/auth");
 const { ADMIN_SECRET, ACCESS_TOKEN_SECRET } = require("../config");
 const { getDb } = require("../services/firestore");
+const sessionRecording = require("../services/sessionRecording");
 const admin = require("firebase-admin");
 
 const router = express.Router();
@@ -436,6 +437,8 @@ router.post("/game/session/start", (req, res) => {
     room.sessionActive = true;
     room.updatedAt = nowIso();
     broadcastPanelUpdate();
+    // Gravação de segurança obrigatória (services/sessionRecording.js).
+    sessionRecording.ensureSessionRecording(roomId, "session_start");
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
     logError("game_session_start_error", error);
@@ -452,9 +455,10 @@ router.post("/game/session/end", (req, res) => {
     const room = getOrCreatePanelRoom(roomId);
     room.sessionActive  = false;
     room.videoActive    = false;
-    room.recordingActive = false;
     room.updatedAt = nowIso();
     broadcastPanelUpdate();
+    // stopRoomRecording zera recordingActive quando o egress realmente para.
+    sessionRecording.endSessionRecordingIfIdle(roomId);
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
     logError("game_session_end_error", error);
@@ -473,6 +477,9 @@ router.post("/game/video", (req, res) => {
     room.videoActive = active;
     room.updatedAt   = nowIso();
     broadcastPanelUpdate();
+    // Vídeo na sala também é gravado (inclui o lobby, antes do ritual).
+    if (active) sessionRecording.ensureSessionRecording(roomId, "video_on");
+    else sessionRecording.endSessionRecordingIfIdle(roomId);
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
     logError("game_video_error", error);
@@ -488,7 +495,10 @@ router.post("/game/recording", (req, res) => {
     if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
-    room.recordingActive = active;
+    // A gravação de segurança não é opcional: o indicador reflete o egress
+    // real, não o pedido do cliente (que continua aceito por compatibilidade).
+    void active;
+    room.recordingActive = activeRecordings.has(roomId);
     room.updatedAt       = nowIso();
     broadcastPanelUpdate();
     return res.json({ ok: true, room: serializePanelRoom(room) });

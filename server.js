@@ -405,12 +405,21 @@ const server = httpServer.listen(PORT, "0.0.0.0", () => {
     return;
   }
   startCleanupLoop();
-  // Lembretes de sessão e backup R2 são do Espaço Prelúdio.
-  if (EP) {
-    startSchedulerLoop();
-    startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
-  }
+  // Lembretes de sessão são do Espaço Prelúdio. O backup cifrado no R2 roda
+  // nos dois serviços, cada um com o próprio Firebase e o próprio destino
+  // (BACKUP_R2_* do serviço; o jogo usa BACKUP_R2_PREFIX=backups/).
+  if (EP) startSchedulerLoop();
+  startBackupLoop({ getDb: getFirestoreDb, getStorageBucket, appEnv: APP_ENV });
   scheduleAuditLogCleanup();
+  if (GAME_ENABLED) {
+    // Gravações de segurança: exclusão em 30 dias e retomada das que estavam
+    // em andamento antes deste processo subir (services/sessionRecording.js).
+    require("./jobs/sessionRecordingCleanup").scheduleSessionRecordingCleanup();
+    const { egressClient } = require("./video/webrtc");
+    require("./services/sessionRecording")
+      .rehydrate({ egressClient, activeRecordings })
+      .catch(error => logError("session_recordings_rehydrate_error", error));
+  }
   // Motor do jogo (EventBus): só com GAME_ENABLED — grava em salas, users,
   // daily_ritual, world_state etc.
   if (GAME_ENABLED) [

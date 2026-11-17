@@ -172,33 +172,37 @@ async function exportIncrement(collection, { field, cursor = null, maxReads = DE
 }
 
 // ─── R2 (S3) ────────────────────────────────────────────────────────────
-function createR2({ endpoint, bucket, accessKeyId, secretAccessKey }) {
+// `prefix` (BACKUP_R2_PREFIX) isola o backup dentro de um bucket que também
+// guarda outras coisas — o O SextoLugar usa "backups/" no bucket do jogo.
+// Os chamadores sempre veem as chaves sem o prefixo (o layout acima vale igual).
+function createR2({ endpoint, bucket, accessKeyId, secretAccessKey, prefix = "" }) {
   const { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } = require("@aws-sdk/client-s3");
   const client = new S3Client({ region: "auto", endpoint, forcePathStyle: true, credentials: { accessKeyId, secretAccessKey } });
+  const full = key => prefix + key;
   return {
-    async put(key, body) { await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: "application/octet-stream" })); },
+    async put(key, body) { await client.send(new PutObjectCommand({ Bucket: bucket, Key: full(key), Body: body, ContentType: "application/octet-stream" })); },
     async get(key) {
       try {
-        const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: full(key) }));
         return Buffer.from(await res.Body.transformToByteArray());
       } catch (error) {
         if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) return null;
         throw error;
       }
     },
-    async list(prefix) {
+    async list(listPrefix) {
       const keys = [];
       let token;
       do {
-        const res = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }));
-        for (const item of res.Contents || []) keys.push(item.Key);
+        const res = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: full(listPrefix), ContinuationToken: token }));
+        for (const item of res.Contents || []) keys.push(item.Key.slice(prefix.length));
         token = res.IsTruncated ? res.NextContinuationToken : undefined;
       } while (token);
       return keys;
     },
     async remove(keys) {
       for (let i = 0; i < keys.length; i += 1000) {
-        await client.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(i, i + 1000).map(Key => ({ Key })) } }));
+        await client.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(i, i + 1000).map(key => ({ Key: full(key) })) } }));
       }
     }
   };
@@ -268,13 +272,22 @@ function expiredDumps(keys, now = new Date()) {
 }
 
 // ─── Execução ───────────────────────────────────────────────────────────
+function normalizePrefix(raw) {
+  const prefix = String(raw || "").trim().replace(/^\/+/, "");
+  if (!prefix) return "";
+  if (!/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*\/?$/.test(prefix) ||
+      prefix.split("/").some(segment => /^\.+$/.test(segment))) throw new Error("BACKUP_R2_PREFIX_INVALIDO");
+  return prefix.endsWith("/") ? prefix : prefix + "/";
+}
+
 function backupConfig(env = process.env) {
   const config = {
     endpoint: env.BACKUP_R2_ENDPOINT, bucket: env.BACKUP_R2_BUCKET,
     accessKeyId: env.BACKUP_R2_ACCESS_KEY_ID, secretAccessKey: env.BACKUP_R2_SECRET_ACCESS_KEY,
     encryptionKey: env.BACKUP_ENCRYPTION_KEY
   };
-  return Object.values(config).every(Boolean) ? config : null;
+  if (!Object.values(config).every(Boolean)) return null;
+  return { ...config, prefix: normalizePrefix(env.BACKUP_R2_PREFIX) };
 }
 
 // Grava cifrado e confere: baixa, decifra e compara o hash.
@@ -416,7 +429,7 @@ function startBackupLoop({ getDb, getStorageBucket, appEnv }) {
   startup.unref?.();
   timer = setInterval(run, 60 * 60 * 1000);
   timer.unref?.();
-  logInfo("backup_loop_iniciado", { bucket: config.bucket });
+  logInfo("backup_loop_iniciado", { bucket: config.bucket, prefix: config.prefix || null });
 }
 function stopBackupLoop() { if (timer) { clearInterval(timer); timer = null; } }
 

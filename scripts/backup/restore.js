@@ -3,7 +3,8 @@
 // Restauração dos backups cifrados em R2 (gerados por services/backup.js).
 //
 // Variáveis: BACKUP_R2_ENDPOINT, BACKUP_R2_BUCKET, BACKUP_R2_ACCESS_KEY_ID,
-// BACKUP_R2_SECRET_ACCESS_KEY, BACKUP_ENCRYPTION_KEY (cópia offline).
+// BACKUP_R2_SECRET_ACCESS_KEY, BACKUP_ENCRYPTION_KEY (cópia offline) e, no O SextoLugar,
+// BACKUP_R2_PREFIX=backups/ (o backup do jogo fica no bucket de gravações do jogo).
 //
 // Uso:
 //   node scripts/backup/restore.js list

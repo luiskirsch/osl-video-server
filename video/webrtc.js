@@ -3,7 +3,7 @@ const { logInfo, logError } = require("../logger");
 const { nowIso } = require("../utils");
 const {
   LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL,
-  S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT, S3_PUBLIC_URL,
+  S3_ACCESS_KEY, S3_SECRET_KEY, S3_BUCKET, S3_REGION, S3_ENDPOINT,
   RECORDING_LAYOUT_URL, MAX_COMPLETED_RECORDINGS_IN_MEMORY
 } = require("../config");
 const {
@@ -32,10 +32,31 @@ function recordingS3Config() {
   };
 }
 
-function recordingDownloadUrl(filepath) {
-  if (!S3_PUBLIC_URL) return null;
-  const base = S3_PUBLIC_URL.replace(/\/$/, "");
-  return `${base}/${filepath}`;
+// O bucket de gravações é PRIVADO (sessões do jogo têm conversas pessoais).
+// Download só por link assinado e temporário; o máximo do SigV4 é 7 dias.
+const DOWNLOAD_URL_MAX_SECONDS = 7 * 24 * 60 * 60;
+let _s3Client = null;
+function recordingS3Client() {
+  if (!S3_ACCESS_KEY || !S3_SECRET_KEY || !S3_BUCKET) return null;
+  if (!_s3Client) {
+    const { S3Client } = require("@aws-sdk/client-s3");
+    _s3Client = new S3Client({
+      region: S3_REGION || "auto",
+      endpoint: S3_ENDPOINT || undefined,
+      forcePathStyle: !!S3_ENDPOINT,
+      credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
+    });
+  }
+  return _s3Client;
+}
+
+async function recordingDownloadUrl(filepath, expiresInSeconds = DOWNLOAD_URL_MAX_SECONDS) {
+  const client = recordingS3Client();
+  if (!client || !filepath) return null;
+  const { GetObjectCommand } = require("@aws-sdk/client-s3");
+  const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+  const expiresIn = Math.max(60, Math.min(DOWNLOAD_URL_MAX_SECONDS, Math.floor(expiresInSeconds)));
+  return getSignedUrl(client, new GetObjectCommand({ Bucket: S3_BUCKET, Key: filepath }), { expiresIn });
 }
 
 // --- Token LiveKit para WebRTC ---
@@ -112,6 +133,7 @@ async function startRoomRecording(roomId, type, ref, email) {
 
   const job = { egressId: egress.egressId, type, ref, email, startedAt: ts, filepath };
   activeRecordings.set(roomId, job);
+  require("../services/sessionRecording").recordStarted(roomId, job);
 
   const room = panelRooms.get(roomId);
   if (room) { room.recordingActive = true; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
@@ -138,8 +160,9 @@ async function stopRoomRecording(roomId) {
   }
 
   activeRecordings.delete(roomId);
+  require("../services/sessionRecording").recordStopped(job);
 
-  const downloadUrl = recordingDownloadUrl(job.filepath);
+  const downloadUrl = await recordingDownloadUrl(job.filepath).catch(() => null);
   const completed   = { ...job, downloadUrl, completedAt: Date.now(), egressStopOk: true };
   completedRecordings.set(roomId, completed);
 
@@ -294,7 +317,7 @@ async function stopRoomStreaming(roomId) {
 
 module.exports = {
   egressClient,
-  recordingS3Config, recordingDownloadUrl,
+  recordingS3Config, recordingS3Client, recordingDownloadUrl,
   generateLiveKitToken, generateSpectatorToken,
   startRoomRecording, stopRoomRecording,
   startRoomStreaming, stopRoomStreaming, buildRtmpUrl
