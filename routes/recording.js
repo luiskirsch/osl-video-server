@@ -102,8 +102,8 @@ router.get("/recording/pass/:email", asyncHandler(async (req, res) => {
 }));
 
 // POST /recording/auto-start — reforço do cliente quando o ritual começa. O
-// servidor já inicia a gravação de segurança em /game/session/start; esta rota
-// cobre salas cuja sessão começou antes de um reinício do servidor.
+// servidor já inicia a gravação em /game/session/start; esta rota cobre salas
+// cuja sessão começou antes de um reinício do servidor.
 // Requer hostToken da sala para evitar que qualquer pessoa dispare Egress LiveKit.
 router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
@@ -119,11 +119,10 @@ router.post("/recording/auto-start", asyncHandler(async (req, res) => {
   return res.json({ ok: true, already, egressId: job.egressId, startedAt: job.startedAt });
 }));
 
-// POST /recording/discard — botão "Sair sem salvar" do host. Desde 2026-11-17 a
-// gravação é de segurança e obrigatória: recusar a compra NÃO interrompe nem
-// apaga o vídeo — ele segue até o fim da sessão e expira em 30 dias. A rota
-// continua existindo para o cliente atual (e responde o que aconteceu).
-// Host da sala (hostToken) ou sessão do painel admin.
+// POST /recording/discard — botão "Sair sem salvar" do anfitrião. Só ele pode
+// comprar o vídeo; se recusou, a gravação pendente para e o arquivo é apagado
+// em minutos (services/sessionRecording.js). Uma gravação já comprada não é
+// tocada. Host da sala (hostToken) ou sessão do painel admin.
 function requireHostOrAdmin(req, res, next) {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (roomId && verifyHostTokenRecording(req, roomId)) return next();
@@ -135,9 +134,22 @@ function requireHostOrAdmin(req, res, next) {
 router.post("/recording/discard", requireHostOrAdmin, asyncHandler(async (req, res) => {
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-  const active = activeRecordings.has(roomId);
-  logInfo("recording_purchase_declined", { roomId, securityRecordingActive: active });
-  return res.json({ ok: true, was_active: active, kept_for_security: active });
+
+  const job = activeRecordings.get(roomId);
+  if (job && sessionRecording.isPurchased(job.type)) {
+    return res.json({ ok: true, was_active: true, discarded: false, reason: "GRAVACAO_COMPRADA" });
+  }
+  if (job) {
+    job.declined = true;
+    const stopped = await stopRoomRecording(roomId).catch(err => { logError("recording_discard_stop_error", err, { roomId }); return null; });
+    if (stopped && stopped.egressStopOk === false) {
+      return sendError(res, 502, "EGRESS_STOP_FALHOU", { hint: "Tente novamente em alguns segundos." });
+    }
+  } else {
+    await sessionRecording.expireLatestUnpurchased(roomId);
+  }
+  logInfo("recording_purchase_declined", { roomId, wasActive: !!job });
+  return res.json({ ok: true, was_active: !!job, discarded: true });
 }));
 
 // POST /recording/claim — para a gravação e libera URL de download após pagamento confirmado
@@ -175,9 +187,6 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
           hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
         });
       }
-      // O arquivo comprado fecha aqui; se a sessão do jogo continua, a
-      // gravação de segurança recomeça num arquivo novo.
-      sessionRecording.ensureSessionRecordingIfActive(roomId, "after_claim");
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
     } catch (err) {
       logError("recording_claim_stop_error", err, { roomId });
@@ -188,6 +197,17 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   const completed = completedRecordings.get(roomId);
   if (completed && completed.ref === ref && completed.email === callerEmail) {
     return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+  }
+
+  // A partida já terminou (gravação parada, ainda dentro da folga de 1h): a
+  // compra se anexa ao arquivo e o prazo passa a 7 dias.
+  const attached = await sessionRecording.attachPurchase(roomId, { ref });
+  if (attached?.filepath) {
+    const downloadUrl = await recordingDownloadUrl(attached.filepath).catch(() => null);
+    if (downloadUrl) {
+      logInfo("recording_purchase_attached", { roomId, egressId: attached.egressId });
+      return res.json({ ok: true, downloadUrl, type: "gravacao-download" });
+    }
   }
 
   return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");
@@ -238,8 +258,8 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
     authorizedType  = "gravacao-download";
   }
 
-  // A gravação de segurança normalmente já está rodando: a compra passa a
-  // valer para ela (o arquivo é o mesmo), em vez de abrir um segundo egress.
+  // A gravação da sessão normalmente já está rodando: a compra passa a valer
+  // para ela (o arquivo é o mesmo), em vez de abrir um segundo egress.
   const running = activeRecordings.get(roomId);
   if (running) {
     running.type  = authorizedType;
@@ -276,24 +296,6 @@ router.post("/recording/stop", requireAdmin, asyncHandler(async (req, res) => {
     logError("recording_stop_error", err, { roomId });
     return sendError(res, 500, "ERRO_PARAR_GRAVACAO");
   }
-}));
-
-// GET /recording/session/:roomId — gravações de segurança da sala (painel
-// admin). Para apuração de denúncia: lista as que ainda não expiraram, com
-// link assinado de 1 hora. O acesso fica no audit_logs (categoria "recording").
-router.get("/recording/session/:roomId", requireAdmin, asyncHandler(async (req, res) => {
-  const roomId = normalizeRoomId(req.params.roomId);
-  if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
-  const now = Date.now();
-  const items = (await sessionRecording.listForRoom(roomId)).filter(r => (r.expiresAtMs || 0) > now);
-  const recordings = await Promise.all(items.map(async r => ({
-    egressId: r.egressId, status: r.status, type: r.type,
-    startedAt: r.startedAtMs ? new Date(r.startedAtMs).toISOString() : null,
-    stoppedAt: r.stoppedAtMs ? new Date(r.stoppedAtMs).toISOString() : null,
-    expiresAt: new Date(r.expiresAtMs).toISOString(),
-    downloadUrl: r.status === "recording" ? null : await recordingDownloadUrl(r.filepath, 60 * 60).catch(() => null),
-  })));
-  return res.json({ ok: true, roomId, recordings });
 }));
 
 // GET /recording/status/:roomId — requer panel token (expõe downloadUrl)

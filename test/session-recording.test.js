@@ -39,21 +39,60 @@ function fakeDb(seed = {}) {
   };
 }
 
-test("each recording is registered with a 30-day expiry", async t => {
+test("retention: unpurchased ~1h after the match, declined in minutes, purchased 7 days", async t => {
   const db = fakeDb();
   t.mock.method(firestore, "getDb", () => db);
+  const doc = id => db.collections.get("session_recordings").get(id);
   const startedAt = Date.UTC(2026, 10, 17, 12);
-  await sessionRecording.recordStarted("CDDSF", { egressId: "EG_1", filepath: "recordings/CDDSF/1-seguranca.mp4", type: "seguranca", startedAt });
-  const doc = db.collections.get("session_recordings").get("EG_1");
-  assert.equal(doc.roomId, "CDDSF");
-  assert.equal(doc.status, "recording");
-  assert.equal(doc.expiresAtMs - startedAt, 30 * DAY);
+  const HOUR = 60 * 60 * 1000;
 
-  await sessionRecording.recordStopped({ egressId: "EG_1", type: "gravacao-download" });
-  const stopped = db.collections.get("session_recordings").get("EG_1");
-  assert.equal(stopped.status, "stopped");
-  assert.equal(stopped.type, "gravacao-download");
-  assert.equal(stopped.expiresAtMs - startedAt, 30 * DAY, "parar não estende o prazo");
+  await sessionRecording.recordStarted("CDDSF", { egressId: "EG_1", filepath: "recordings/CDDSF/1-pendente.mp4", type: "pendente", startedAt });
+  assert.equal(doc("EG_1").status, "recording");
+  assert.equal(doc("EG_1").expiresAtMs - startedAt, 7 * DAY, "teto enquanto grava");
+
+  const stop = startedAt + 2 * HOUR;
+  await sessionRecording.recordStopped({ egressId: "EG_1", type: "pendente" }, { now: stop });
+  assert.equal(doc("EG_1").expiresAtMs - stop, HOUR, "ninguém comprou: ~1h após o fim");
+
+  await sessionRecording.recordStarted("R2", { egressId: "EG_2", filepath: "recordings/R2/2.mp4", type: "pendente", startedAt });
+  await sessionRecording.recordStopped({ egressId: "EG_2", type: "pendente", declined: true }, { now: stop });
+  assert.equal(doc("EG_2").expiresAtMs - stop, 10 * 60 * 1000, "anfitrião recusou: minutos");
+
+  await sessionRecording.recordStarted("R3", { egressId: "EG_3", filepath: "recordings/R3/3.mp4", type: "pendente", startedAt });
+  await sessionRecording.recordStopped({ egressId: "EG_3", type: "gravacao-download" }, { now: stop });
+  assert.equal(doc("EG_3").expiresAtMs - stop, 7 * DAY, "comprou: 7 dias");
+});
+
+test("a purchase confirmed after the match attaches to the recent recording (idempotent)", async t => {
+  const now = Date.UTC(2026, 10, 17, 15);
+  const db = fakeDb({
+    "session_recordings/EG_OLD": { roomId: "SALA1", egressId: "EG_OLD", filepath: "recordings/SALA1/old.mp4", type: "pendente", status: "stopped", startedAtMs: now - 5 * DAY, expiresAtMs: now - 1 },
+    "session_recordings/EG_NEW": { roomId: "SALA1", egressId: "EG_NEW", filepath: "recordings/SALA1/new.mp4", type: "pendente", status: "stopped", startedAtMs: now - 3600000, expiresAtMs: now + 1800000 },
+  });
+  t.mock.method(firestore, "getDb", () => db);
+
+  const first = await sessionRecording.attachPurchase("SALA1", { ref: "PAG-1", now });
+  assert.equal(first.filepath, "recordings/SALA1/new.mp4");
+  const stored = db.collections.get("session_recordings").get("EG_NEW");
+  assert.equal(stored.type, "gravacao-download");
+  assert.equal(stored.expiresAtMs - now, 7 * DAY);
+
+  const again = await sessionRecording.attachPurchase("SALA1", { ref: "PAG-1", now: now + 1000 });
+  assert.equal(again.egressId, "EG_NEW", "mesma compra devolve o mesmo arquivo");
+  assert.equal(await sessionRecording.attachPurchase("SALA1", { ref: "PAG-2", now }), null, "outra compra não pega arquivo já comprado nem vencido");
+});
+
+test("declining after the match shortens the grace to minutes; a purchased file is untouched", async t => {
+  const now = Date.UTC(2026, 10, 17, 15);
+  const db = fakeDb({
+    "session_recordings/EG_A": { roomId: "SALA2", egressId: "EG_A", filepath: "recordings/SALA2/a.mp4", type: "pendente", status: "stopped", startedAtMs: now - 3600000, expiresAtMs: now + 3000000 },
+    "session_recordings/EG_B": { roomId: "SALA3", egressId: "EG_B", filepath: "recordings/SALA3/b.mp4", type: "gravacao-download", status: "stopped", startedAtMs: now - 3600000, expiresAtMs: now + 6 * DAY },
+  });
+  t.mock.method(firestore, "getDb", () => db);
+  await sessionRecording.expireLatestUnpurchased("SALA2", { now });
+  assert.equal(db.collections.get("session_recordings").get("EG_A").expiresAtMs - now, 10 * 60 * 1000);
+  assert.equal(await sessionRecording.expireLatestUnpurchased("SALA3", { now }), null);
+  assert.equal(db.collections.get("session_recordings").get("EG_B").expiresAtMs - now, 6 * DAY);
 });
 
 test("missing recording infrastructure never breaks the session", async () => {
@@ -78,19 +117,23 @@ test("after a restart, recordings still running are re-adopted and the rest mark
   assert.equal(activeRecordings.get("AAAAA").egressId, "EG_LIVE");
   assert.equal(activeRecordings.has("BBBBB"), false);
   assert.equal(db.collections.get("session_recordings").get("EG_GONE").status, "interrupted");
+  assert.equal(db.collections.get("session_recordings").get("EG_GONE").expiresAtMs - now, 60 * 60 * 1000, "interrompida sem compra: prazo de 1h");
   assert.equal(db.collections.get("session_recordings").get("EG_DONE").status, "stopped");
 });
 
-test("cleanup deletes expired recordings and orphan files older than 30 days, nothing else", async () => {
+test("cleanup deletes due recordings (video + manifest) and old orphans, never one still recording", async () => {
   const now = Date.UTC(2026, 11, 20);
   const db = fakeDb({
-    "session_recordings/OLD": { roomId: "A", filepath: "recordings/A/old.mp4", expiresAtMs: now - 1 },
-    "session_recordings/NEW": { roomId: "B", filepath: "recordings/B/new.mp4", expiresAtMs: now + DAY },
+    "session_recordings/EG_DUE": { roomId: "A", egressId: "EG_DUE", filepath: "recordings/A/due.mp4", status: "stopped", expiresAtMs: now - 1 },
+    "session_recordings/EG_REC": { roomId: "B", egressId: "EG_REC", filepath: "recordings/B/rec.mp4", status: "recording", expiresAtMs: now - 1 },
+    "session_recordings/EG_PAID": { roomId: "C", egressId: "EG_PAID", filepath: "recordings/C/paid.mp4", status: "stopped", type: "gravacao-download", expiresAtMs: now + DAY },
   });
   const objects = new Map([
-    ["recordings/A/old.mp4", now - 31 * DAY],
-    ["recordings/B/new.mp4", now - 2 * DAY],
-    ["recordings/C/orphan.mp4", now - 40 * DAY],
+    ["recordings/A/due.mp4", now - 2 * 3600000],
+    ["recordings/A/EG_DUE.json", now - 2 * 3600000],
+    ["recordings/B/rec.mp4", now - 3600000],
+    ["recordings/C/paid.mp4", now - 6 * DAY],
+    ["recordings/D/orphan.mp4", now - 8 * DAY],
     ["backups/firestore/2026-01-01.ndjson.gz.enc", now - 300 * DAY],
   ]);
   const s3 = {
@@ -105,9 +148,9 @@ test("cleanup deletes expired recordings and orphan files older than 30 days, no
   };
 
   const result = await runSessionRecordingCleanup({ db, s3, bucket: "osl-recordings", now });
-  assert.deepEqual([...objects.keys()].sort(), ["backups/firestore/2026-01-01.ndjson.gz.enc", "recordings/B/new.mp4"]);
-  assert.deepEqual([...db.collections.get("session_recordings").keys()], ["NEW"]);
-  assert.deepEqual(result, { registros: 1, arquivos: 2 });
+  assert.deepEqual([...objects.keys()].sort(), ["backups/firestore/2026-01-01.ndjson.gz.enc", "recordings/B/rec.mp4", "recordings/C/paid.mp4"]);
+  assert.deepEqual([...db.collections.get("session_recordings").keys()].sort(), ["EG_PAID", "EG_REC"]);
+  assert.deepEqual(result, { registros: 1, arquivos: 3 });
 });
 
 test("backup can live under a prefix of a shared bucket; callers see unprefixed keys", async t => {
@@ -151,5 +194,4 @@ test("recording follows the game session only: the lobby video does not keep it 
   await sessionRecording.endSessionRecording("SESS1");
   assert.deepEqual(stops, ["SESS1"]);
 
-  assert.equal(await sessionRecording.ensureSessionRecordingIfActive("SESS1", "test"), null, "sem sessão, não reabre");
 });

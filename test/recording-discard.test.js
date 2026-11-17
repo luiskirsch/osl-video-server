@@ -20,11 +20,11 @@ const post = (base, body, headers = {}) => fetch(`${base}/recording/discard`, {
   method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body),
 });
 
-test("declining the purchase never stops the security recording (host token accepted)", async t => {
+test("the host can decline the purchase with the host token", async t => {
   const base = await withServer(t);
   const res = await post(base, { roomId: "ABCDE", hostToken: signHostToken("ABCDE") });
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ok: true, was_active: false, kept_for_security: false });
+  assert.deepEqual(await res.json(), { ok: true, was_active: false, discarded: true });
 });
 
 test("discard without host token asks for one; another room's token is refused", async t => {

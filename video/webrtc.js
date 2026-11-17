@@ -165,9 +165,14 @@ async function stopRoomRecording(roomId) {
   }
 
   activeRecordings.delete(roomId);
-  require("../services/sessionRecording").recordStopped(job);
+  const sessionRecording = require("../services/sessionRecording");
+  sessionRecording.recordStopped(job);
 
-  const downloadUrl = await recordingDownloadUrl(job.filepath).catch(() => null);
+  // Só a gravação comprada ganha link (7 dias); a pendente aguarda compra ou
+  // é apagada pela limpeza (services/sessionRecording.js).
+  const downloadUrl = sessionRecording.isPurchased(job.type)
+    ? await recordingDownloadUrl(job.filepath).catch(() => null)
+    : null;
   const completed   = { ...job, downloadUrl, completedAt: Date.now(), egressStopOk: true };
   completedRecordings.set(roomId, completed);
 

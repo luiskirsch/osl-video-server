@@ -437,7 +437,7 @@ router.post("/game/session/start", (req, res) => {
     room.sessionActive = true;
     room.updatedAt = nowIso();
     broadcastPanelUpdate();
-    // Gravação de segurança obrigatória (services/sessionRecording.js).
+    // Gravação da sessão para o "Salvar Sessão" (services/sessionRecording.js).
     sessionRecording.ensureSessionRecording(roomId, "session_start");
     return res.json({ ok: true, room: serializePanelRoom(room) });
   } catch (error) {
@@ -493,7 +493,7 @@ router.post("/game/recording", (req, res) => {
     if (!verifyHostToken(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
     if (!panelRooms.has(roomId)) return sendError(res, 404, "SALA_NAO_ENCONTRADA");
     const room = getOrCreatePanelRoom(roomId);
-    // A gravação de segurança não é opcional: o indicador reflete o egress
+    // A gravação da sessão não é opcional: o indicador reflete o egress
     // real, não o pedido do cliente (que continua aceito por compatibilidade).
     void active;
     room.recordingActive = activeRecordings.has(roomId);
