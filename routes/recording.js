@@ -135,7 +135,12 @@ router.post("/recording/discard", requireHostOrAdmin, asyncHandler(async (req, r
   const roomId = normalizeRoomId(req.body?.roomId);
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
 
-  const job = activeRecordings.get(roomId);
+  const sessionId = req.body?.sessionId;
+  if (sessionId !== undefined && (typeof sessionId !== "string" || !sessionId.trim())) {
+    return sendError(res, 400, "SESSAO_INVALIDA");
+  }
+  const active = activeRecordings.get(roomId);
+  const job = !sessionId || active?.sessionId === sessionId ? active : null;
   if (job && sessionRecording.isPurchased(job.type)) {
     return res.json({ ok: true, was_active: true, discarded: false, reason: "GRAVACAO_COMPRADA" });
   }
@@ -146,7 +151,7 @@ router.post("/recording/discard", requireHostOrAdmin, asyncHandler(async (req, r
       return sendError(res, 502, "EGRESS_STOP_FALHOU", { hint: "Tente novamente em alguns segundos." });
     }
   } else {
-    await sessionRecording.expireLatestUnpurchased(roomId);
+    await sessionRecording.expireLatestUnpurchased(roomId, { sessionId });
   }
   logInfo("recording_purchase_declined", { roomId, wasActive: !!job });
   return res.json({ ok: true, was_active: !!job, discarded: true });

@@ -94,7 +94,7 @@ async function generateSpectatorToken(room, user) {
 
 // --- Gravação / Egress ---
 
-async function startRoomRecording(roomId, type, ref, email) {
+async function startRoomRecording(roomId, type, ref, email, sessionId = null) {
   if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
   if (!S3_ACCESS_KEY || !S3_BUCKET) throw new Error("S3_NOT_CONFIGURED");
 
@@ -136,9 +136,9 @@ async function startRoomRecording(roomId, type, ref, email) {
     recordingStartsInFlight.delete(roomId);
   }
 
-  const job = { egressId: egress.egressId, type, ref, email, startedAt: ts, filepath };
+  const job = { egressId: egress.egressId, sessionId, type, ref, email, startedAt: ts, filepath };
   activeRecordings.set(roomId, job);
-  require("../services/sessionRecording").recordStarted(roomId, job);
+  await require("../services/sessionRecording").recordStarted(roomId, job);
 
   const room = panelRooms.get(roomId);
   if (room) { room.recordingActive = true; room.updatedAt = nowIso(); broadcastPanelUpdate(); }
@@ -166,7 +166,7 @@ async function stopRoomRecording(roomId) {
 
   activeRecordings.delete(roomId);
   const sessionRecording = require("../services/sessionRecording");
-  sessionRecording.recordStopped(job);
+  await sessionRecording.recordStopped(job);
 
   // Só a gravação comprada ganha link (7 dias); a pendente aguarda compra ou
   // é apagada pela limpeza (services/sessionRecording.js).

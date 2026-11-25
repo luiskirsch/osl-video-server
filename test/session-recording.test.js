@@ -95,6 +95,21 @@ test("declining after the match shortens the grace to minutes; a purchased file 
   assert.equal(db.collections.get("session_recordings").get("EG_B").expiresAtMs - now, 6 * DAY);
 });
 
+test("discard targets the selected match when a room hosts consecutive matches", async t => {
+  const now = Date.now();
+  const pending = { roomId: "SALA", status: "stopped", expiresAtMs: now + 3600000 };
+  const db = fakeDb({
+    "session_recordings/A": { ...pending, sessionId: "first", startedAtMs: now - 2000 },
+    "session_recordings/B": { ...pending, sessionId: "second", startedAtMs: now - 1000 },
+  });
+  t.mock.method(firestore, "getDb", () => db);
+  assert.equal(await sessionRecording.expireLatestUnpurchased("SALA", { now, sessionId: "missing" }), null);
+  await sessionRecording.expireLatestUnpurchased("SALA", { now, sessionId: "first" });
+  const recordings = db.collections.get("session_recordings");
+  assert.equal(recordings.get("A").expiresAtMs, now + sessionRecording.DECLINED_GRACE_MS);
+  assert.equal(recordings.get("B").expiresAtMs, pending.expiresAtMs);
+});
+
 test("missing recording infrastructure never breaks the session", async () => {
   // Sem S3_* no ambiente de teste: a política registra o problema e segue.
   assert.equal(sessionRecording.storageConfigured(), false);

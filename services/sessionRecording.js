@@ -51,6 +51,7 @@ function recordStarted(roomId, job) {
   return db.collection(COLLECTION).doc(job.egressId).set({
     roomId,
     egressId: job.egressId,
+    sessionId: job.sessionId || null,
     filepath: job.filepath,
     type: job.type || null,
     status: "recording",
@@ -71,11 +72,13 @@ function recordStopped(job, { now = Date.now() } = {}) {
   }, { merge: true }).catch(error => logError("session_recording_update_error", error, { egressId: job.egressId }));
 }
 
-async function listForRoom(roomId, { limit = 50 } = {}) {
+async function listForRoom(roomId, { limit = 50, sessionId = null } = {}) {
   const db = getDb();
   if (!db) return [];
   // Igualdade em roomId sem orderBy: não exige índice composto; ordena aqui.
-  const snap = await db.collection(COLLECTION).where("roomId", "==", roomId).limit(limit).get();
+  let query = db.collection(COLLECTION).where("roomId", "==", roomId);
+  if (sessionId) query = query.where("sessionId", "==", sessionId);
+  const snap = await query.limit(limit).get();
   return snap.docs
     .map(doc => ({ ref: doc.ref, ...doc.data() }))
     .sort((a, b) => (b.startedAtMs || 0) - (a.startedAtMs || 0));
@@ -97,8 +100,8 @@ async function attachPurchase(roomId, { ref, now = Date.now() } = {}) {
 }
 
 // "Sair sem salvar" depois que a partida já terminou: apaga em minutos.
-async function expireLatestUnpurchased(roomId, { now = Date.now() } = {}) {
-  const items = await listForRoom(roomId);
+async function expireLatestUnpurchased(roomId, { now = Date.now(), sessionId = null } = {}) {
+  const items = await listForRoom(roomId, { sessionId });
   const target = items.find(r => r.status !== "recording" && !isPurchased(r.type) && (r.expiresAtMs || 0) > now);
   if (!target) return null;
   const expiresAtMs = Math.min(target.expiresAtMs, now + DECLINED_GRACE_MS);
@@ -121,7 +124,7 @@ async function rehydrate({ egressClient, activeRecordings, now = Date.now() } = 
     if (active.has(data.egressId) && data.roomId) {
       if (!activeRecordings.has(data.roomId)) {
         activeRecordings.set(data.roomId, {
-          egressId: data.egressId, type: data.type || PENDING_TYPE, ref: null, email: null,
+          egressId: data.egressId, sessionId: data.sessionId || null, type: data.type || PENDING_TYPE, ref: null, email: null,
           startedAt: data.startedAtMs || now, filepath: data.filepath,
         });
         restored++;
@@ -153,7 +156,11 @@ async function ensureSessionRecording(roomId, reason = "session") {
     return null;
   }
   try {
-    return await startRoomRecording(roomId, PENDING_TYPE, null, null);
+    const db = getDb();
+    const room = db && await db.collection("salas").doc(roomId).get();
+    const sessionId = room?.data()?.currentSessionId || null;
+    if (!require("../game/state").panelRooms.get(roomId)?.sessionActive) return null;
+    return await startRoomRecording(roomId, PENDING_TYPE, null, null, sessionId);
   } catch (error) {
     if (error?.message === "GRAVACAO_JA_ATIVA") return activeRecordings.get(roomId) || null;
     logError("session_recording_start_error", error, { roomId, reason });
