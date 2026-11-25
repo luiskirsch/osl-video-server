@@ -3,7 +3,7 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const crypto = require("crypto");
 const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
-const { ensureDb } = require("../services/firestore");
+const { ensureDb, getDb } = require("../services/firestore");
 const { mercadoPagoFetch, approvedGamePayment } = require("../services/payments");
 const { generateExternalReference, requireAdmin, verifyFirebaseToken } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
@@ -109,12 +109,33 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   const roomIdInput   = String(req.body?.roomId  || "").trim().toUpperCase();
 
   const sessionId = ["gravacao-download", "segunda-chance"].includes(produtoInput) ? req.body?.sessionId : undefined;
-  if (sessionId !== undefined && (!roomIdInput || typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) {
+  if (sessionId !== undefined && (!/^[A-Z0-9_-]{1,128}$/.test(roomIdInput) || typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) {
     return sendError(res, 400, "SESSAO_INVALIDA");
   }
 
   if (!nome)  return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
+
+  if (sessionId) {
+    const uid = await verifyFirebaseToken(req, res);
+    if (!uid) return;
+    if (normalizeEmail(req.verifiedFirebaseToken?.email) !== email) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
+    const db = getDb();
+    const room = db.collection("salas").doc(roomIdInput);
+    const [host, state] = await db.getAll(room, room.collection("ritual").doc("state"));
+    if (host.data()?.hostId !== uid) return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+    if (produtoInput === "segunda-chance") {
+      const ritual = state.data();
+      if (!ritual?.started || ritual.sessionId !== sessionId) return sendError(res, 409, "SESSAO_ENCERRADA");
+      if (!Array.isArray(ritual.remainingDeck) || ritual.remainingDeck.length) return sendError(res, 409, "DECK_AINDA_TEM_CARTAS");
+    } else {
+      const recording = require("../services/sessionRecording");
+      const files = await recording.listForRoom(roomIdInput, { sessionId });
+      if (!files.some(file => file.filepath && file.expiresAtMs > Date.now() && !recording.isPurchased(file.type))) {
+        return sendError(res, 409, "GRAVACAO_INDISPONIVEL");
+      }
+    }
+  }
 
   // A10: ingresso de encontro exige roomId válido (evento existente no Firestore)
   if (produtoInput === "encontro-ingresso") {
