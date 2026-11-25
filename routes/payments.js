@@ -108,7 +108,7 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   const produtoInput  = String(req.body?.produto || "").trim();
   const roomIdInput   = String(req.body?.roomId  || "").trim().toUpperCase();
 
-  const sessionId = produtoInput === "gravacao-download" ? req.body?.sessionId : undefined;
+  const sessionId = ["gravacao-download", "segunda-chance"].includes(produtoInput) ? req.body?.sessionId : undefined;
   if (sessionId !== undefined && (!roomIdInput || typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) {
     return sendError(res, 400, "SESSAO_INVALIDA");
   }

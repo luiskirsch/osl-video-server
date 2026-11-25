@@ -179,6 +179,42 @@ function logSessionEvent(db, roomId, sessionId, type, actor, payload = {}) {
     .catch(() => {});
 }
 
+router.post("/game/ritual/segunda-chance", asyncHandler(async (req, res) => {
+  const { verifyFirebaseToken } = require("../services/auth");
+  const uid = await verifyFirebaseToken(req, res);
+  if (!uid) return;
+  const { roomId, sessionId, ref } = req.body || {};
+  if (![roomId, sessionId, ref].every(id => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+    return sendError(res, 400, "REFERENCIA_INVALIDA");
+  }
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+  const room = db.collection("salas").doc(roomId);
+  const state = room.collection("ritual").doc("state");
+  const receipt = db.collection("processed_payments").doc(ref);
+  const { deck } = engine.buildDeck({ basicCards: playableCards(OSL_BASIC_CARDS), packCards: [], customContributions: [] });
+  const extra = deck.slice(0, 3);
+  if (extra.length !== 3) return sendError(res, 503, "CARTAS_INDISPONIVEIS");
+  const email = String(req.verifiedFirebaseToken?.email || "").trim().toLowerCase();
+  const error = await db.runTransaction(async tx => {
+    const [host, ritual, payment] = await tx.getAll(room, state, receipt);
+    const paid = payment.data();
+    if (host.data()?.hostId !== uid || !email || paid?.email !== email ||
+        paid.produto !== "segunda-chance" || paid.roomId !== roomId || paid.sessionId !== sessionId) {
+      return "COMPRA_NAO_CONFIRMADA_PARA_SESSAO";
+    }
+    if (paid.redeemedAt) return null;
+    const current = ritual.data();
+    if (!current?.started || current.sessionId !== sessionId) return "SESSAO_ENCERRADA";
+    if (!Array.isArray(current.remainingDeck) || current.remainingDeck.length) return "DECK_AINDA_TEM_CARTAS";
+    tx.update(state, { remainingDeck: extra, remainingCount: extra.length });
+    tx.update(receipt, { redeemedAt: admin.firestore.FieldValue.serverTimestamp() });
+    return null;
+  });
+  if (error) return sendError(res, error === "COMPRA_NAO_CONFIRMADA_PARA_SESSAO" ? 403 : 409, error);
+  return res.json({ ok: true, sessionId });
+}));
+
 // ── POST /game/ritual/start ───────────────────────────────────────────────────
 router.post("/game/ritual/start", asyncHandler(async (req, res) => {
   const { roomId, hostToken, firebaseIdToken, players: rawPlayers } = req.body || {};
