@@ -86,6 +86,18 @@ const paymentLimiter = rateLimit({
   }
 });
 
+// Vitrine do jogo: o checkout e a listagem consultam a mesma tabela de preços.
+router.get("/game/store/catalog", (req, res) => {
+  const products = Object.entries(PRODUCT_CATALOG)
+    .filter(([id]) => !id.startsWith("encontro-"))
+    .map(([id, entry]) => ({
+      id, type: entry.type, currency: PRODUCT_CURRENCY, price: entry.price,
+      title: i18nT(req, `products:${id}.title`, entry.title),
+      description: i18nT(req, `products:${id}.description`, entry.description),
+    }));
+  res.json({ ok: true, products });
+});
+
 // POST /criar-pagamento
 router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) => {
   if (!ensureDb(res)) return;
