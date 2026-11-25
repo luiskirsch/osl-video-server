@@ -253,6 +253,11 @@ router.post("/game/player/leave", asyncHandler(async (req, res) => {
     }
 
     const room = panelRooms.get(roomId);
+    if (pendingJoinRequests.delete(`${roomId}:${playerId}`)) {
+      notifyRoomHost(roomId, "join_cancelled", { roomId, playerId });
+      if (!isHostLeaving && !room?.players?.[playerId]) return res.json({ ok: true, cancelled: true });
+    }
+
     if (!room) {
       if (isHostLeaving) closeRoom(roomId, "host_left_untracked");
       return res.json({ ok: true, room: null });
@@ -289,6 +294,12 @@ router.get("/game/room/:roomId/host-sse", (req, res) => {
   });
 
   roomHostSseClients.set(roomId, res);
+  // Recompõe a lista após reconexão, inclusive quando ela ficou vazia.
+  const pending = Array.from(pendingJoinRequests.values())
+    .filter(request => request.roomId === roomId)
+    .map(({ playerId, playerName }) => ({ playerId, playerName }));
+  notifyRoomHost(roomId, "pending_snapshot", { roomId, pending });
+  for (const player of pending) notifyRoomHost(roomId, "join_request", { roomId, ...player });
   const heartbeat = setInterval(() => { res.write(": ping\n\n"); }, 15000);
 
   req.on("close", () => {
