@@ -82,6 +82,35 @@ test("a purchase confirmed after the match attaches to the recent recording (ide
   assert.equal(await sessionRecording.attachPurchase("SALA1", { ref: "PAG-2", now }), null, "outra compra não pega arquivo já comprado nem vencido");
 });
 
+test("a delayed checkout selects its own session even after another match ends", async t => {
+  const now = Date.now();
+  const pending = { roomId: "SALA", type: "pendente", status: "stopped", expiresAtMs: now + 3600000 };
+  const db = fakeDb({
+    "session_recordings/A": { ...pending, sessionId: "first", filepath: "first.mp4", startedAtMs: now - 2000 },
+    "session_recordings/B": { ...pending, sessionId: "second", filepath: "second.mp4", startedAtMs: now - 1000 },
+  });
+  t.mock.method(firestore, "getDb", () => db);
+  const payment = { ref: "PAG-1", sessionId: "first", now };
+  assert.equal((await sessionRecording.attachPurchase("SALA", payment)).filepath, "first.mp4");
+  assert.equal((await sessionRecording.attachPurchase("SALA", payment)).filepath, "first.mp4");
+  assert.equal(db.collections.get("session_recordings").get("B").type, "pendente");
+  assert.equal(await sessionRecording.attachPurchase("SALA", { ...payment, sessionId: "unknown" }), null);
+});
+
+test("scoped recording payment survives a process restart", async t => {
+  const ref = "OSL-1234567890123-112233AABB";
+  const receipt = { ref, produto: "gravacao-download", roomId: "SALA", sessionId: "first", email: "host@example.test" };
+  t.mock.method(firestore, "getDb", () => ({
+    collection(name) {
+      assert.equal(name, "processed_payments");
+      return { doc(id) { assert.equal(id, ref); return { async get() { return { data: () => receipt }; } }; } };
+    },
+  }));
+  const { approvedGamePayment } = require("../services/payments");
+  assert.deepEqual(await approvedGamePayment(ref), { ...receipt, approved: true, status: "approved" });
+  assert.equal(await approvedGamePayment("invalid/path"), null);
+});
+
 test("declining after the match shortens the grace to minutes; a purchased file is untouched", async t => {
   const now = Date.UTC(2026, 10, 17, 15);
   const db = fakeDb({

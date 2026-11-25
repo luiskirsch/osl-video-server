@@ -87,8 +87,8 @@ async function listForRoom(roomId, { limit = 50, sessionId = null } = {}) {
 // Compra confirmada depois do fim da partida: anexa à gravação mais recente da
 // sala que ainda não expirou e estende o prazo para 7 dias. Idempotente para a
 // mesma referência de pagamento.
-async function attachPurchase(roomId, { ref, now = Date.now() } = {}) {
-  const items = await listForRoom(roomId);
+async function attachPurchase(roomId, { ref, sessionId = null, now = Date.now() } = {}) {
+  const items = await listForRoom(roomId, { sessionId });
   const target = items.find(r =>
     r.status !== "recording" && (r.expiresAtMs || 0) > now &&
     (!isPurchased(r.type) || (ref && r.purchasedRef === ref)));

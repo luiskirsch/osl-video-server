@@ -6,6 +6,7 @@ const { normalizeRoomId } = require("../game/rooms");
 const { startRoomRecording, stopRoomRecording, egressClient, generateLiveKitToken, generateSpectatorToken, recordingDownloadUrl } = require("../video/webrtc");
 const sessionRecording = require("../services/sessionRecording");
 const { getDb } = require("../services/firestore");
+const { approvedGamePayment } = require("../services/payments");
 const entitlements = require("../services/entitlements");
 const { requireAdmin, verifySignedToken, getBearerToken } = require("../services/auth");
 const { ACCESS_TOKEN_SECRET } = require("../config");
@@ -174,13 +175,16 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
 
-  const pag = pagamentosAprovados.get(ref);
+  const pag = await approvedGamePayment(ref);
   if (!pag || !pag.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
   if (pag.email && callerEmail && pag.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
   if (pag.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
   if (pag.roomId && pag.roomId !== roomId) return sendError(res, 403, "PAGAMENTO_DE_OUTRA_SALA");
 
-  if (activeRecordings.has(roomId)) {
+  const sessionId = pag.sessionId || null;
+  if (req.body?.sessionId && req.body.sessionId !== sessionId) return sendError(res, 409, "PAGAMENTO_DE_OUTRA_SESSAO");
+
+  if (activeRecordings.has(roomId) && (!sessionId || activeRecordings.get(roomId).sessionId === sessionId)) {
     const job = activeRecordings.get(roomId);
     job.email = pag.email || email;
     job.type  = "gravacao-download";
@@ -200,13 +204,13 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   }
 
   const completed = completedRecordings.get(roomId);
-  if (completed && completed.ref === ref && completed.email === callerEmail) {
+  if (completed && (!sessionId || completed.sessionId === sessionId) && completed.ref === ref && completed.email === callerEmail) {
     return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
   }
 
   // A partida já terminou (gravação parada, ainda dentro da folga de 1h): a
   // compra se anexa ao arquivo e o prazo passa a 7 dias.
-  const attached = await sessionRecording.attachPurchase(roomId, { ref });
+  const attached = await sessionRecording.attachPurchase(roomId, { ref, sessionId });
   if (attached?.filepath) {
     const downloadUrl = await recordingDownloadUrl(attached.filepath).catch(() => null);
     if (downloadUrl) {
@@ -259,6 +263,7 @@ router.post("/recording/start", asyncHandler(async (req, res) => {
     if (payment.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
     if (payment.email && payment.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
     if (payment.roomId && payment.roomId !== roomId) return sendError(res, 403, "PAGAMENTO_DE_OUTRA_SALA");
+    if (payment.sessionId) return sendError(res, 409, "COMPRA_PARA_SESSAO_ENCERRADA");
     authorizedEmail = payment.email || email;
     authorizedType  = "gravacao-download";
   }

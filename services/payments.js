@@ -28,4 +28,15 @@ const mercadoPagoFetchTherapy = makeMpFetch(MP_ACCESS_TOKEN_THERAPY, "THERAPY");
 // Novos call sites devem importar Jogo/Therapy explicitamente.
 const mercadoPagoFetch = mercadoPagoFetchJogo;
 
-module.exports = { mercadoPagoFetch, mercadoPagoFetchJogo, mercadoPagoFetchTherapy };
+async function approvedGamePayment(ref) {
+  const cached = require("../game/state").pagamentosAprovados.get(ref);
+  if (cached) return cached;
+  if (!/^OSL-[0-9]+-[A-F0-9]{10}$/.test(ref)) return null;
+  const db = require("./firestore").getDb();
+  if (!db) return null;
+  const receipt = (await db.collection("processed_payments").doc(ref).get()).data();
+  if (receipt?.produto !== "gravacao-download" || !receipt.sessionId || !receipt.roomId || !receipt.email) return null;
+  return { ...receipt, approved: true, status: "approved" };
+}
+
+module.exports = { approvedGamePayment, mercadoPagoFetch, mercadoPagoFetchJogo, mercadoPagoFetchTherapy };

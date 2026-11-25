@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const { logError, logWarn, logInfo } = require("../logger");
 const { asyncHandler, sendError, normalizeEmail } = require("../utils");
 const { ensureDb } = require("../services/firestore");
-const { mercadoPagoFetch } = require("../services/payments");
+const { mercadoPagoFetch, approvedGamePayment } = require("../services/payments");
 const { generateExternalReference, requireAdmin, verifyFirebaseToken } = require("../services/auth");
 const { getAffiliateByCode, registerPendingReferral, approveReferralRewardFromPayment } = require("../services/affiliate");
 const { pagamentosAprovados } = require("../game/state");
@@ -108,6 +108,11 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   const produtoInput  = String(req.body?.produto || "").trim();
   const roomIdInput   = String(req.body?.roomId  || "").trim().toUpperCase();
 
+  const sessionId = produtoInput === "gravacao-download" ? req.body?.sessionId : undefined;
+  if (sessionId !== undefined && (!roomIdInput || typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) {
+    return sendError(res, 400, "SESSAO_INVALIDA");
+  }
+
   if (!nome)  return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
 
@@ -146,7 +151,8 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
     metadata: {
       product_id: productId, customer_name: nome, customer_email: email,
       ref_code: referralData?.data?.refCode || "", referrer_uid: referralData?.id || "",
-      room_id: roomIdInput || ""
+      room_id: roomIdInput || "",
+      ...(sessionId ? { session_id: sessionId } : {})
     },
     external_reference: externalReference,
     notification_url: `${BACKEND_BASE_URL}/webhook`,
@@ -192,7 +198,7 @@ router.get("/status-pagamento/:ref", async (req, res) => {
     const ref = String(req.params.ref || "").trim();
     if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");
 
-    const pagamento = pagamentosAprovados.get(ref);
+    const pagamento = await approvedGamePayment(ref);
     if (!pagamento) return res.json({ ok: true, found: false, approved: false });
     const callerEmail = normalizeEmail(req.firebaseUser?.email);
     if (!callerEmail || (pagamento.email && normalizeEmail(pagamento.email) !== callerEmail)) {
@@ -278,6 +284,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
       const approvedEmail        = String(payment.metadata?.customer_email || payment.payer?.email || "").trim().toLowerCase();
       const approvedRoomId       = String(payment.metadata?.room_id || "").trim().toUpperCase();
 
+      const sessionId = String(payment.metadata?.session_id || "");
       const { getDb } = require("../services/firestore");
       const db = getDb();
 
@@ -291,7 +298,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
             if (snap.exists) throw new Error("ALREADY_PROCESSED");
             tx.set(processedRef, {
               paymentId: String(payment.id), ref, produto: productIdFromWebhook,
-              email: approvedEmail, processedAt: Date.now()
+              email: approvedEmail, roomId: approvedRoomId, sessionId, processedAt: Date.now()
             });
           });
         } catch (err) {
@@ -306,7 +313,7 @@ router.post("/webhook", asyncHandler(async (req, res) => {
 
       pagamentosAprovados.set(ref, {
         approved: true, paymentId: String(payment.id), status, ref,
-        produto: productIdFromWebhook, email: approvedEmail, roomId: approvedRoomId, updatedAt: Date.now()
+        produto: productIdFromWebhook, email: approvedEmail, roomId: approvedRoomId, sessionId, updatedAt: Date.now()
       });
 
       // Passe mensal — salva no Firestore com validade configurada (PASS_VALIDITY_MS).
