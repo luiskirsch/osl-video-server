@@ -172,7 +172,6 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
 
   if (!roomId) return sendError(res, 400, "ROOM_ID_OBRIGATORIO");
   if (!callerEmail) return sendError(res, 401, "TOKEN_SEM_EMAIL");
-  if (!verifyHostTokenRecording(req, roomId)) return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
   if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
 
   const pag = await approvedGamePayment(ref);
@@ -183,6 +182,16 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
 
   const sessionId = pag.sessionId || null;
   if (req.body?.sessionId && req.body.sessionId !== sessionId) return sendError(res, 409, "PAGAMENTO_DE_OUTRA_SESSAO");
+
+  if (sessionId) {
+    if (pag.roomId !== roomId || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) return sendError(res, 403, "SESSAO_INVALIDA");
+    const db = getDb();
+    if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+    const session = await db.collection("salas").doc(roomId).collection("sessions").doc(sessionId).get();
+    if (session.data()?.hostId !== decoded.uid) return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
+  } else if (!verifyHostTokenRecording(req, roomId)) {
+    return sendError(res, 403, "HOST_TOKEN_OBRIGATORIO");
+  }
 
   if (activeRecordings.has(roomId) && (!sessionId || activeRecordings.get(roomId).sessionId === sessionId)) {
     const job = activeRecordings.get(roomId);
@@ -204,7 +213,7 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   }
 
   const completed = completedRecordings.get(roomId);
-  if (completed && (!sessionId || completed.sessionId === sessionId) && completed.ref === ref && completed.email === callerEmail) {
+  if (!sessionId && completed && completed.ref === ref && completed.email === callerEmail) {
     return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
   }
 
@@ -212,7 +221,7 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   // compra se anexa ao arquivo e o prazo passa a 7 dias.
   const attached = await sessionRecording.attachPurchase(roomId, { ref, sessionId });
   if (attached?.filepath) {
-    const downloadUrl = await recordingDownloadUrl(attached.filepath).catch(() => null);
+    const downloadUrl = await recordingDownloadUrl(attached.filepath, Math.max(1, Math.floor((attached.expiresAtMs - Date.now()) / 1000))).catch(() => null);
     if (downloadUrl) {
       logInfo("recording_purchase_attached", { roomId, egressId: attached.egressId });
       return res.json({ ok: true, downloadUrl, type: "gravacao-download" });

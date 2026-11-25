@@ -68,6 +68,7 @@ function recordStopped(job, { now = Date.now() } = {}) {
     status: "stopped",
     type: job.type || null,
     stoppedAtMs: now,
+    ...(isPurchased(job.type) && job.ref ? { purchasedRef: job.ref } : {}),
     expiresAtMs: now + retentionAfterStop(job),
   }, { merge: true }).catch(error => logError("session_recording_update_error", error, { egressId: job.egressId }));
 }
