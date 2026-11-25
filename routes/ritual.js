@@ -258,6 +258,7 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
     tx.set(ritualRef, {
       started: true,
       remainingDeck: reservedDeck,
+      remainingCount: reservedDeck.length,
       currentCard: null,
       activeEffect: null,
       pendingDeathrattle: null,
@@ -420,6 +421,7 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
     tx.set(ritualRef, {
       started: true,
       remainingDeck: deck,
+      remainingCount: deck.length,
       currentCard: card,
       activeEffect: battlecry || null,
       pendingDeathrattle: deathrattle || null,
@@ -619,6 +621,7 @@ router.post("/game/ritual/reset", asyncHandler(async (req, res) => {
       tx.set(ritualRef, {
         started: true,
         remainingDeck: reservedDeck,
+        remainingCount: reservedDeck.length,
         currentCard: null,
         activeEffect: null,
         pendingDeathrattle: null,
@@ -987,6 +990,7 @@ async function resetEndedSessionToLobby(db, roomId, sessionId) {
       tx.set(ritualRef, {
         started: false,
         remainingDeck: [],
+        remainingCount: 0,
         currentCard: null,
         activeEffect: null,
         pendingDeathrattle: null,
@@ -1095,6 +1099,7 @@ router.post("/game/session/end-game", asyncHandler(async (req, res) => {
       tx.set(ritualRef, {
         started: false,
         remainingDeck: [],
+        remainingCount: 0,
         currentCard: null,
         activeEffect: null,
         pendingDeathrattle: null,

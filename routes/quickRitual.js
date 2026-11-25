@@ -160,6 +160,7 @@ router.post('/game/quick-ritual/start', asyncHandler(async (req, res) => {
       .collection('ritual').doc('state').set({
         started:            true,
         remainingDeck:      deck,
+        remainingCount: deck.length,
         currentCard:        null,
         activeEffect:       null,
         pendingDeathrattle: null,
