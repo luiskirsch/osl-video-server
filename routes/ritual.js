@@ -837,6 +837,38 @@ router.post("/game/ritual/resolve-effect", asyncHandler(async (req, res) => {
   return res.json({ ok: true });
 }));
 
+// Conclui somente a missão privada do titular na sessão ativa.
+router.post("/game/ritual/complete-mission", asyncHandler(async (req, res) => {
+  const { roomId, sessionId, missionId, firebaseIdToken } = req.body || {};
+  if (![roomId, sessionId, missionId].every(id =>
+    typeof id === "string" && id.length > 0 && id.length <= 200 && !id.includes("/"))) {
+    return sendError(res, 400, "MISSAO_INVALIDA");
+  }
+  const db = getDb();
+  if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
+  const uid = await uidFromFirebaseToken(firebaseIdToken);
+  if (!uid) return sendError(res, 403, "PARTICIPANTE_NAO_AUTORIZADO");
+  const room = db.collection("salas").doc(roomId);
+  const assignment = room.collection("missions").doc(uid);
+  const session = room.collection("sessions").doc(sessionId);
+  const event = session.collection("events").doc();
+  const outcome = await db.runTransaction(async tx => {
+    const [member, active, mission] = await tx.getAll(room.collection("players").doc(uid), room, assignment);
+    if (!member.exists) return "PARTICIPANTE_NAO_AUTORIZADO";
+    const data = mission.data();
+    if (active.get("currentSessionId") !== sessionId || data?.sessionId !== sessionId || data?.missionId !== missionId) {
+      return "MISSAO_ALTERADA";
+    }
+    if (data.status === "completed") return "ok";
+    tx.update(assignment, { status: "completed", completedBy: uid, completedAt: Date.now() });
+    tx.create(event, { type: "MISSION_COMPLETED", actor: uid, ts: admin.firestore.FieldValue.serverTimestamp(),
+      payload: { missionId, nickname: resolvedPlayerName(roomId, uid, member.get("name")) } });
+    return "ok";
+  });
+  if (outcome !== "ok") return sendError(res, outcome === "MISSAO_ALTERADA" ? 409 : 403, outcome);
+  return res.json({ ok: true });
+}));
+
 // ── POST /game/session/log-event ─────────────────────────────────────────────
 // Eventos gerados pelo cliente com allowlist estrita. Não substitui logs server-side.
 const CLIENT_LOGGABLE_EVENTS = new Set(["PLAYER_LEFT", "MISSION_COMPLETED"]);
