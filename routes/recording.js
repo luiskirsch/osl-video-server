@@ -82,7 +82,7 @@ router.get("/token", asyncHandler(async (req, res) => {
   }
 
   const token = await generateLiveKitToken(room, user);
-  return res.json({ ok: true, token });
+  return res.json({ ok: true, token, url: LIVEKIT_URL });
 }));
 
 // GET /recording/pass/:email — verifica passe mensal ativo (requer Firebase auth com email correspondente)
