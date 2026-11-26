@@ -35,7 +35,7 @@ async function approvedGamePayment(ref) {
   const db = require("./firestore").getDb();
   if (!db) return null;
   const receipt = (await db.collection("processed_payments").doc(ref).get()).data();
-  if (!["gravacao-download", "segunda-chance"].includes(receipt?.produto) || !receipt.sessionId || !receipt.roomId || !receipt.email) return null;
+  if (!["gravacao-download", "segunda-chance", "carta-bloqueada", "carta-final"].includes(receipt?.produto) || !receipt.sessionId || !receipt.roomId || !receipt.email) return null;
   return { ...receipt, approved: true, status: "approved" };
 }
 

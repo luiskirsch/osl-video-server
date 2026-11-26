@@ -97,7 +97,7 @@ test("a delayed checkout selects its own session even after another match ends",
   assert.equal(await sessionRecording.attachPurchase("SALA", { ...payment, sessionId: "unknown" }), null);
 });
 
-test("scoped recording payment survives a process restart", async t => {
+test("session purchases survive a process restart", async t => {
   const ref = "OSL-1234567890123-112233AABB";
   const receipt = { ref, produto: "gravacao-download", roomId: "SALA", sessionId: "first", email: "host@example.test" };
   t.mock.method(firestore, "getDb", () => ({
@@ -107,7 +107,12 @@ test("scoped recording payment survives a process restart", async t => {
     },
   }));
   const { approvedGamePayment } = require("../services/payments");
-  assert.deepEqual(await approvedGamePayment(ref), { ...receipt, approved: true, status: "approved" });
+  for (const product of ["gravacao-download", "segunda-chance", "carta-bloqueada", "carta-final"]) {
+    receipt.produto = product;
+    assert.deepEqual(await approvedGamePayment(ref), { ...receipt, approved: true, status: "approved" });
+  }
+  receipt.sessionId = "";
+  assert.equal(await approvedGamePayment(ref), null);
   assert.equal(await approvedGamePayment("invalid/path"), null);
 });
 
