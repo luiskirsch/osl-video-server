@@ -381,6 +381,17 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
   const db = getDb();
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
+  const purchase = req.body.purchase;
+  let buyer = null;
+  if (purchase !== undefined) {
+    if (!purchase || !["carta-final", "carta-bloqueada"].includes(purchase.product) ||
+        typeof purchase.ref !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(purchase.ref) ||
+        typeof purchase.sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(purchase.sessionId)) {
+      return sendError(res, 400, "COMPRA_INVALIDA");
+    }
+    buyer = await require("../services/auth").verifyFirebaseToken(req, res);
+    if (!buyer) return;
+  }
   const players = sanitizePlayers(rawPlayers);
   const ritualRef = db.collection("salas").doc(roomId).collection("ritual").doc("state");
   const commandRef = ritualRef.collection("commands").doc(commandId);
@@ -396,6 +407,22 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
       tx.get(ritualRef),
     ]);
 
+    let receiptRef;
+    if (purchase) {
+      receiptRef = db.collection("processed_payments").doc(purchase.ref);
+      const [receipt, host] = await tx.getAll(receiptRef, db.collection("salas").doc(roomId));
+      const paid = receipt.data();
+      const email = String(req.verifiedFirebaseToken?.email || "").trim().toLowerCase();
+      if (!email || host.data()?.hostId !== buyer || paid?.email !== email ||
+          paid.produto !== purchase.product || paid.roomId !== roomId || paid.sessionId !== purchase.sessionId) {
+        return { status: "invalid-purchase" };
+      }
+      if (paid.redeemedAt) return { status: "replayed", response: { ok: true, sessionId: paid.sessionId } };
+      if (ritualSnap.data()?.sessionId !== purchase.sessionId) return { status: "not-started" };
+      if (commandSnap.exists) return { status: "command-reused" };
+      const effect = ritualSnap.data()?.activeEffect;
+      if (effect && !effect.resolved) return { status: "effect-active" };
+    }
     if (commandSnap.exists) {
       const previous = commandSnap.data() || {};
       const currentSessionId = String(ritualSnap.data()?.sessionId || "").trim() || null;
@@ -421,7 +448,10 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
     const deck = Array.isArray(data.remainingDeck) ? [...data.remainingDeck] : [];
     if (!deck.length) return { status: "empty-deck", currentCount };
 
-    const card = deck.shift();
+    const card = purchase?.product === "carta-final"
+      ? { id: "revelacao-final", title: "Revelação final", type: "Ritual",
+          text: "Qual gesto de outra pessoa nesta mesa mudou sua experiência hoje? Conte o que percebeu. Quem preferir pode passar." }
+      : deck.shift();
     const cardsRevealedCount = currentCount + 1;
     if (!effectsMapPromise) effectsMapPromise = contentEngine.getCardEffectsMap();
     const effectsMap = await effectsMapPromise;
@@ -465,6 +495,7 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
       updatedAt: now,
       updatedBy: "server",
     }, { merge: true });
+    if (receiptRef) tx.update(receiptRef, { redeemedAt: now, commandId });
     tx.create(commandRef, {
       type: "ritual.next-card",
       commandId,
@@ -526,6 +557,8 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
     return { status: "applied", response, eventPayload };
   });
 
+  if (outcome.status === "invalid-purchase") return sendError(res, 403, "COMPRA_NAO_CONFIRMADA_PARA_SESSAO");
+  if (outcome.status === "effect-active") return sendError(res, 409, "EFEITO_ATIVO");
   if (outcome.status === "not-started") return sendError(res, 404, "RITUAL_NAO_INICIADO");
   if (outcome.status === "empty-deck") {
     return res.status(409).json({ ok: false, error: "DECK_VAZIO", cardsRevealedCount: outcome.currentCount });
