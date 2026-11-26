@@ -11,6 +11,12 @@ function stagingAccess(req, res, next) {
   if (req.path === "/health" && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(remote)
       && !req.headers["x-forwarded-for"] && !req.headers["x-forwarded-proto"]) return next();
   if (hasStagingAccess(req)) return next();
+  if (process.env.STAGING_MP_WEBHOOK === "1" && require("../config").IS_GAME_SERVICE &&
+      req.method === "POST" && req.path === "/webhook") {
+    const paymentId = req.query?.["data.id"];
+    if (typeof paymentId === "string" && /^\d+$/.test(paymentId) &&
+        require("../services/mpWebhookSignature").verifyMercadoPagoSignature(req, paymentId).verified) return next();
+  }
   res.setHeader("Cache-Control", "no-store");
   return res.status(401).json({ ok: false, error: "STAGING_AUTH_REQUIRED" });
 }
