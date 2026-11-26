@@ -96,7 +96,7 @@ async function generateSpectatorToken(room, user) {
 
 async function startRoomRecording(roomId, type, ref, email, sessionId = null) {
   if (!egressClient)              throw new Error("EGRESS_CLIENT_NOT_CONFIGURED");
-  if (!S3_ACCESS_KEY || !S3_BUCKET) throw new Error("S3_NOT_CONFIGURED");
+  if (!S3_ACCESS_KEY || !S3_SECRET_KEY || !S3_BUCKET) throw new Error("S3_NOT_CONFIGURED");
 
   if (activeRecordings.has(roomId) || recordingStartsInFlight.has(roomId)) {
     throw new Error("GRAVACAO_JA_ATIVA");
@@ -105,12 +105,6 @@ async function startRoomRecording(roomId, type, ref, email, sessionId = null) {
 
   const ts       = Date.now();
   const filepath = `recordings/${roomId}/${ts}-${type}.mp4`;
-  const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
-
-  // SDK v2: startWebEgress(url, output, opts). O formato antigo (opções e
-  // fileOutputs num objeto só, no lugar do output) era recusado pela LiveKit
-  // com "request has missing or invalid field: output" — a gravação nunca
-  // chegava a começar. Layout vertical 1080x1920 (recording-layout.html).
   const { EncodedFileOutput, EncodedFileType, S3Upload, EncodingOptions } = require("livekit-server-sdk");
   const s3 = recordingS3Config();
   const file = new EncodedFileOutput({
@@ -126,10 +120,11 @@ async function startRoomRecording(roomId, type, ref, email, sessionId = null) {
   });
   let egress;
   try {
-    egress = await egressClient.startWebEgress(layoutUrl, { file }, {
+    egress = await egressClient.startRoomCompositeEgress(roomId, { file }, {
+      layout: roomId,
+      customBaseUrl: RECORDING_LAYOUT_URL,
       audioOnly: false,
       videoOnly: false,
-      awaitStartSignal: false,
       encodingOptions: new EncodingOptions({ width: 1080, height: 1920, framerate: 30, videoBitrate: 3000, audioBitrate: 128 }),
     });
   } finally {
@@ -269,9 +264,10 @@ async function startRoomStreaming(roomId, platforms, layoutId = "cards") {
 
   try {
     if (layout === "cards") {
-      // Web Egress com layout HTML custom (recording-layout.html)
-      const layoutUrl = `${RECORDING_LAYOUT_URL}?room=${encodeURIComponent(roomId)}`;
-      egress = await egressClient.startWebEgress(layoutUrl, streamOutput);
+      egress = await egressClient.startRoomCompositeEgress(roomId, streamOutput, {
+        layout: roomId,
+        customBaseUrl: RECORDING_LAYOUT_URL,
+      });
     } else if (LIVEKIT_BUILTIN_LAYOUTS[layout]) {
       // Room Composite Egress com layout built-in LiveKit (single-speaker, grid)
       egress = await egressClient.startRoomCompositeEgress(
