@@ -270,3 +270,45 @@ test("recording follows the game session only: the lobby video does not keep it 
   assert.deepEqual(stops, ["SESS1"]);
 
 });
+
+test("client retry and session end wait for a recorder still opening", async t => {
+  const { activeRecordings, panelRooms } = require("../game/state");
+  const webrtc = require("../video/webrtc");
+  const config = require("../config");
+  const roomId = "QA-OPENING";
+  const job = { egressId: "EG_OPENING" };
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const original = { S3_ACCESS_KEY: config.S3_ACCESS_KEY, S3_SECRET_KEY: config.S3_SECRET_KEY, S3_BUCKET: config.S3_BUCKET };
+  Object.assign(config, { S3_ACCESS_KEY: "test", S3_SECRET_KEY: "test", S3_BUCKET: "test" });
+  const originalClient = webrtc.egressClient;
+  webrtc.egressClient = {};
+  panelRooms.set(roomId, { sessionActive: true });
+  t.after(() => {
+    Object.assign(config, original);
+    webrtc.egressClient = originalClient;
+    panelRooms.delete(roomId);
+    activeRecordings.delete(roomId);
+  });
+  t.mock.method(firestore, "getDb", () => null);
+  const start = t.mock.method(webrtc, "startRoomRecording", async () => {
+    started.resolve();
+    await release.promise;
+    activeRecordings.set(roomId, job);
+    return job;
+  });
+  const stop = t.mock.method(webrtc, "stopRoomRecording", async () => {
+    activeRecordings.delete(roomId);
+    return job;
+  });
+  const first = sessionRecording.ensureSessionRecording(roomId);
+  await started.promise;
+  const retry = sessionRecording.ensureSessionRecording(roomId);
+  panelRooms.get(roomId).sessionActive = false;
+  const end = sessionRecording.endSessionRecording(roomId);
+  release.resolve();
+  assert.deepEqual(await Promise.all([first, retry, end]), [job, job, job]);
+  assert.equal(start.mock.callCount(), 1);
+  assert.equal(stop.mock.callCount(), 1);
+  assert.equal(activeRecordings.has(roomId), false);
+});

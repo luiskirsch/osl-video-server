@@ -155,9 +155,25 @@ function storageConfigured() {
   return !!(S3_ACCESS_KEY && S3_SECRET_KEY && S3_BUCKET);
 }
 
+// LiveKit can still be opening the recorder when the client requests it
+// again or the host ends the game. Process these events in room order.
+const roomOperations = new Map();
+function inRoomOrder(roomId, operation) {
+  const previous = roomOperations.get(roomId) || Promise.resolve();
+  const current = previous.then(operation, operation).finally(() => {
+    if (roomOperations.get(roomId) === current) roomOperations.delete(roomId);
+  });
+  roomOperations.set(roomId, current);
+  return current;
+}
+
 // Garante que a sessão está sendo gravada. Nunca lança: falha de gravação não
 // pode derrubar a partida; fica registrada no log.
-async function ensureSessionRecording(roomId, reason = "session") {
+function ensureSessionRecording(roomId, reason = "session") {
+  return inRoomOrder(roomId, () => startSessionRecording(roomId, reason));
+}
+
+async function startSessionRecording(roomId, reason) {
   const { activeRecordings } = require("../game/state");
   if (activeRecordings.has(roomId)) return activeRecordings.get(roomId);
   const { egressClient, startRoomRecording } = require("../video/webrtc");
@@ -181,16 +197,18 @@ async function ensureSessionRecording(roomId, reason = "session") {
 // Encerra a gravação no fim da sessão do jogo (o vídeo pode seguir no lobby).
 async function endSessionRecording(roomId) {
   const { activeRecordings, panelRooms } = require("../game/state");
-  if (!activeRecordings.has(roomId)) return null;
   const room = panelRooms.get(roomId);
   if (room && room.sessionActive) return null;
-  try {
-    const { stopRoomRecording } = require("../video/webrtc");
-    return await stopRoomRecording(roomId);
-  } catch (error) {
-    logError("session_recording_stop_error", error, { roomId });
-    return null;
-  }
+  return inRoomOrder(roomId, async () => {
+    if (!activeRecordings.has(roomId)) return null;
+    try {
+      const { stopRoomRecording } = require("../video/webrtc");
+      return await stopRoomRecording(roomId);
+    } catch (error) {
+      logError("session_recording_stop_error", error, { roomId });
+      return null;
+    }
+  });
 }
 
 module.exports = {
