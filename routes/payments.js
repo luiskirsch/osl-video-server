@@ -108,7 +108,9 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   const produtoInput  = String(req.body?.produto || "").trim();
   const roomIdInput   = String(req.body?.roomId  || "").trim().toUpperCase();
 
-  const sessionId = ["gravacao-download", "segunda-chance"].includes(produtoInput) ? req.body?.sessionId : undefined;
+  const cartaDaMesa = ["carta-bloqueada", "carta-final"].includes(produtoInput);
+  const compraDaMesa = cartaDaMesa || ["gravacao-download", "segunda-chance"].includes(produtoInput);
+  const sessionId = compraDaMesa ? req.body?.sessionId : undefined;
   if (sessionId !== undefined && (!/^[A-Z0-9_-]{1,128}$/.test(roomIdInput) || typeof sessionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId))) {
     return sendError(res, 400, "SESSAO_INVALIDA");
   }
@@ -124,10 +126,13 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
     const room = db.collection("salas").doc(roomIdInput);
     const [host, state] = await db.getAll(room, room.collection("ritual").doc("state"));
     if (host.data()?.hostId !== uid) return sendError(res, 403, "ANFITRIAO_NAO_AUTORIZADO");
-    if (produtoInput === "segunda-chance") {
+    if (produtoInput !== "gravacao-download") {
       const ritual = state.data();
       if (!ritual?.started || ritual.sessionId !== sessionId) return sendError(res, 409, "SESSAO_ENCERRADA");
-      if (!Array.isArray(ritual.remainingDeck) || ritual.remainingDeck.length) return sendError(res, 409, "DECK_AINDA_TEM_CARTAS");
+      if (produtoInput === "segunda-chance" && (!Array.isArray(ritual.remainingDeck) || ritual.remainingDeck.length)) {
+        return sendError(res, 409, "DECK_AINDA_TEM_CARTAS");
+      }
+      if (cartaDaMesa && !ritual.remainingDeck?.length) return sendError(res, 409, "DECK_ESGOTADO");
     } else {
       const recording = require("../services/sessionRecording");
       const files = await recording.listForRoom(roomIdInput, { sessionId });
