@@ -355,7 +355,7 @@ router.post("/game/ritual/start", asyncHandler(async (req, res) => {
 }));
 
 // ── POST /game/ritual/next-card ───────────────────────────────────────────────
-router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
+router.post(["/game/ritual/next-card", "/game/ritual/redeem-card"], asyncHandler(async (req, res) => {
   const {
     roomId,
     hostToken,
@@ -382,6 +382,9 @@ router.post("/game/ritual/next-card", asyncHandler(async (req, res) => {
   if (!db) return sendError(res, 503, "DB_INDISPONIVEL");
 
   const purchase = req.body.purchase;
+  if ((req.path === "/game/ritual/redeem-card") !== (purchase !== undefined)) {
+    return sendError(res, 400, "COMPRA_INVALIDA");
+  }
   let buyer = null;
   if (purchase !== undefined) {
     if (!purchase || !["carta-final", "carta-bloqueada"].includes(purchase.product) ||
