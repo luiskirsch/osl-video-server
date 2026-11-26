@@ -34,6 +34,15 @@ function fakeDb(seed = {}) {
   });
   return {
     collections,
+    async runTransaction(action) {
+      const writes = [];
+      const result = await action({
+        get: query => query.get(),
+        update: (doc, data) => writes.push(() => doc.set(data, { merge: true })),
+      });
+      for (const write of writes) await write();
+      return result;
+    },
     collection(name) { return { doc: id => ref(name, id), ...query(name) }; },
     batch() { const ops = []; return { delete: r => ops.push(r), async commit() { for (const r of ops) await r.delete(); } }; },
   };

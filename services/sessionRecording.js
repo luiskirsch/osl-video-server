@@ -73,13 +73,14 @@ function recordStopped(job, { now = Date.now() } = {}) {
   }, { merge: true }).catch(error => logError("session_recording_update_error", error, { egressId: job.egressId }));
 }
 
-async function listForRoom(roomId, { limit = 50, sessionId = null } = {}) {
+async function listForRoom(roomId, { limit = 50, sessionId = null, transaction = null } = {}) {
   const db = getDb();
   if (!db) return [];
   // Igualdade em roomId sem orderBy: não exige índice composto; ordena aqui.
   let query = db.collection(COLLECTION).where("roomId", "==", roomId);
   if (sessionId) query = query.where("sessionId", "==", sessionId);
-  const snap = await query.limit(limit).get();
+  query = query.limit(limit);
+  const snap = transaction ? await transaction.get(query) : await query.get();
   return snap.docs
     .map(doc => ({ ref: doc.ref, ...doc.data() }))
     .sort((a, b) => (b.startedAtMs || 0) - (a.startedAtMs || 0));
@@ -89,25 +90,33 @@ async function listForRoom(roomId, { limit = 50, sessionId = null } = {}) {
 // sala que ainda não expirou e estende o prazo para 7 dias. Idempotente para a
 // mesma referência de pagamento.
 async function attachPurchase(roomId, { ref, sessionId = null, now = Date.now() } = {}) {
-  const items = await listForRoom(roomId, { sessionId });
-  const target = items.find(r =>
-    r.status !== "recording" && (r.expiresAtMs || 0) > now &&
-    (!isPurchased(r.type) || (ref && r.purchasedRef === ref)));
-  if (!target) return null;
-  if (isPurchased(target.type) && target.purchasedRef === ref) return target;
-  const update = { type: "gravacao-download", purchasedRef: ref || null, purchasedAtMs: now, expiresAtMs: now + PURCHASED_RETENTION_MS };
-  await target.ref.set(update, { merge: true });
-  return { ...target, ...update };
+  const db = getDb();
+  if (!db) return null;
+  return db.runTransaction(async transaction => {
+    const items = await listForRoom(roomId, { sessionId, transaction });
+    const target = items.find(r =>
+      r.status !== "recording" && (r.expiresAtMs || 0) > now &&
+      (!isPurchased(r.type) || (ref && r.purchasedRef === ref)));
+    if (!target) return null;
+    if (isPurchased(target.type) && target.purchasedRef === ref) return target;
+    const update = { type: "gravacao-download", purchasedRef: ref || null, purchasedAtMs: now, expiresAtMs: now + PURCHASED_RETENTION_MS };
+    transaction.update(target.ref, update);
+    return { ...target, ...update };
+  });
 }
 
 // "Sair sem salvar" depois que a partida já terminou: apaga em minutos.
 async function expireLatestUnpurchased(roomId, { now = Date.now(), sessionId = null } = {}) {
-  const items = await listForRoom(roomId, { sessionId });
-  const target = items.find(r => r.status !== "recording" && !isPurchased(r.type) && (r.expiresAtMs || 0) > now);
-  if (!target) return null;
-  const expiresAtMs = Math.min(target.expiresAtMs, now + DECLINED_GRACE_MS);
-  await target.ref.set({ expiresAtMs, declinedAtMs: now }, { merge: true });
-  return { ...target, expiresAtMs };
+  const db = getDb();
+  if (!db) return null;
+  return db.runTransaction(async transaction => {
+    const items = await listForRoom(roomId, { sessionId, transaction });
+    const target = items.find(r => r.status !== "recording" && !isPurchased(r.type) && (r.expiresAtMs || 0) > now);
+    if (!target) return null;
+    const expiresAtMs = Math.min(target.expiresAtMs, now + DECLINED_GRACE_MS);
+    transaction.update(target.ref, { expiresAtMs, declinedAtMs: now });
+    return { ...target, expiresAtMs };
+  });
 }
 
 // Após um reinício: devolve ao mapa as gravações cujo egress segue ativo e
