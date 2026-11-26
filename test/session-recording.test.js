@@ -211,6 +211,23 @@ test("cleanup deletes due recordings (video + manifest) and old orphans, never o
   assert.deepEqual(result, { registros: 1, arquivos: 3 });
 });
 
+test("cleanup retries partial storage deletions before removing the recording record", async () => {
+  const db = fakeDb({
+    "session_recordings/EG_RETRY": { egressId: "EG_RETRY", filepath: "recordings/A/test.mp4", status: "stopped", expiresAtMs: 1 },
+  });
+  let attempts = 0;
+  const s3 = { async send(command) {
+    if (!command.input.Delete) return {};
+    attempts++;
+    return attempts === 1 ? { Errors: [{ Key: "recordings/A/test.mp4", Code: "InternalError" }] } : {};
+  } };
+  const options = { db, s3, bucket: "teste", now: 2 };
+  assert.equal((await runSessionRecordingCleanup(options)).registros, 0);
+  assert.ok(db.collections.get("session_recordings").has("EG_RETRY"));
+  assert.equal((await runSessionRecordingCleanup(options)).registros, 1);
+  assert.equal(attempts, 2);
+});
+
 test("backup can live under a prefix of a shared bucket; callers see unprefixed keys", async t => {
   const backup = require("../services/backup");
   const { S3Client } = require("@aws-sdk/client-s3");

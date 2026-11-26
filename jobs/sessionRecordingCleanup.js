@@ -29,9 +29,10 @@ async function runSessionRecordingCleanup({
   const { DeleteObjectsCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
   const removeKeys = async keys => {
     for (let i = 0; i < keys.length; i += 1000) {
-      await s3.send(new DeleteObjectsCommand({
+      const response = await s3.send(new DeleteObjectsCommand({
         Bucket: bucket, Delete: { Objects: keys.slice(i, i + 1000).map(Key => ({ Key })), Quiet: true },
       }));
+      if (response.Errors?.length) throw new Error("R2_EXCLUSAO_PARCIAL");
     }
   };
   // O egress também grava um manifesto <egressId>.json ao lado do vídeo.
