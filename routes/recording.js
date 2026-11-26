@@ -205,6 +205,7 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
           hint: "O egress da LiveKit continua ativo. Aguarde alguns segundos e tente parar novamente."
         });
       }
+      if (!completed?.downloadUrl) return sendError(res, 503, "GRAVACAO_AINDA_INDISPONIVEL");
       return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
     } catch (err) {
       logError("recording_claim_stop_error", err, { roomId });
@@ -214,7 +215,11 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
 
   const completed = completedRecordings.get(roomId);
   if (!sessionId && completed && completed.ref === ref && completed.email === callerEmail) {
-    return res.json({ ok: true, downloadUrl: completed.downloadUrl, type: completed.type });
+    const remaining = Math.floor((completed.completedAt + sessionRecording.PURCHASED_RETENTION_MS - Date.now()) / 1000);
+    if (remaining < 1) return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");
+    const downloadUrl = await recordingDownloadUrl(completed.filepath, remaining).catch(() => null);
+    if (!downloadUrl) return sendError(res, 503, "GRAVACAO_AINDA_INDISPONIVEL");
+    return res.json({ ok: true, downloadUrl, type: completed.type });
   }
 
   // A partida já terminou (gravação parada, ainda dentro da folga de 1h): a
@@ -226,6 +231,7 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
       logInfo("recording_purchase_attached", { roomId, egressId: attached.egressId });
       return res.json({ ok: true, downloadUrl, type: "gravacao-download" });
     }
+    return sendError(res, 503, "GRAVACAO_AINDA_INDISPONIVEL");
   }
 
   return sendError(res, 404, "GRAVACAO_NAO_ENCONTRADA");

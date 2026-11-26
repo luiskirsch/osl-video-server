@@ -53,10 +53,14 @@ function recordingS3Client() {
 async function recordingDownloadUrl(filepath, expiresInSeconds = DOWNLOAD_URL_MAX_SECONDS) {
   const client = recordingS3Client();
   if (!client || !filepath) return null;
-  const { GetObjectCommand } = require("@aws-sdk/client-s3");
+  const { HeadObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
   const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-  const expiresIn = Math.max(60, Math.min(DOWNLOAD_URL_MAX_SECONDS, Math.floor(expiresInSeconds)));
-  return getSignedUrl(client, new GetObjectCommand({ Bucket: S3_BUCKET, Key: filepath }), { expiresIn });
+  const expiresIn = Math.min(DOWNLOAD_URL_MAX_SECONDS, Math.floor(expiresInSeconds));
+  if (expiresIn < 1) return null;
+  const object = { Bucket: S3_BUCKET, Key: filepath };
+  const metadata = await client.send(new HeadObjectCommand(object));
+  if (!(metadata.ContentLength > 0)) return null;
+  return getSignedUrl(client, new GetObjectCommand(object), { expiresIn });
 }
 
 // --- Token LiveKit para WebRTC ---
