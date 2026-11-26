@@ -72,6 +72,7 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
   if (!nome)  return sendError(res, 400, "NOME_OBRIGATORIO");
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return sendError(res, 400, "EMAIL_INVALIDO");
 
+  let recordingExpiresAt;
   if (sessionId) {
     const uid = await verifyFirebaseToken(req, res);
     if (!uid) return;
@@ -90,9 +91,11 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
     } else {
       const recording = require("../services/sessionRecording");
       const files = await recording.listForRoom(roomIdInput, { sessionId });
-      if (!files.some(file => file.filepath && file.expiresAtMs > Date.now() && !recording.isPurchased(file.type))) {
+      const file = files.find(file => file.filepath && file.expiresAtMs > Date.now() && !recording.isPurchased(file.type));
+      if (!file) {
         return sendError(res, 409, "GRAVACAO_INDISPONIVEL");
       }
+      recordingExpiresAt = new Date(Math.floor(file.expiresAtMs / 1000) * 1000).toISOString();
     }
   }
 
@@ -135,6 +138,7 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
       ...(sessionId ? { session_id: sessionId } : {})
     },
     external_reference: externalReference,
+    ...(recordingExpiresAt ? { expires: true, expiration_date_from: new Date().toISOString(), expiration_date_to: recordingExpiresAt } : {}),
     notification_url: `${BACKEND_BASE_URL}/webhook`,
     back_urls: {
       success: `${FRONTEND_BASE_URL}/sucesso.html`,
@@ -158,6 +162,14 @@ router.post("/criar-pagamento", paymentLimiter, asyncHandler(async (req, res) =>
     });
   }
 
+  if (recordingExpiresAt) {
+    if (!data.expires || Date.parse(data.expiration_date_to) !== Date.parse(recordingExpiresAt)) {
+      return sendError(res, 502, "PRAZO_CHECKOUT_NAO_CONFIRMADO");
+    }
+    await getDb().collection("recording_checkouts").doc(externalReference).create({
+      uid: req.firebaseUid, email, roomId: roomIdInput, sessionId, price: productPrice, currency: PRODUCT_CURRENCY
+    });
+  }
   if (referralData) {
     await registerPendingReferral({
       paymentId: "", externalReference,
@@ -178,9 +190,9 @@ router.get("/status-pagamento/:ref", async (req, res) => {
     const ref = String(req.params.ref || "").trim();
     if (!ref) return sendError(res, 400, "REF_OBRIGATORIA");
 
-    const pagamento = await approvedGamePayment(ref);
+    const pagamento = await approvedGamePayment(ref, req.verifiedFirebaseToken);
     if (!pagamento) return res.json({ ok: true, found: false, approved: false });
-    const callerEmail = normalizeEmail(req.firebaseUser?.email);
+    const callerEmail = normalizeEmail(req.verifiedFirebaseToken?.email);
     if (!callerEmail || (pagamento.email && normalizeEmail(pagamento.email) !== callerEmail)) {
       return sendError(res, 403, "PAGAMENTO_DE_OUTRA_CONTA");
     }
@@ -246,13 +258,16 @@ router.post("/webhook", asyncHandler(async (req, res) => {
 
     if (!response.ok) {
       logWarn("mercado_pago_webhook_lookup_failed", { payment });
-      return res.sendStatus(200);
+      return res.sendStatus(response.status === 429 || response.status >= 500 ? 503 : 200);
     }
 
     const status = String(payment.status || "").trim();
     const ref    = String(payment.external_reference || "").trim();
 
     if (status === "approved" && ref) {
+      if (payment.metadata?.product_id === "gravacao-download" && payment.metadata.room_id && payment.metadata.session_id) {
+        await require("../services/sessionRecording").attachPurchase(payment.metadata.room_id, { ref, sessionId: payment.metadata.session_id });
+      }
       // Idempotência camada 1 (in-memory): sobrevive a replays dentro do mesmo processo.
       const existing = pagamentosAprovados.get(ref);
       if (existing && existing.paymentId === String(payment.id)) {

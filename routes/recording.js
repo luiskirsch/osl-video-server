@@ -174,7 +174,7 @@ router.post("/recording/claim", asyncHandler(async (req, res) => {
   if (!callerEmail) return sendError(res, 401, "TOKEN_SEM_EMAIL");
   if (!ref)    return sendError(res, 400, "REF_OBRIGATORIO");
 
-  const pag = await approvedGamePayment(ref);
+  const pag = await approvedGamePayment(ref, decoded);
   if (!pag || !pag.approved) return sendError(res, 402, "PAGAMENTO_NAO_CONFIRMADO");
   if (pag.email && callerEmail && pag.email !== callerEmail) return sendError(res, 403, "EMAIL_NAO_CORRESPONDE");
   if (pag.produto !== "gravacao-download") return sendError(res, 400, "PRODUTO_NAO_E_GRAVACAO");
